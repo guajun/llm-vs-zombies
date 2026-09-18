@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LLM vs Zombies event envelope v1",
+  "type": "object",
+  "required": ["schema_version", "run_id", "seq", "segment", "tick", "phase", "kind", "payload"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string"},
+    "seq": {"type": "integer", "minimum": 0},
+    "segment": {"type": "integer", "minimum": 0},
+    "tick": {"type": "integer", "minimum": 0},
+    "phase": {"type": "string"},
+    "kind": {"type": "string"},
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false
+}

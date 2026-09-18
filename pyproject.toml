@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-vs-zombies"
+version = "0.1.0"
+description = "AvZ experiment recording and offline state review"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+lvz = "llm_vs_zombies.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

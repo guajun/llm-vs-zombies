@@ -1,0 +1,15 @@
+{
+  "scenario": "liangyi-official-example",
+  "state_interval_ticks": 10,
+  "ticks_per_game_second": 100,
+  "observation_mode": "full_memory",
+  "target_waves": 20,
+  "end_condition": "manual; target_waves is descriptive, not yet enforced",
+  "allow_rerecord": false,
+  "zombie_generation": "game_default; recorder does not call ASetZombies",
+  "game_rng_seed": null,
+  "rng_control": "not_implemented",
+  "recording_mode": "sampled_state_and_logged_actions",
+  "scenario_save": "experiments/scenarios/liangyi/game1_13.dat",
+  "notes": "Reference save must be loaded and scene verified separately. No automatic save replacement."
+}

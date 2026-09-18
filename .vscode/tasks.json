@@ -1,0 +1,8 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label": "Build AvZ recorder", "type": "shell", "command": "powershell", "args": ["-NoProfile", "-File", "${workspaceFolder}/tools/build-avz.ps1"], "group": "build", "problemMatcher": []},
+    {"label": "Check project dependencies", "type": "shell", "command": "powershell", "args": ["-NoProfile", "-File", "${workspaceFolder}/tools/lvz.ps1", "doctor"], "problemMatcher": []},
+    {"label": "Create review demo", "type": "shell", "command": "powershell", "args": ["-NoProfile", "-File", "${workspaceFolder}/tools/lvz.ps1", "demo"], "problemMatcher": []}
+  ]
+}

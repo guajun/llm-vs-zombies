@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+work/
+third_party/
+game/original/
+avz/runtime/
+experiments/runs/*/
+!experiments/runs/.gitkeep
+experiments/scenarios/**/*.dat
+*.dmp
+.env
+.env.*
+!.env.example
+*.egg-info/

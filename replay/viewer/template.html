@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LLM vs Zombies · 实验复盘</title>
+<style>
+:root{color-scheme:dark;font:15px/1.6 system-ui,sans-serif;background:#111a22;color:#e5eced}body{max-width:1100px;margin:30px auto;padding:0 24px}h1{font-size:26px;margin:0}small,.muted{color:#9db0bd}.panel{border:1px solid #34444e;border-radius:12px;padding:18px;margin:18px 0;background:#18242e}.controls{display:flex;gap:12px;align-items:center}input[type=range]{flex:1}button,select{background:#263d4a;color:#fff;border:1px solid #526974;border-radius:6px;padding:8px 14px}canvas{width:100%;border-radius:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:290px;overflow:auto;font-size:12px}.badge{display:inline-block;padding:3px 10px;border-radius:20px;background:#254b4c;color:#c5f5e4}#notice{color:#f0c580}#status{font-variant-numeric:tabular-nums}
+</style>
+<h1>LLM vs Zombies · 实验复盘</h1><p class="muted">按记录状态查看局面、动作和时间线。位置示意图；不是原版像素录像或可接管的游戏回放。</p>
+<span id="label" class="badge"></span><p id="notice"></p>
+<div class="panel"><div class="controls"><button id="play">播放</button><input aria-label="时间线" id="seek" type="range" min="0" value="0"><select aria-label="播放速度" id="speed"><option value="1">1× 游戏时间</option><option value="0.25">0.25×</option><option value="4">4×</option></select></div><p id="status"></p><canvas id="board" width="1000" height="580"></canvas></div>
+<div class="panel"><b>当前采样区间事件</b><pre id="events"></pre></div>
+<details class="panel"><summary>实验元数据与能力边界</summary><pre id="manifest"></pre></details>
+<script id="recording" type="application/json">__RECORDING_JSON__</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('recording').textContent);
+const frames=data.events.filter(e=>e.kind==='state');
+const $=id=>document.getElementById(id), canvas=$('board'),ctx=canvas.getContext('2d');
+$('label').textContent=data.manifest.run_id;
+$('notice').textContent=data.manifest.synthetic?'合成演示数据，用于验证记录与复盘流程；不是实战结果。':'采样状态只覆盖已声明字段；first_observed 事件不保证是实体出生的精确帧。';
+$('manifest').textContent=JSON.stringify(data.manifest,null,2);
+$('seek').max=Math.max(0,frames.length-1);
+const names={8:'小喷',14:'冰',15:'核',16:'叶',20:'辣椒',27:'三叶',30:'南瓜',37:'伞',41:'双子',42:'曾'};
+let index=0,playing=false,timer=null;
+function draw(){
+ const e=frames[index];if(!e){$('status').textContent='没有状态记录';return;}const s=e.payload;
+ $('seek').value=index;$('status').textContent=`片段 ${e.segment} · 帧 ${e.tick} · 波 ${s.wave} · 阳光 ${s.sun} · 样本 ${index+1}/${frames.length}`;
+ ctx.clearRect(0,0,1000,580);const x0=65,y0=45,w=92,h=79;
+ for(let r=1;r<=6;r++){for(let c=1;c<=9;c++){ctx.fillStyle=r===3||r===4?'#244b61':'#2b4c37';ctx.fillRect(x0+(c-1)*w,y0+(r-1)*h,w-2,h-2)}ctx.fillStyle='#bbcdd4';ctx.fillText(String(r),35,y0+(r-.5)*h)}
+ ctx.font='14px system-ui';for(let c=1;c<=9;c++){ctx.fillStyle='#bbcdd4';ctx.fillText(String(c),x0+(c-.5)*w,25)}
+ for(const p of s.plants||[]){const x=x0+(p.col-.5)*w,y=y0+(p.row-.5)*h;ctx.strokeStyle=p.type===30?'#eba953':'#75d69b';ctx.lineWidth=p.type===30?4:2;ctx.beginPath();ctx.arc(x,y,p.type===30?31:24,0,Math.PI*2);ctx.stroke();if(p.type!==30&&p.type!==16){ctx.fillStyle='#edfff2';ctx.fillText(names[p.type]||String(p.type),x-15,y+4)}}
+ for(const z of s.zombies||[]){const x=x0+(z.x-40)/720*(9*w),y=y0+(z.row-.5)*h;ctx.fillStyle=z.freeze>0?'#82d4fc':z.type===32?'#eb7874':'#c3b28b';ctx.fillRect(x-11,y-19,22,38);ctx.font='11px monospace';ctx.fillStyle='#fff';ctx.fillText(`${z.type} / ${z.hp}`,x-20,y-25)}
+ const prev=index?frames[index-1].seq:-1;const end=index===frames.length-1?Infinity:e.seq;const nearby=data.events.filter(x=>x.seq>prev&&x.seq<=end&&x.kind!=='state');
+ $('events').textContent=nearby.length?nearby.map(x=>JSON.stringify(x)).join('\n'):'此区间没有独立事件记录。';
+}
+function stop(){playing=false;clearTimeout(timer);$('play').textContent='播放'}
+function next(){if(!playing)return;if(index>=frames.length-1){stop();return}const a=frames[index],b=frames[index+1];const delta=b.segment===a.segment?Math.max(1,b.tick-a.tick):10;timer=setTimeout(()=>{index++;draw();next()},delta*10/Number($('speed').value))}
+$('play').onclick=()=>{if(playing){stop();return}if(index===frames.length-1)index=0;playing=true;$('play').textContent='暂停';draw();next()};
+$('seek').oninput=()=>{stop();index=Number($('seek').value);draw()};draw();
+</script></html>

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "avz_repository": "https://github.com/vector-wlc/AsmVsZombies",
+  "avz_commit": "c42676c269b5b482a1eb9203a5b979e9d8a2a5c7",
+  "avz_runtime_release": "2.9.2_2026_06_26",
+  "game_source": "D:/pvz/Plants_Vs_Zombies_V1.0.0.1051_EN",
+  "game_declared_version": "English 1.0.0.1051 (source folder name; live verification pending)",
+  "toolchain": {
+    "name": "LLVM-MinGW",
+    "release": "20260908",
+    "target": "i686-w64-mingw32",
+    "archive": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-x86_64.zip",
+    "sha256": "1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6"
+  },
+  "files": [
+    {
+      "path": "game/original/PlantsVsZombies.exe",
+      "sha256": "9397ca2dc3a4560eba5f87aef40fd800786ba0312716729ccbdbda185abee27d",
+      "size": 1885896
+    },
+    {
+      "path": "game/original/PlantsVsZombies.dat",
+      "sha256": "6e60814dcf2ff2a511bf3671d54f641de648d88a4cd5b85b18313b123b40b8fa",
+      "size": 3008753
+    },
+    {
+      "path": "game/original/main.pak",
+      "sha256": "437ac2f28f26a40b957360d6a78f4c7c6d29dbbb210c4ddc58156b04d99fbb35",
+      "size": 25020334
+    },
+    {
+      "path": "game/original/bass.dll",
+      "sha256": "3627adef7e04dd7aa9b8e116d0afc11dcee40d0e09d573210a4f86bdc81a80b6",
+      "size": 92216
+    },
+    {
+      "path": "avz/framework/release/env2/2.9.2_2026_06_26.zip",
+      "sha256": "d7c6ce6874b3111f1d7f5cda4d9511d8c8a040683c49a99463bcc29540c3cfaa",
+      "size": 1682241
+    },
+    {
+      "path": "avz/runtime/bin/injector.exe",
+      "sha256": "fef6d982d679da67e8c729660e843d15ce98998465fdce9f403d1050125b49c0",
+      "size": 1262080
+    },
+    {
+      "path": "experiments/scenarios/liangyi/game1_13.dat",
+      "sha256": "cda0984b9398d244fd47124cf5e5a4ed292f8a45bb00203e887bb165074fe0a1",
+      "size": 333612
+    }
+  ]
+}
