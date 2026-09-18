@@ -140,6 +140,13 @@ def main(argv=None):
     parser.add_argument("--root", type=Path, default=ROOT)
     subs = parser.add_subparsers(dest="command", required=True)
     subs.add_parser("doctor")
+    p = subs.add_parser("repl", help="Audited persistent Python session for a resident game runtime")
+    endpoint = p.add_mutually_exclusive_group(required=True)
+    endpoint.add_argument("--pid", type=int)
+    endpoint.add_argument("--endpoint")
+    p.add_argument("--trace", type=Path, required=True)
+    p.add_argument("--timeout", type=float, default=15.0)
+    p.add_argument("--script", type=Path)
     for command in ("new-run", "demo"):
         p = subs.add_parser(command)
         p.add_argument("--name")
@@ -159,7 +166,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = args.root.resolve()
     try:
-        if args.command == "doctor":
+        if args.command == "repl":
+            from .repl import main as repl_main
+            repl_args = ["--pid", str(args.pid)] if args.pid is not None else ["--endpoint", args.endpoint]
+            repl_args += ["--trace", str(args.trace), "--timeout", str(args.timeout)]
+            if args.script:
+                repl_args += ["--script", str(args.script)]
+            return repl_main(repl_args)
+        elif args.command == "doctor":
             result = doctor(root)
         elif args.command in ("new-run", "demo"):
             config = args.config or root / "experiments/configs/liangyi.json"
