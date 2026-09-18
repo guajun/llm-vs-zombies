@@ -117,10 +117,14 @@ class LiangyiBaseline:
             if kind == PUMPKIN:
                 placed = placed or any(p["hp"] > pending["old_hp"] for p in view.at(grid, PUMPKIN))
             # A mushroom can be destroyed before the next observation. A real
-            # cooldown reset also proves its card was spent; a mere false usable
+            # cooldown starting also proves its card was spent; a mere false usable
             # flag could just mean insufficient sun and is not accepted.
-            current_cd = view.seeds.get(kind, {}).get("cd_raw", pending["old_cd"])
-            spent = current_cd < pending["old_cd"]
+            # Original SeedPacket::Update (0x48728C) counts UP from zero and
+            # resets to zero only when recharged (0x487298).
+            current_seed = view.seeds.get(kind, {})
+            current_cd = current_seed.get("cd_raw", pending["old_cd"])
+            spent = (current_seed.get("usable") is False and type(current_cd) is int and current_cd > 0
+                     and (pending["old_cd"] == 0 or current_cd < pending["old_cd"]))
             if placed or spent:
                 self.confirmed[kind] = self.confirmed.get(kind, 0) + 1
                 if pending["event"] is not None:
@@ -308,11 +312,27 @@ class LiangyiBaseline:
             return sum(self._weight(z) for z in view.zombies if abs(z["row"]-row) <= 1 and left <= z["x"] <= right)
         return sorted(((r, c) for r in rows for c in range(2, 9)), key=lambda g: (-score(g), abs(g[1]-6), g))
 
+    def _emergency_cherry_grids(self, view, target, half=None):
+        # Keep the crowd score, but do not spend an emergency cherry on a
+        # distant crowd that misses the zombie which triggered the response.
+        # 1.0.0.1051 DoSpecial (0x4666A0) uses radius 115. Aim at a conservative
+        # ground-body interior point, not the wider giant envelope used by
+        # the crowd score. In particular, a risen digger's mirrored rectangle
+        # spans x+42..70 (GetZombieRect 0x5320B0), so x+60 is inside it.
+        # This is a placement guard, not a forecast of motion/height at +100cs.
+        x, y = int(target["x"])+60, int(target["y"])+70
+        return [(row, col) for row, col in self._cherry_grids(view, half)
+                if abs(row-target["row"]) <= 1
+                and (80*col-x)**2 + (85*(row-1)+120-y)**2 <= 115**2]
+
     def _doom_grids(self, view, wave):
         preferred = DOOM_PREFERENCE.get(wave, (4 if self.jalapeno_row == 1 else 3, 7))
         if wave == 13:
             preferred = (4 if self.jalapeno_row == 1 else 3, 8)
-        alternatives = [(r, c) for r in (3, 4) for c in (4, 5, 7, 8, 9)]
+        # Keep the primary imitator-ice station usable. A fallback doom there
+        # would destroy its lily and leave an 18,000-tick crater. The planned
+        # w10 (3,4) doom remains intentional; this rule only excludes (4,4).
+        alternatives = [(r, c) for r in (3, 4) for c in (4, 5, 7, 8, 9) if (r, c) != (4, 4)]
         def score(grid):
             row, col = grid
             x = (col-1)*80+80
@@ -368,9 +388,12 @@ class LiangyiBaseline:
         if view.clock < self.recovery_until:
             return {"actions": [], "advance_ticks": min(1, remaining)}
         actions = None
-        balloons = [z for z in view.zombies if z["type"] == 16]
+        # Balloon phases 74/75 are popping/walking; they cannot be blown away.
+        balloons = [z for z in view.zombies if z["type"] == 16 and z.get("state") not in (74, 75)]
         if balloons and min(z["x"] for z in balloons) < 180 and not any(p["type"] == BLOVER for p in view.plants):
-            actions = self._cast(view, BLOVER, self._temporary(view))
+            # The main blow must survive its 51-tick startup. Prefer another
+            # safe cell over placing it inside an existing hammer/crusher.
+            actions = self._cast(view, BLOVER, self._temporary(view), fodder=True)
         if not actions:
             actions = self._repair(view, urgent_only=True)
         if not actions and not self.opening_done and view.wave <= 1:
@@ -382,14 +405,21 @@ class LiangyiBaseline:
         if not actions and urgent and view.clock >= self.hold_until:
             grids = [(z["row"], max(3 if z["row"] in (2, 5) else 1, min(9, int((z["x"]-11)//80)+1))) for z in urgent]
             actions = self._cast(view, SQUASH, grids)
-            if not actions and any(z["x"] < (285 if z["row"] in (2, 5) else 90) and z.get("freeze", 0) < 100 for z in urgent):
+            critical = [z for z in urgent if z["x"] < (285 if z["row"] in (2, 5) else 90) and z.get("freeze", 0) < 100]
+            if not actions and critical:
                 actions = self._cast(view, ICE, self._temporary(view), fodder=True)
                 if not actions:
-                    actions = self._cast(view, CHERRY, self._cherry_grids(view))
+                    actions = self._cast(view, CHERRY, self._emergency_cherry_grids(view, critical[0]))
                 if not actions:
                     row = urgent[0]["row"]
                     actions = self._cast(view, JALAPENO, [g for g in self._temporary(view) if g[0] == row])
-        fast_threats = sorted((z for z in view.zombies if z["type"] not in (16, 23, 32)
+        fast_threats = sorted((z for z in view.zombies if z["type"] not in (23, 32)
+                              and (z["type"] != 16 or z.get("state") == 75)
+                              # ZombieInitialize's 1.0.0.1051 digger branch at
+                              # 0x522C74 writes phase 32 (tunneling). Its underground
+                              # passage is not an imminent house-entry event;
+                              # risen/walking miners still use this response.
+                              and (z["type"] != 17 or z.get("state") != 32)
                               and z["row"] in (1, 2, 5, 6)
                               and z["x"] < ((390 if z["type"] == 12 else 250) if z["row"] in (2, 5) else 120)),
                              key=lambda z: (z["x"]-(230 if z["row"] in (2, 5) else 0), z["id"]))
@@ -397,7 +427,7 @@ class LiangyiBaseline:
             row = fast_threats[0]["row"]
             actions = self._cast(view, JALAPENO, [g for g in self._temporary(view) if g[0] == row])
             if not actions:
-                actions = self._cast(view, CHERRY, self._cherry_grids(view, 1 if row <= 2 else 5))
+                actions = self._cast(view, CHERRY, self._emergency_cherry_grids(view, fast_threats[0], 1 if row <= 2 else 5))
         if not actions:
             actions = self._repair(view)
         # Preserve the official processor's short ash window, but balloon
