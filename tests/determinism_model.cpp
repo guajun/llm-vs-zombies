@@ -1,4 +1,5 @@
 #include "determinism/model.hpp"
+#include "determinism/memory.hpp"
 #include <bit>
 #include <iostream>
 #include <random>
@@ -28,6 +29,14 @@ uint32_t Next(MtState& state) {
 }
 int main() {
     try {
+        auto page=VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+        Check(page!=nullptr,"Test page allocation failed");
+        *static_cast<uint32_t*>(page)=42;
+        const auto address=reinterpret_cast<uintptr_t>(page);
+        {ReadScope reads;Check(Read<uint32_t>(address)==42,"Scoped snapshot read failed");}
+        DWORD old=0;Check(VirtualProtect(page,4096,PAGE_NOACCESS,&old)!=0,"Test page protection failed");
+        {ReadScope reads;uint32_t value=0;Check(!TryRead(address,value),"Read permission cache crossed snapshot boundary");}
+        Check(VirtualFree(page,0,MEM_RELEASE)!=0,"Test page release failed");
         // Independent standard-library generator checks the test stream before
         // testing snapshot continuation, including two MT twist boundaries.
         auto state=SeedMt(5489); std::mt19937 reference(5489);

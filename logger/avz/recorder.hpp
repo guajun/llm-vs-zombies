@@ -6,4 +6,6 @@ namespace lvz {
 APlant* Plant(APlantType type, int row, float col);
 bool Shovel(int row, float col, int targetType = -1);
 void Note(const std::string& text);
+void RecordRuntime(const std::string& kind, const std::string& jsonPayload);
+void CloseRecording();
 }

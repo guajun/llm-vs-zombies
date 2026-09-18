@@ -12,7 +12,7 @@
 | MT 播种 | `0x5A98D0`，EAX 指向实例、ECX 为种子；零种子替换为 4357；初始化乘数 `0x6C078965` | 作为版本签名和布局证据；首版不把中途重设种子当完整恢复 |
 | 引擎 CRT RNG | `rand=0x61E087`、`srand=0x61E07A` 调用引擎静态 CRT 的 `_getptd=0x628A3D`，状态是返回对象的 `+0x14` | 捕获/恢复**游戏线程**的 LCG 状态，绝不误用 DLL 自身的 `rand()` 状态 |
 | 独立 MT | 四个直接构造调用点 `0x40A7EA/0x4256B7/0x426A42/0x484173`；部分后续调用不经全局 wrapper | 已识别其存在；没有把单个全局种子宣称为所有 RNG |
-| ZombieInitialize | 本机 `0x522580`，行参数在 EAX，僵尸指针在栈首参；入口直接调用全局随机数生成初始 X | 仅作为后续精确出生 hook 的已定位入口；当前记录仍明确标为首次边界观测 |
+| ZombieInitialize | 本机 `0x522580`，行参数在 EAX，僵尸指针在栈首参；唯一正常 epilogue 为 `0x524035` | 已集成入口/出口 hook，记录初始化参数、初始属性与 MT 前后状态；语义为初始化器出口，真实游戏验收待完成 |
 
 `determinism/evidence.json` 保存少量函数签名字节、目标文件哈希、定位方法，**不包含游戏二进制或完整反编译源代码**。原版 wrapper 会解包后启动 `popcapgame1.exe`，实际引擎 SHA-256 为 `f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322`。任何函数地址只适用于此目标；运行时要求 x86、固定加载基址、PE 头和多处完整代码签名匹配，否则拒绝适配。
 
@@ -48,13 +48,15 @@ lvz::determinism::Shutdown();
 - `state-deltas.jsonl`：首个完整规范化状态，随后保存 JSON Patch，可重建每次审计并展开首个字段差异。
 - `events.jsonl`：动作/请求/其他 runtime 审计消息，以及 `zombie_first_boundary_observed`。后者含 ID、slot、全部覆盖的原始标量字段，`exact_spawn=false`。
 
+`Initialize` 同时安装 `spawn_hook`，每次 `Audit` 先清空其队列并检查健康状态；`request_started/pre_step` 以及连续动作之间依据 `observation.version` 标注新的控制边界。`post_step/request_completed` 等事件后清空边界标签，预览生成不会沿用上一动作的版本。新增 `zombie_initialized` 外层 `phase` 为 `initialization` 或 `controlled_boundary`，`native_phase` 及原始 payload 的 `phase` 为 `zombie_initialize_exit`。`Shutdown` 先 drain、检查、记录最终健康状态，再移除本模块 hook；移除失败不允许卸载 DLL。具体 ABI、容量和验收语义见 [精确出口记录说明](determinism-spawn-hook.md)。
+
 规范化保留对象池的槽位、代次 ID、已用长度、容量、空闲链头、下一代次和空闲槽链接。活跃对象按 slot 键记录，排除 App/Board 指针、对象布局 padding。僵尸、植物、弹丸、收集物、场地物和推车均有记录；Board 记录格子、行路权重、波表、已允许类型、出怪阈值/倒计时、冰道/冰冻、阳光与关卡进度；卡槽记录冷却、激活和使用次数。
 
 字段键使用结构内十六进制 offset。32 位标量作为 `uint32` 写入，浮点保存 IEEE-754 原始位，因此正负零、NaN payload 及最末位变化不会被 JSON 小数四舍五入吞掉。可依据上述结构定义解码；僵尸 `0000001c` 为行、`0000002c/30/34` 为 X/Y/速度位模式、`00000050` 为 variant、`000000c8` 为本体血量。记录 x87 控制字及 SSE 控制位；暂未锁定或证明时间源无关。
 
 ## 当前不能声称的能力
 
-`complete_game_rng=false`、`complete_game_state=false`、`original_engine_replay_verified=false` 为有意设置，不能由“日志比较通过”自动提升。尚未覆盖独立 MT 的运行调用和生命周期、其他线程 CRT RNG、动画轨道/效果池、完整 Challenge 状态、光标输入、部分花盆币属性及时间源；也未实现精确出生 hook。暂停和隐藏窗口可能继续消耗共享随机流，必须进行扰动验收。隐藏窗口只是一种运行方式，不能由本模块宣称为纯无窗口模拟。
+`complete_game_rng=false`、`complete_game_state=false`、`original_engine_replay_verified=false` 为有意设置，不能由“日志比较通过”自动提升。尚未覆盖独立 MT 的运行调用和生命周期、其他线程 CRT RNG、动画轨道/效果池、完整 Challenge 状态、光标输入、部分花盆币属性及时间源。`ProbeTarget.spawn_hook` 报告 `installed`、`semantic=exact_initializer_exit` 和 `live_validated=false`；`final_spawn_after_caller=false` 表示初始化器返回后调用者进一步调整的结果尚非该 hook 的语义。暂停和隐藏窗口可能继续消耗共享随机流，必须进行扰动验收。隐藏窗口只是一种运行方式，不能由本模块宣称为纯无窗口模拟。
 
 现有捕获/恢复与状态审计已可用于定位分叉，但**不足以宣称完整确定性实验就绪**。完整验收至少包括：已确认帧边界的固定脚本，多次同初态原版运行逐帧一致，暂停时长/焦点/渲染变化不引入差异，并对覆盖缺口逐项验证。具体门槛见《原版确定性重放器提案》。禁止用下一检查点覆盖分叉后继续宣称一致。
 

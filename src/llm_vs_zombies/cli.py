@@ -36,6 +36,7 @@ def create_run(root: Path, config: Path, name: str | None = None, *, synthetic=F
                              ("runtime", {".cpp", ".hpp", ".h", ".cmake", ".MIT"}),
                              ("determinism", {".cpp", ".hpp", ".h", ".json"}),
                              ("launcher", {".cpp", ".hpp", ".h", ".cmake"}),
+                             ("recording", {".cpp", ".hpp", ".h"}),
                              ("examples", {".py", ".json"}),
                              ("tools", {".py", ".ps1"}), ("replay", {".html", ".md"})):
         source_files.extend(p for p in (root / folder).rglob("*") if p.is_file() and p.suffix in suffixes)

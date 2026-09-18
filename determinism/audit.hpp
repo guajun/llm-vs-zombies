@@ -5,7 +5,8 @@
 #include <nlohmann/json.hpp>
 
 // Every API except ValidateTargetImage must run on the runtime's game thread,
-// at a stable boundary. This module never installs the AvZ update hook.
+// at a stable boundary. This module never installs the AvZ update hook;
+// Initialize/Shutdown own the separate ZombieInitialize observation hooks.
 namespace lvz::determinism {
 bool ValidateTargetImage() noexcept;
 void Initialize(const std::filesystem::path& runDir);

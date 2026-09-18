@@ -1,6 +1,7 @@
 #include "audit.hpp"
 #include "model.hpp"
 #include "memory.hpp"
+#include "spawn_hook.hpp"
 #include <array>
 #include <fstream>
 #include <set>
@@ -15,6 +16,7 @@ bool initialized = false;
 uint64_t sequence = 0;
 std::ofstream checksums, changes, events;
 Json previous;
+Json lastObservationVersion=Json::object();
 std::set<uint32_t> previousZombies;
 
 void RequireThread() {
@@ -47,6 +49,41 @@ uintptr_t CrtStateAddress() {
 void Write(std::ofstream& stream, const Json& value) {
     stream << value.dump() << '\n';
     if (!stream) throw std::runtime_error("Audit output write failed");
+}
+void DrainAndCheckSpawns() {
+    const auto health=SpawnHookStatus();
+    if(health.value("active_initializers",size_t(0))==0) {
+        for(auto& spawn:DrainSpawnEvents()) {
+            const auto& boundary=spawn.at("boundary");
+            const bool controlled=boundary.is_object();
+            Json version=nullptr;
+            if(controlled) version={{"epoch",boundary.at("segment")},
+                {"tick",boundary.at("tick")},{"revision",boundary.at("revision")}};
+            Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","zombie_initialized"},
+                {"phase",controlled?"controlled_boundary":"initialization"},
+                {"native_phase","zombie_initialize_exit"},{"version",version},
+                {"payload",std::move(spawn)}});
+        }
+    }
+    if(!health.value("healthy",false)) {
+        Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_fault"},
+            {"version",lastObservationVersion},{"payload",health}});
+        Flush();
+        throw std::runtime_error("ZombieInitialize capture incomplete; strict experiment stopped");
+    }
+}
+void SetObservedSpawnBoundary(const Json& version) {
+    if(!version.is_object() || !version.contains("tick") || !version.contains("revision")
+        || !version.contains("epoch")) throw std::runtime_error("Missing controlled spawn boundary version");
+    auto integer=[&](const char* key) {
+        const auto& value=version.at(key);
+        if(!value.is_number_integer() || (value.is_number_integer()&&!value.is_number_unsigned()&&value.get<int64_t>()<0))
+            throw std::runtime_error("Invalid controlled spawn boundary version");
+        return value.get<uint64_t>();
+    };
+    const auto epoch=integer("epoch");
+    if(epoch>UINT32_MAX) throw std::runtime_error("Spawn boundary epoch exceeds supported range");
+    SetSpawnBoundary(integer("tick"),integer("revision"),static_cast<uint32_t>(epoch));
 }
 void WordRange(Json& fields, uintptr_t base, unsigned begin, unsigned end) {
     for (unsigned offset = begin; offset < end; offset += 4)
@@ -148,6 +185,8 @@ Json Seeds(uintptr_t board) {
 }
 Json Coverage() {
     return {{"complete_game_state",false}, {"exact_spawn_hook",false},
+        {"exact_initializer_exit",SpawnHookStatus().value("installed",false)},
+        {"final_spawn_after_caller",false},{"initializer_exit_live_validated",false},
         {"raw_float_bits",true},{"pool_slot_and_free_list",true},
         {"rng_scope","global MT incl. cursor + game-thread CRT; local MT/other threads not intercepted"},
         {"uncovered",{"reanimation track instances","particle/effect pools","Challenge state except completed rounds",
@@ -170,10 +209,14 @@ bool ValidateTargetImage() noexcept {
     return TargetSignatures();
 }
 Json ProbeTarget() {
+    auto spawn=SpawnHookStatus();
+    spawn["semantic"]="exact_initializer_exit";
+    spawn["live_validated"]=false;
     return {{"schema",kSchema},{"target",kTarget},{"loaded_signatures_match",ValidateTargetImage()},
         {"addresses_evidence","determinism/evidence.json"},
         {"rng_capture",ValidateTargetImage()}, {"rng_restore",ValidateTargetImage()},
         {"rng_seed",ValidateTargetImage()},
+        {"spawn_hook",std::move(spawn)},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
 }
 void Initialize(const std::filesystem::path& runDir) {
@@ -191,10 +234,24 @@ void Initialize(const std::filesystem::path& runDir) {
     events.open(directory/"events.jsonl",std::ios::out|std::ios::binary);
     if(!checksums||!changes||!events) throw std::runtime_error("Cannot open audit outputs");
     ownerThread=GetCurrentThreadId(); initialized=true; sequence=0;
-    previous=nullptr; previousZombies.clear();
-    std::ofstream manifest(directory/"manifest.json");
-    manifest<<ProbeTarget().dump(2)<<'\n';
-    if(!manifest) throw std::runtime_error("Cannot write audit manifest");
+    previous=nullptr; previousZombies.clear();lastObservationVersion=Json::object();
+    bool hookInstalled=false;
+    try {
+        std::string error;
+        if(!InstallSpawnHook(error)) throw std::runtime_error(error);
+        hookInstalled=true;
+        std::ofstream manifest(directory/"manifest.json");
+        manifest<<ProbeTarget().dump(2)<<'\n';
+        if(!manifest) throw std::runtime_error("Cannot write audit manifest");
+    } catch(...) {
+        if(hookInstalled) {
+            std::string removeError;
+            if(!RemoveSpawnHook(removeError))
+                throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
+        }
+        checksums.close();changes.close();events.close();initialized=false;
+        throw;
+    }
 }
 Json CaptureRng() {
     RequireThread();
@@ -274,6 +331,7 @@ bool RestoreClocks(const Json& snapshot,const std::string& boundary,std::string&
 }
 Json CaptureState() {
     RequireThread();
+    ReadScope snapshotReads;
     const auto app=Read<uint32_t>(kAppPointer);
     if(!app) throw std::runtime_error("Game app unavailable");
     const auto board=Read<uint32_t>(app+0x768);
@@ -309,8 +367,15 @@ Json CaptureState() {
 }
 void Audit(const std::string& kind,const Json& payload,const Json& observation) {
     RequireThread();
+    // Drain before assigning a new request/step label so menu/preview spawns
+    // cannot acquire the version of a command that has not run yet.
+    DrainAndCheckSpawns();
+    lastObservationVersion=observation.value("version",Json::object());
+    if(kind=="pre_step"||kind=="request_started"||kind=="action")
+        SetObservedSpawnBoundary(lastObservationVersion);
+    else ClearSpawnBoundary();
     Json envelope={{"schema",kSchema},{"seq",sequence++},{"kind",kind},
-        {"payload",payload},{"version",observation.value("version",Json::object())}};
+        {"payload",payload},{"version",lastObservationVersion}};
     if(kind!="pre_step"&&kind!="post_step") {
         Write(events,envelope);
         if(kind=="request_completed") Flush();
@@ -329,7 +394,7 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
             if(!(id&0xffff0000u)) continue;
             current.insert(id);
             if(!previousZombies.contains(id)) {
-                auto birth=envelope; birth["kind"]="zombie_first_boundary_observed";
+                auto birth=envelope; birth["seq"]=sequence++;birth["kind"]="zombie_first_boundary_observed";
                 birth["payload"]={{"id",id},{"slot",slot.key()},{"raw_fields",entry["fields"]},
                     {"exact_spawn",false}}; Write(events,birth);
             }
@@ -344,8 +409,14 @@ void Flush() {
 }
 void Shutdown() {
     if(!initialized) return;
-    RequireThread(); Flush(); checksums.close(); changes.close(); events.close();
+    RequireThread();DrainAndCheckSpawns();
+    const auto finalHealth=SpawnHookStatus();
+    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},
+        {"version",lastObservationVersion},{"payload",finalHealth}});
+    std::string error;
+    if(!RemoveSpawnHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
+    Flush(); checksums.close(); changes.close(); events.close();
     if(checksums.fail()||changes.fail()||events.fail()) throw std::runtime_error("Audit output close failed");
-    initialized=false;previous=nullptr;previousZombies.clear();
+    initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
 }
 }

@@ -1,5 +1,7 @@
 #include "recorder.hpp"
 #include "buffered_writer.hpp"
+#include "runtime/runtime.hpp"
+#include "runtime/diagnostics.hpp"
 #include <iomanip>
 #include <set>
 #include <sstream>
@@ -17,12 +19,12 @@ std::map<uint32_t, std::string> knownZombies;
 std::set<uint32_t> knownPlants;
 
 int Clock() { return AGetMainObject() ? std::max(0, AGetMainObject()->GameClock()) : std::max(0, lastTick); }
-void Emit(const std::string& kind, const std::string& payload, int tick = -1) {
+void Emit(const std::string& kind, const std::string& payload, int tick = -1, const std::string& phase = "avz_callback") {
     if (!opened || stopped) return;
     if (tick < 0) tick = Clock();
     writer.Append("{\"schema_version\":1,\"run_id\":" + Quote(runId)
         + ",\"seq\":" + std::to_string(sequence++) + ",\"segment\":" + std::to_string(std::max(0, segment))
-        + ",\"tick\":" + std::to_string(tick) + ",\"phase\":\"avz_callback\",\"kind\":" + Quote(kind)
+        + ",\"tick\":" + std::to_string(tick) + ",\"phase\":" + Quote(phase) + ",\"kind\":" + Quote(kind)
         + ",\"payload\":" + payload + "}");
 }
 
@@ -34,6 +36,7 @@ void OpenRun() {
     wchar_t path[32768];
     DWORD length = GetModuleFileNameW(module, path, 32768);
     if (!length || length >= 32768) throw std::runtime_error("Cannot find recorder configuration");
+    runtime::SetDiagnosticsPath(std::filesystem::path(path).parent_path()/"runtime-diagnostics.log");
     std::ifstream config(std::filesystem::path(path).parent_path() / "recorder.cfg");
     std::string directory;
     std::getline(config, directory);
@@ -131,13 +134,14 @@ void Capture() {
 
 void EndSegment() {
     if (!inSegment || stopped) return;
-    Emit("segment_end", "{\"reason\":\"exit_fight\"}", std::max(0,lastTick));
+    Emit("segment_end", "{\"reason\":\"exit_fight\"}", std::max(Clock(),lastTick));
     writer.Flush();
     inSegment=false;
 }
 
-void Close() {
+void Close(bool stopRuntime=true) {
     if (!opened || stopped) return;
+    if(stopRuntime) runtime::Shutdown();
     EndSegment();
     writer.Close(); stopped=true;
     if (runLock != INVALID_HANDLE_VALUE) { CloseHandle(runLock); runLock=INVALID_HANDLE_VALUE; }
@@ -161,16 +165,23 @@ bool Shovel(int row, float col, int targetType) {
     if (!opened || stopped || !AGetMainObject() || AGetPvzBase()->GameUi()!=3)
         throw std::runtime_error("Logged actions require an active recorder and fight");
     Capture();
-    auto before = AGetMainObject()->PlantCount();
+    std::set<uint32_t> before;
+    for(auto& plant:aAlivePlantFilter) before.insert(plant.Id());
     AShovel(row,col,targetType);
-    bool changed = AGetMainObject()->PlantCount() < before;
+    for(auto& plant:aAlivePlantFilter) before.erase(plant.Id());
+    bool changed = !before.empty();
     Emit("action", "{\"op\":\"shovel\",\"row\":"+std::to_string(row)
         +",\"col\":"+std::to_string(col)+",\"target_type\":"+std::to_string(targetType)
-        +",\"count_decreased\":"+(changed?"true":"false")+"}");
+        +",\"success\":"+(changed?"true":"false")+"}");
     return changed;
 }
 
 void Note(const std::string& text) { Emit("note", "{\"text\":"+Quote(text)+"}"); }
+void RecordRuntime(const std::string& kind, const std::string& jsonPayload) {
+    Emit("runtime_"+kind,jsonPayload,-1,(kind=="pre_step"||kind=="post_step")?kind:"control_boundary");
+    if(kind=="request_completed") writer.Flush();
+}
+void CloseRecording() { Close(false); }
 } // namespace lvz
 
 void AScript() {
@@ -180,5 +191,6 @@ void AScript() {
     AConnect('7', [] { lvz::Close(); });
 }
 AOnBeforeTick(lvz::Capture());
+AOnAfterInject(lvz::OpenRun(); lvz::runtime::Start(lvz::runDir));
 AOnExitFight(lvz::EndSegment());
 AOnBeforeExit(lvz::Close());

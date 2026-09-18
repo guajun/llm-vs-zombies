@@ -1,0 +1,56 @@
+# 后台实验启动器
+
+启动器对应 issue #4。默认模式是 **隐藏窗口运行原版引擎**：保留窗口、消息循环与原本渲染路径，通过本机 IPC 操作。它不需要鼠标键盘自动化，不切换桌面、不抢焦点，也不声称已经实现与可见模式等价的无绘制模拟。实机验收结果必须单独记录。
+
+## 本地前置条件
+
+- `game/original` 中的本地合法游戏副本；EXE、DAT、资源包及 bass.dll 与 `dependencies.lock.json` 一致。
+- `game/local-engine/PlantsVsZombies.exe`：从本机原包装器取得的真实原始引擎 PE，不能使用内存映像重建文件替代。当前锁定 SHA256 为 `f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322`。此文件不进入仓库，工具也不下载游戏。
+- 已构建的 `build/recorder.dll` 和 `launcher/build.ps1` 产生的 32 位 helper/DLL。
+- 官方参考存档 `experiments/scenarios/liangyi/game1_13.dat` 与锁文件一致。
+
+```powershell
+.\tools\build-avz.ps1
+.\launcher\build.ps1
+.\tools\launch-experiment.ps1 -Name headless-001
+```
+
+最后一条命令创建新 run、复制私有环境、后台启动、注入统一 runtime，并通过 IPC 选择模式与卡片。成功结果包含 `pid`、`creation_time`、`endpoint`、`hello`、`initial_observation`。初始化只在观察确认实际 `Scene==3`、4 曾/6 花/2 伞与指定卡序一致后返回 ready。使用 `-NoInitialize` 可仅启动并建立 IPC，供诊断或其他受控初始化流程使用。重复实验使用新的 Name。
+
+```powershell
+.\tools\launch-experiment.ps1 -Name headless-001 -Stop
+```
+
+Stop 校验 PID、进程创建时间与完整引擎路径，仅终止本 run 创建的进程。结束实验前应由客户端调用 runtime 的停止记录方法，让日志完整落盘；强制终止不是正常录制收尾。
+
+## 隔离与初始化流程
+
+1. 所有固定本地输入先核对 SHA256 与尺寸。recorder.dll 还必须与本 run 创建时的绑定哈希一致。
+2. 资源、引擎、bootstrap、runtime 复制进 `experiments/runs/<name>/sandbox`。原版会自行改变工作目录，因此不用仅设置 cwd 的方式假装隔离。复制后的资源逐文件记入哈希清单；每局有独立 `recorder.cfg`，不会依赖全局激活状态。
+3. 生成单个 `Experiment` 用户的合成档案（ID 1、已通关、10 卡槽），并放置原始两仪参考存档；完全不读取、复制或修改玩家真实 `users.dat`。固定档案只定义进度和选择条件，不代表已固定完整 RNG。
+4. 原始引擎以 `CREATE_SUSPENDED` 创建，主线程恢复前注入 bootstrap 并完成显式初始化。远程线程每一步最多等待 10 秒，失败终止刚创建的进程。bootstrap 安装失败不会继续启动游戏。
+5. bootstrap 只改本进程主 EXE 的导入表：`GetProcAddress` 获取的 `SHGetFolderPathA/W` 将常见 appdata 路径重定向到私有目录；PopCap 注册表入口重定向到 `HKCU\Software\LLMVsZombies\<PID>-<creation time>`；游戏 mutex 添加 PID；阻止显示/激活窗口与切换显示模式；屏蔽外部程序启动和阻塞消息框，错误写入日志。没有全局 hook，没有替换系统 DLL。原窗口与 DirectDraw 仍存在。
+6. 按已记录的 PID/创建时间/EXE 路径注入该 run 自己的 runtime.dll，然后连接 `\\.\pipe\llm-vs-zombies-<pid>`。游戏线程执行 `initialize`，使用 mode 13 与完整卡序 `[16,30,14,63,15,2,20,17,8,27]`；63 为模仿冰。客户端轮询实际初始化状态，错误与超时均停止自己创建的进程并保留证据。
+
+现阶段只支持已锁定 1.0.0.1051 引擎。引擎的动态 API 路径、存档格式和窗口行为需要该版本实机证据支持；不得把主 EXE IAT 隔离泛化成适用于任意游戏/任意插件的安全沙箱。DLL 使用 ANSI 路径的原版约束仍在，启动器拒绝过长或当前系统编码不可表示的实验路径。
+
+隐藏窗口的实际进场使用已核验签名的 `LoadingCompleted` 与 `ContinueDialog::ButtonDepress` 内部入口。后者传入正确的 ButtonListener 子对象，完成继续存档操作。bootstrap 将本进程 `GetActiveWindow` 查询映射到它自己的隐藏 HWND，让游戏内部控件接受 IPC 动作；不会改变系统实际活动窗口、前台窗口或发送 OS 输入。初始化 seed 默认为 0，可通过 Python `start(..., seed=...)` 或 launcher CLI `--seed` 指定，先在游戏线程播种，再创建场景。
+
+## 诊断材料
+
+- `launcher.json`：输入/模块/资源/合成档案哈希，进程身份，阶段与错误，初始观察。
+- `sandbox/bootstrap.log`：实际安装的 hook、重定向路径、隔离 ready、隐藏窗口和消息框错误。
+- `sandbox/native-receipt.json`：主线程恢复前已成功安装隔离的进程凭据。即使启动客户端在取得返回值前中断，Stop 也能从此恢复 PID/创建时间并再次核验身份。
+- `sandbox/modules/runtime-diagnostics.log`：runtime 自身诊断（若 runtime 生成）。
+- `decisions/launcher.jsonl`：启动与初始化 IPC 的客户端审计。
+- `observations/initial.json`：初始化实际返回的观察。
+
+失败时不删除证据目录，不能直接重用同一个 run 接着录制。启动器的私有注册表配置使用 volatile 叶键；路径含进程创建时间，避免 PID 复用继承上一次实验设置。
+
+## 验收层次
+
+Python 测试覆盖固定输入拒绝、全新目录限制、合成用户档结构、原目录保持不变、实际场景与卡序检查。`launcher/isolation_fixture.cpp` 是不依赖游戏的原生验证程序：经过同一路径启动后，输出私有 appdata、隔离注册表访问结果、窗口隐藏和前台窗口未变化证据。它用于先验证 `CREATE_SUSPENDED + LoadLibrary` 与 bootstrap 顺序。
+
+实机进一步需要核实原用户档/配置前后不变、隐藏/失焦不阻塞 IPC 与单步、两仪存档实际加载与卡序、重复冷启动初态以及完整两旗。仅有启动成功、私有路径或文件哈希一致，均不证明确定性；完整状态/随机状态的比对归入确定性与 engine replay 验收。
+
+档案格式参考固定版本的 [ProfileMgr](https://github.com/ruslan831/PlantsVsZombies-decompilation/blob/8a2d121899ba5cb4df644cd7d2e4c1aaf88dd238/Lawn/System/ProfileMgr.cpp)、[PlayerInfo](https://github.com/ruslan831/PlantsVsZombies-decompilation/blob/8a2d121899ba5cb4df644cd7d2e4c1aaf88dd238/Lawn/System/PlayerInfo.cpp) 与 [DataSync](https://github.com/ruslan831/PlantsVsZombies-decompilation/blob/8a2d121899ba5cb4df644cd7d2e4c1aaf88dd238/Lawn/System/DataSync.cpp)。这些是用于推导格式的候选反编译源码；本地实际载入结果才是当前二进制的验收证据。
