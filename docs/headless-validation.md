@@ -49,3 +49,7 @@
 `headless-dedup-024` 用新 DLL `eb40028a6b65a33f054d3e5f01884bab06bd40e7491a5e1f6c97b0c16aab7d71` 验证磁盘请求历史：真实游戏连续完成 10,353 次零 tick 请求，仅返回结果正文就有 73,402,770 bytes，超过旧 64 MiB 上限。之后查询最早请求、重连按原 ID 重试均返回精确原结果；改动同 ID 的请求被拒绝。整个压力阶段完整审计快照不变，再推进一个真实 tick 成功。原生记录及请求 journal 正常关闭，归档封存和全清单校验通过，共享用户档不变，自有进程停止。这是容量和关闭路径验收，不等同于 10,353 个游戏 tick 的轨迹验证。
 
 配套原生控制器 fixture 实际执行了 200,005 个单 tick 请求，journal 为 112,025,237 bytes，测试进程私有内存从 2,023,424 增到 2,027,520 bytes。另覆盖磁盘写入/封口失败、损坏和截断、终局故障、旧结果查询及专用关闭保留区；完整 CTest 8/8、本机 Python 162/162 通过。fixture 的单步不是原版实机长局。024 本机报告为 `work/dedup-024-acceptance.json`，原生报告为 `work/request-journal-native-acceptance.json`；完整两旗继续独立验证。
+
+同一 `eb400…` DLL 的 `headless-recovery-027` 通过 29 项检查：先确认请求处于 pending，再断开连接，实际推进 4 tick 后以 `client_disconnected` 停止；新连接按原请求内容和 ID 重试，原结果与完整快照均不变。另一请求实际推进 3 tick 后被主动 pause 停止。非法动作、占位和冷却失败均推进 0 tick；后续合法单步、真实种植和铲除成功。全局共 10 tick / 20 个审计边界，每次中断恰有一个权威完成记录，26 个文件正常封存并校验，原用户档指纹未变。
+
+`headless-video-028-{plain,render}` 在该 DLL 上重做 021 对照：2,000 个 pre/post 边界、40,946 次粒子调用、71 次受控出生出口事件全部一致。原画 MP4 仍为 800×600、1 fps、10 帧/10 秒，无丢帧；已解码检查实际雾夜两仪画面。36/40 个文件分别封存并通过比较前后哈希校验。轨迹 ID 分别为 `f1f2bdab639e141d90bfbaf19b90140ef651a126c92d6afc2777a152449102d2`、`9457672dee3bcebf02da5df4baabc85e5af2bff013708aaa403e86190b85ee5f`。录像 SHA256 为 `f3747b798ab16faf4cc7b81b80f5a7aeff2b718af6f9557cc869f1dda12dbf2e`。首轮验证工具遗漏了单独的解码 PNG，因此在封包前明确报错；补做解码和视觉检查后重新验收通过，原始游戏记录没有修改，工具失败保留在 `work/video-028-acceptance.json` 的历史中。

@@ -30,7 +30,7 @@ class ModelTransport:
     def __init__(self, directory, *, epoch=1, revision=0, divergence=None, wrong_result=False, terminal_tick=None,
                  pixel_byte=1, wrong_capture_guard=False, capture_timeout=False, animation_handle=None,
                  particle_pointer=None, particle_id=65538, particle_overflow=False, pause_changes_state=False, status_pending=False,
-                 deny_pause=False):
+                 deny_pause=False, spawn_schedule=None, initialization_spawns=0, spawn_overflow=False, late_spawn=False):
         self.directory = directory
         directory.mkdir(parents=True)
         self.game, self.animation_handle = copy.deepcopy(GAME), animation_handle
@@ -38,6 +38,10 @@ class ModelTransport:
         self.particle_count, self.particle_digest = 0, 14695981039346656037
         self.pause_changes_state, self.status_pending = pause_changes_state, status_pending
         self.deny_pause = deny_pause
+        self.spawn_schedule = spawn_schedule
+        self.spawn_count, self.spawn_overflow, self.late_spawn = 0, spawn_overflow, late_spawn
+        if spawn_schedule is not None:
+            self.game["spawn_hook"] = {"installed": True, "semantic": "exact_initializer_exit"}
         if particle_pointer is not None:
             self.game["particle_shake"] = PARTICLE_MODE
         if animation_handle is not None:
@@ -58,6 +62,8 @@ class ModelTransport:
         self.terminal_tick, self.game_ui = terminal_tick, 3
         self.draw_count, self.rng_delta = 0, 0
         self.pixel_byte, self.wrong_capture_guard, self.capture_timeout = pixel_byte, wrong_capture_guard, capture_timeout
+        for preview in range(initialization_spawns):
+            self.spawn_call(100 + preview, initialization=True)
 
     def version(self):
         return {"epoch": self.epoch, "tick": self.tick, "revision": self.revision}
@@ -99,6 +105,26 @@ class ModelTransport:
     def write(self, name, value):
         self.files[name].write(json.dumps(value, separators=(",", ":")) + "\n")
         self.files[name].flush()
+
+    def spawn_call(self, label, *, initialization=False):
+        overrides = label if isinstance(label, dict) else {}
+        label = overrides.get("label", 11) if overrides else label
+        boundary = None if initialization else {"segment": self.epoch, "tick": self.tick, "revision": self.revision}
+        fields = {offset: 0 for offset in ("00000118", "00000140", "00000144", "00000150")}
+        fields["0000002c"] = overrides.get("x_bits", 0x3f800000)
+        payload = {"schema": "lvz.spawn.v1", "kind": "zombie_initialized", "phase": "zombie_initialize_exit",
+            "boundary": boundary, "ordinal": self.spawn_count, "id": 65536 + label, "slot": label, "generation": 1,
+            "caller_rva": 0x1234, "inputs": {"row0": 2, "type": 0, "variant_byte": 0, "wave_raw": 0, "parent_id": None},
+            "initial": {"raw_scalar_fields": fields, "row0": 2, "x_bits": fields["0000002c"], "speed_bits": 123,
+                        "variant": overrides.get("variant", 0)},
+            "game_clock_before": self.tick, "game_clock_after": self.tick,
+            "global_mt_before": {"words": [1, 2], "cursor": overrides.get("rng_cursor", 0)},
+            "global_mt_after": {"words": [1, 2], "cursor": 1}}
+        self.write("events.jsonl", {"schema": SCHEMA, "kind": "zombie_initialized", "seq": self.seq,
+            "native_phase": "zombie_initialize_exit", "phase": "initialization" if initialization else "controlled_boundary",
+            "version": None if initialization else self.version(), "payload": payload})
+        self.seq += 1
+        self.spawn_count += 1
 
     def event(self, kind, payload):
         value = {"schema": SCHEMA, "seq": self.seq, "kind": kind,
@@ -144,11 +170,17 @@ class ModelTransport:
                 self.draw_count += 1
             result = {"state": "paused_at_boundary", "observation": self.observe()}
         elif method == "stop_recording":
+            if self.late_spawn:
+                self.spawn_call(99)
             self.event("recording_closed", {"request_id": rid})
             if self.particle_pointer is not None:
                 self.event("particle_shake_closed", {"installed": True, "captured": self.particle_count,
                     "controlled_calls": self.particle_count, "queued": 0, "wrong_thread_calls": 0,
                     "faults": 0, "overflow": int(self.particle_overflow), "healthy": not self.particle_overflow})
+            if self.spawn_schedule is not None:
+                self.event("spawn_hook_closed", {"installed": True, "captured": self.spawn_count,
+                    "queued": 0, "wrong_thread_calls": 0, "active_initializers": 0,
+                    "faults": 0, "overflow": int(self.spawn_overflow), "healthy": not self.spawn_overflow})
             result = {"closed": True, "observation": self.observe()}
         elif method == "capture_frame":
             if self.capture_timeout:
@@ -197,6 +229,8 @@ class ModelTransport:
             if reason != "action_failed":
                 for _ in range(count):
                     self.event("pre_step", {"request_id": rid, "requested_ticks": count, "executed_ticks": executed})
+                    for birth in (self.spawn_schedule or {}).get(self.tick, []):
+                        self.spawn_call(birth)
                     if self.particle_pointer is not None:
                         self.particle_call()
                     self.tick += 1
@@ -256,7 +290,8 @@ class ReplayTests(unittest.TestCase):
 
     def initializer(self, *, divergence=None, wrong_result=False, wrong_identity=False, terminal_tick=None,
                     wrong_capture_guard=False, capture_timeout=False, wrong_particle_id=False, particle_overflow=False,
-                    pause_changes_state=False, status_pending=False, deny_pause=False):
+                    pause_changes_state=False, status_pending=False, deny_pause=False, spawn_schedule=None,
+                    initialization_spawns=0, spawn_overflow=False, late_spawn=False):
         @contextmanager
         def initialize(trajectory, output):
             self.live = ModelTransport(output / "audit", epoch=99, revision=2,
@@ -265,13 +300,15 @@ class ReplayTests(unittest.TestCase):
                                        animation_handle=131074 if "reanimations" in trajectory.audit.manifest.get("coverage", {}) else None,
                                        particle_pointer=0x20000140 if trajectory.audit.manifest.get("particle_shake") else None,
                                        particle_id=131074 if wrong_particle_id else 65538, particle_overflow=particle_overflow,
-                                       pause_changes_state=pause_changes_state, status_pending=status_pending, deny_pause=deny_pause)
+                                       pause_changes_state=pause_changes_state, status_pending=status_pending, deny_pause=deny_pause,
+                                       spawn_schedule=spawn_schedule, initialization_spawns=initialization_spawns,
+                                       spawn_overflow=spawn_overflow, late_spawn=late_spawn)
             identity = copy.deepcopy(self.identity)
             if wrong_identity:
                 identity["artifacts"]["module_hashes"]["runtime"] = "4" * 64
             with SessionTrace(output / "actual.jsonl") as trace, Client(self.live, trace=trace) as client:
                 yield ReplaySession(client, identity, output / "audit")
-                if self.live.particle_pointer is not None:
+                if self.live.particle_pointer is not None or self.live.spawn_schedule is not None:
                     client.request("stop_recording", expect=client.version)
         return initialize
 
@@ -284,6 +321,72 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(len(result["requests"][0]["result"]["action_results"]), 2)
         self.assertEqual(steps[1]["expect"], {"epoch": 99, "tick": 0, "revision": 4})
         self.assertEqual(result["reached_version"]["tick"], 5)
+
+    def spawn_recording(self):
+        source = self.root / "spawn-source"
+        source.mkdir()
+        model = ModelTransport(source / "audit", animation_handle=65538,
+                               spawn_schedule={0: [11, 22], 1: [33]}, initialization_spawns=1)
+        with SessionTrace(source / "session.jsonl") as trace, Client(model, trace=trace) as client:
+            self.identity = identity_from_launcher(client.hello(), ARTIFACTS)
+            capture_initial(client, identity=self.identity, initialization={"synthetic": True})
+            client.advance(2)
+            client.request("stop_recording", expect=client.version)
+        return build_trajectory(source / "session.jsonl", source / "audit", self.root / "spawn-bundle")
+
+    def test_spawn_replay_maps_epoch_retains_order_and_separates_preview_history(self):
+        trajectory = self.spawn_recording()
+        result = replay(trajectory, self.initializer(spawn_schedule={0: [11, 22], 1: [33]},
+                                                     initialization_spawns=3), self.root / "spawn-live")
+        self.assertTrue(result["equal"])
+        self.assertEqual(result["spawn_events_compared"], 3)
+        self.assertTrue(result["spawn_exercised"])
+        spawn = result["spawn_comparison"]
+        self.assertEqual(spawn["source_initialization_history"], 1)
+        self.assertEqual(spawn["actual_initialization_history"], 3)
+        self.assertFalse(spawn["initialization_history_compared"])
+        self.assertTrue(spawn["initial_state_compared"])
+        self.assertTrue(spawn["final_health_verified"])
+
+    def test_spawn_initializer_exit_changes_fail_even_when_every_final_state_matches(self):
+        trajectory = self.spawn_recording()
+        for number, (field, changed, path) in enumerate((
+                ("position", {"x_bits": 0x40000000}, "/payload/initial/raw_scalar_fields/0000002c"),
+                ("random_variant", {"variant": 1}, "/payload/initial/variant"),
+                ("rng_before", {"rng_cursor": 17}, "/payload/global_mt_before/cursor"))):
+            with self.subTest(field=field):
+                schedule = {0: [11, dict(label=22, **changed)], 1: [33]}
+                with self.assertRaises(ReplayDivergence) as caught:
+                    replay(trajectory, self.initializer(spawn_schedule=schedule), self.root / f"spawn-change-{number}")
+                detail = caught.exception.report
+                self.assertEqual(detail["stage"], "audit[0:1].spawn[1]")
+                self.assertEqual(detail["controlled_ordinal"], 1)
+                self.assertEqual(detail["difference"]["path"], path)
+                self.assertEqual(trajectory.audit.frames[-1].state, self.live.previous)
+
+    def test_spawn_missing_extra_and_reordered_events_are_independent_failures(self):
+        trajectory = self.spawn_recording()
+        for label, schedule, birth_index in (("missing", {0: [11], 1: [33]}, 1),
+                                             ("extra", {0: [11, 22, 44], 1: [33]}, 2),
+                                             ("order", {0: [22, 11], 1: [33]}, 0)):
+            with self.subTest(label=label), self.assertRaises(ReplayDivergence) as caught:
+                replay(trajectory, self.initializer(spawn_schedule=schedule), self.root / f"spawn-{label}")
+            self.assertEqual(caught.exception.report["stage"], f"audit[0:1].spawn[{birth_index}]")
+            self.assertEqual(trajectory.audit.frames[-1].state, self.live.previous)
+
+    def test_spawn_seek_compares_only_recomputed_prefix_and_requires_healthy_close(self):
+        trajectory = self.spawn_recording()
+        schedule = {0: [11, 22], 1: [33]}
+        result = replay(trajectory, self.initializer(spawn_schedule=schedule), self.root / "spawn-seek", target_tick=1)
+        self.assertEqual(result["spawn_events_compared"], 2)
+        self.assertEqual(result["spawn_comparison"]["source_controlled_total"], 3)
+        self.assertEqual(result["spawn_comparison"]["scope"], "executed_prefix")
+        for label, options, failure in (("overflow", {"spawn_overflow": True}, "unhealthy or incomplete"),
+                                        ("late", {"late_spawn": True}, "no following audited boundary")):
+            with self.subTest(label=label), self.assertRaisesRegex(EvidenceError, failure):
+                replay(trajectory, self.initializer(spawn_schedule=schedule, **options), self.root / f"spawn-close-{label}")
+            report = json.loads((self.root / f"spawn-close-{label}" / "replay-report.json").read_text())
+            self.assertFalse(report["equal"])
 
     def test_seek_source_suffix_tamper_is_rejected_before_success_or_takeover(self):
         base = self.initializer()

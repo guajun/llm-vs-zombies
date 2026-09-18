@@ -176,6 +176,14 @@ python tools/check-boundary-equivalence.py work/capture-off-trajectory work/capt
 
 精确出生钩子的初始化期记录使用 `phase:initialization`、`version:null`、`payload.boundary:null`，读取器只为此明确契约接受未赋边界。受控期仍须把 `boundary.segment/tick/revision` 与事件 version 精确对应。出生事件保留全局序号；旧版共用帧 seq 的首次可见注释仍可读，新版独立 seq 必须连续。`recording_closed` 后允许一条同版本的 `spawn_hook_closed`，其健康状态、零溢出/故障/排队/活动初始化数，以及已捕获事件数与连续 ordinal 均须核验。
 
+正式 `engine_replay.replay` 现在也独立比较每条受控 `zombie_initialized`，无需另跑边界对照工具。更新内出生必须绑定到紧邻的实际 pre/post 版本；动作内出生绑定到同 tick、同 epoch 且 revision 不倒退的下一个 pre 边界。单边界最多暂存 1,024 条，与原生出生队列容量一致；没有后续审计边界、错误版本或更新中丢失边界而伪称 initialization 的事件均拒绝。每个 `AuditFrame.spawn_events` 保留实际捕获顺序，比较不依赖出生后的末态是否还看得出差异。
+
+跨运行只映射 epoch 和 tick 0 的初始 revision 偏移。payload 的重复 boundary 已单独核验；全局 ordinal 包含菜单预览历史，因此改为逐条核对受控序列的相对顺序。完整僵尸 ID/槽位/代次、caller RVA、输入参数、全部原始标量、初始位置/速度/variant、GameClock 与完整 MT 前后态都保留比较。仅四个已知动画字段使用相同读取器校验过的原始旁证映射，和独立边界对照工具共用实现；原始记录和原始句柄仍完整归档。初始化无版本历史单独计数并检查其原始序号/关闭健康，不要求跨进程预览数量相同；可执行初态本身仍严格相等。
+
+报告增加 `spawn_events_compared`（已逐条匹配的出生数）、`spawn_exercised`（至少匹配一条），以及 `spawn_comparison` 中的源受控总数、双方初始化历史数、是否验证初态与实际关闭健康。零出生通过不能当作出生路径验证。seek 只比较实际重算前缀；完整重放还必须把双方全部受控出生计数与已比较数对齐，防止尾部多余事件被忽略。首个分叉报告请求/帧索引、边界 tick/phase、相对受控 ordinal、双方原生 seq 和具体 JSON Pointer；初始属性不同但随后 post 状态相同、丢失、额外或乱序出生都会失败。
+
+已关闭的真实 022 动作源记录与其实际冷重放记录经新路径离线复核，2,000 个边界及 71 条受控初始化退出事件全部相等，双方各 12 条无边界初始化历史独立保留。完整读取、逐帧状态/出生比较及文件身份复核耗时 41.44 秒。该复核没有启动游戏，不代替新 DLL 的完整周期冷重放验收。
+
 `audit_compare.py` 支持原生 nlohmann JSON diff 产生的 add/remove/replace，检查 JSON Pointer、数组下标、缺失路径、前后序号、每帧原生 delta、摘要与 state schema。逐帧状态从首态与 patch 流式重建，不把整局的所有完整状态同时驻留内存。实际重放使用 `AuditTail` 只处理上次完成之后新增的记录，检查文件替换、截断、序号缺口和每个新增帧；不会按请求数反复重扫整局前缀。请求事件和帧元数据也按 request_id 建索引。
 
 粒子语义事件与原始旁证也逐条流式合并验证，序号连续性用单游标核验，不构造全部事件列表或排序副本。`AuditLog.events` 是可重复读取的 `EventStream`，只将控制/出生事件和小型帧头建索引；`AuditTail.events` 是已消费文件前缀的可重复视图。粒子记录在其所属边界比较后释放，最多暂存 8,192 条；单条 JSONL 的读取上限为 32 MiB。超过读取预算明确拒绝，不丢弃或抽样证据。这使内存由当前状态、单边界粒子和控制/帧索引决定，不随整局粒子总数线性增长。

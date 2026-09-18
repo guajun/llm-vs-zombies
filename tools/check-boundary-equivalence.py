@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from llm_vs_zombies.audit_compare import EvidenceError, first_difference, particle_semantics
+from llm_vs_zombies.audit_compare import EvidenceError, first_difference, particle_semantics, spawn_payload_semantics
 from llm_vs_zombies.engine_replay import Trajectory
 
 
@@ -31,38 +31,8 @@ def _spawns(trajectory):
 
 
 def _spawn_semantics(event, post_frame):
-    """Keep initializer scalars/RNG; resolve only verified animation references.
-
-    Initializer-exit handles can be changed by the caller before the post-frame.
-    If that happens, there is insufficient evidence to normalize that handle:
-    reject the comparison instead of deleting or guessing the field.
-    """
-    payload = copy.deepcopy(event["payload"])
-    payload.pop("boundary", None)
-    payload.pop("ordinal", None)  # Relative controlled event order is checked separately.
-    initial = payload.get("initial", {})
-    fields = initial.get("raw_scalar_fields")
-    if not isinstance(fields, dict) or type(payload.get("slot")) is not int:
-        raise EvidenceError("spawn lacks exact initializer raw fields/slot")
-    raw = post_frame.raw_animations
-    if not isinstance(raw, dict):
-        raise EvidenceError("spawn normalization requires checked raw animation evidence")
-    by_path = {link["path"]: link for link in raw["links"]}
-    # Native reanimation_audit.cpp zombieRoles, also covered by manifest.
-    for offset in ("00000118", "00000140", "00000144", "00000150"):
-        if offset not in fields:
-            raise EvidenceError("spawn lacks an audited zombie animation role")
-        handle = fields[offset]
-        if type(handle) is not int or not 0 <= handle <= 0xffffffff:
-            raise EvidenceError("spawn animation handle is not uint32")
-        if handle == 0:
-            fields[offset] = {"status": "null"}
-            continue
-        link = by_path.get(f"/zombies/slots/{payload['slot']}/fields/{offset}")
-        if link is None or link["raw_handle"] != handle or not link["lookup_matches"]:
-            raise EvidenceError("initializer animation handle cannot be proven at the following boundary")
-        fields[offset] = copy.deepcopy(link["normalized_reference"])
-    return payload
+    """Shared exact initializer normalization also used by engine replay."""
+    return spawn_payload_semantics(event, post_frame)
 
 
 def _actions(trajectory):

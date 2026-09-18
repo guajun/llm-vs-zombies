@@ -31,6 +31,7 @@ _POINTER_CACHE_SIZE = 16384
 _POINTER_CACHE_MAX_CHARS = 512
 _OWNER_RETIREMENT_RULES = ["owner_dead", "plant_squished_remove_effects"]
 _PARTICLE_BOUNDARY_LIMIT = 8192
+_SPAWN_BOUNDARY_LIMIT = 1024
 _JSONL_MAX_RECORD_BYTES = 32 << 20
 _FNV_SOURCE = r"""
 #include <stddef.h>
@@ -462,6 +463,50 @@ class AuditFrame:
     canonical_state: bytes | None = None
     raw_animations: dict | None = None
     particle_seeds: tuple[dict, ...] = ()
+    spawn_events: tuple[dict, ...] = ()
+
+
+def spawn_payload_semantics(event, frame):
+    """Retain initializer-exit scalars/RNG, mapping only four proven handles.
+
+    The initializer's caller may replace a handle before the next boundary.
+    That case cannot be normalized from this evidence and must fail closed.
+    Global ordinal includes menu/preview history; controlled order is checked
+    separately. The duplicate boundary is checked against event.version.
+    """
+    payload = copy.deepcopy(event["payload"])
+    payload.pop("boundary", None)
+    payload.pop("ordinal", None)
+    fields = payload.get("initial", {}).get("raw_scalar_fields")
+    if not isinstance(fields, dict) or type(payload.get("slot")) is not int:
+        raise EvidenceError("spawn lacks exact initializer raw fields/slot")
+    raw = frame.raw_animations
+    if not isinstance(raw, dict):
+        raise EvidenceError("spawn normalization requires checked raw animation evidence")
+    by_path = {link["path"]: link for link in raw["links"]}
+    for offset in ("00000118", "00000140", "00000144", "00000150"):
+        if offset not in fields:
+            raise EvidenceError("spawn lacks an audited zombie animation role")
+        handle = fields[offset]
+        if type(handle) is not int or not 0 <= handle <= 0xffffffff:
+            raise EvidenceError("spawn animation handle is not uint32")
+        if handle == 0:
+            fields[offset] = {"status": "null"}
+            continue
+        link = by_path.get(f"/zombies/slots/{payload['slot']}/fields/{offset}")
+        if link is None or link["raw_handle"] != handle or not link["lookup_matches"]:
+            raise EvidenceError("initializer animation handle cannot be proven at the following boundary")
+        fields[offset] = copy.deepcopy(link["normalized_reference"])
+    return payload
+
+
+def spawn_semantics(event, frame, *, map_version=lambda value: value):
+    """Compare the assigned boundary and complete normalized birth payload."""
+    AuditLog._envelope(event)
+    if event.get("phase") != "controlled_boundary":
+        raise EvidenceError("unassigned initialization history has no replay boundary")
+    return {"version": map_version(event["version"]), "phase": event["phase"],
+            "native_phase": event["native_phase"], "payload": spawn_payload_semantics(event, frame)}
 
 
 def particle_semantics(event, *, map_version=lambda value: value):
@@ -539,6 +584,8 @@ class _EventSummary:
     def __init__(self):
         self.tail = deque(maxlen=3)
         self.birth_count = 0
+        self.controlled_birth_count = 0
+        self.initialization_birth_count = 0
         self.count = 0
         self.last_seq = -1
         self.recording_closed = False
@@ -558,6 +605,10 @@ class _EventSummary:
             if type(event["payload"].get("ordinal")) is not int or event["payload"]["ordinal"] != self.birth_count:
                 raise EvidenceError("spawn ordinal is missing or duplicated")
             self.birth_count += 1
+            if event["phase"] == "controlled_boundary":
+                self.controlled_birth_count += 1
+            else:
+                self.initialization_birth_count += 1
         self.recording_closed |= event["kind"] == "recording_closed"
         self.tail.append(event)
         self.count += 1
@@ -823,6 +874,7 @@ class _AuditStreamDecoder:
         self.particle = _ParticleEvidence() if PARTICLE_SHAKE_RAW in files else None
         self.summary = _EventSummary()
         self.pending = []
+        self.pending_spawns = []
         self.next_seq = 0
         self.last_frame = None
         self.controlled_calls = 0
@@ -856,6 +908,13 @@ class _AuditStreamDecoder:
             if self.particle is None:
                 raise EvidenceError("particle shake close has no declared engine mode")
             self.particle.close(event)
+        elif event["kind"] == "zombie_initialized":
+            if event["phase"] == "controlled_boundary":
+                if len(self.pending_spawns) >= _SPAWN_BOUNDARY_LIMIT:
+                    raise EvidenceError("spawns before an audited boundary exceed reader bound 1024")
+                self.pending_spawns.append(event)
+            elif self.last_frame is not None and self.last_frame.kind == "pre_step":
+                raise EvidenceError("spawn lost its controlled boundary during an audited update")
 
     def frame(self, records):
         if self.summary.recording_closed:
@@ -879,8 +938,17 @@ class _AuditStreamDecoder:
                 raise EvidenceError("particle shake state count/digest differs from verified seed events")
         elif "particle_shake" in frame.state:
             raise EvidenceError("particle shake state requires an explicit engine mode")
-        result = replace(frame, particle_seeds=tuple(self.pending))
+        for event in self.pending_spawns:
+            before = event["version"]
+            if frame.kind == "post_step":
+                if self.last_frame is None or self.last_frame.kind != "pre_step" or before != self.last_frame.version:
+                    raise EvidenceError("spawn is not bound to its actual pre/post update")
+            elif (before["epoch"] != frame.version["epoch"] or before["tick"] != frame.version["tick"]
+                  or before["revision"] > frame.version["revision"]):
+                raise EvidenceError("spawn action is not bound to its next audited pre-step")
+        result = replace(frame, particle_seeds=tuple(self.pending), spawn_events=tuple(self.pending_spawns))
         self.pending.clear()
+        self.pending_spawns.clear()
         self.last_frame = AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, {})
         return result
 
@@ -888,6 +956,8 @@ class _AuditStreamDecoder:
         self.frames.finish()
         if final and self.pending:
             raise EvidenceError("particle shake calls have no following audited boundary")
+        if final and self.pending_spawns:
+            raise EvidenceError("controlled spawns have no following audited boundary")
 
 
 def _walk_audit(decoder, read, *, retain_event=None, request_id=None, constrain_request=False):
@@ -1022,6 +1092,11 @@ class AuditLog:
             evidence.verify()
 
     @property
+    def birth_counts(self):
+        return {"controlled": self._summary.controlled_birth_count,
+                "initialization": self._summary.initialization_birth_count}
+
+    @property
     def control_events(self):
         """Verified control/birth index, excluding high-volume particle calls."""
         self.events.verify()
@@ -1114,6 +1189,11 @@ class AuditTail:
     @property
     def peak_pending_particle_calls(self):
         return self._stream.peak_pending
+
+    @property
+    def birth_counts(self):
+        return {"controlled": self._stream.summary.controlled_birth_count,
+                "initialization": self._stream.summary.initialization_birth_count}
 
     def _check_file(self, name, *, required_size=None):
         stat = (self.directory / name).stat()

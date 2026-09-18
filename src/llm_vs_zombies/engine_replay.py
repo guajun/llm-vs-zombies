@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA as AUDIT_SCHEMA, canonical,
-                            audit_files, digests, file_hash, first_difference, hash_backend, jsonl, particle_semantics, read_json, version)
+                            audit_files, digests, file_hash, first_difference, hash_backend, jsonl, particle_semantics,
+                            spawn_semantics, read_json, version)
 from .client import Client, OutcomeUnknown, RemoteError
 
 SCHEMA = "lvz.engine-replay.v1"
@@ -571,7 +572,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     report = {"schema": SCHEMA, "parent_trajectory_id": trajectory.manifest["trajectory_id"],
               "branch_id": uuid.uuid4().hex, "requested_target_tick": target_tick,
               "mode": "cold_start_recompute", "original_engine_replay_verified": False,
-              "scope": "captured state and actual action outcomes", "requests": [], "equal": False}
+              "scope": "captured state, actual action outcomes, and controlled initializer-exit spawns",
+              "requests": [], "equal": False, "spawn_events_compared": 0, "spawn_exercised": False}
     report["audit_hash_backend"] = hash_backend()
     report["particle_shake"] = {"mode": trajectory.audit.manifest.get("particle_shake", {}).get("mode", "not_declared"),
                                 "original_engine_bitwise_unmodified": False if trajectory.audit.manifest.get("particle_shake") else None,
@@ -587,6 +589,16 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     }
     report["pause_controls"] = {"recorded": sum(step["request"]["method"] == "pause" for step in trajectory.steps),
                                 "executed": 0, "verified_noop": 0}
+    report["spawn_comparison"] = {
+        "scope": "executed_prefix" if target_tick is not None else "entire_trajectory",
+        "hook_declared": trajectory.audit.manifest.get("spawn_hook", {}).get("installed") is True,
+        "source_controlled_total": trajectory.audit.birth_counts["controlled"],
+        "source_initialization_history": trajectory.audit.birth_counts["initialization"],
+        "actual_initialization_history": 0, "initialization_history_compared": False,
+        "initial_state_compared": False, "final_health_verified": False,
+        "excluded": ["global ordinal (includes unassigned preview history)",
+                     "raw animation handles after verified local semantic mapping"],
+    }
 
     def require_equal(expected, actual, stage):
         difference = first_difference(expected, actual)
@@ -642,6 +654,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             snapshot = client.request("audit_snapshot")
             require_equal(live_version, snapshot.get("version"), "initial_snapshot_boundary")
             require_equal(trajectory.initial["state"], snapshot.get("state"), "initial_state")
+            report["spawn_comparison"]["initial_state_compared"] = True
             # The actual trace remains independently packageable, including a
             # later branch continuation. It starts at actual B(0), not at the
             # seek target. Preserve the parent link without forging a snapshot.
@@ -770,6 +783,24 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                                   [particle_semantics(event) for event in right.particle_seeds],
                                   f"audit[{ordinal}:{index}].particle_shake")
                     report["particle_shake"]["semantic_seed_calls_compared"] += len(right.particle_seeds)
+                    # A birth's initializer-exit state can differ and later
+                    # converge before post_step. Compare it independently of
+                    # frame-state equality, in exact local occurrence order.
+                    for birth_index in range(max(len(left.spawn_events), len(right.spawn_events))):
+                        source_birth = left.spawn_events[birth_index] if birth_index < len(left.spawn_events) else None
+                        actual_birth = right.spawn_events[birth_index] if birth_index < len(right.spawn_events) else None
+                        wanted_birth = spawn_semantics(source_birth, left, map_version=mapped_version) if source_birth else None
+                        measured_birth = spawn_semantics(actual_birth, right) if actual_birth else None
+                        difference = first_difference(wanted_birth, measured_birth)
+                        if difference:
+                            raise ReplayDivergence({"stage": f"audit[{ordinal}:{index}].spawn[{birth_index}]",
+                                "tick": right.version["tick"], "phase": right.kind,
+                                "controlled_ordinal": report["spawn_events_compared"],
+                                "source_seq": source_birth["seq"] if source_birth else None,
+                                "actual_seq": actual_birth["seq"] if actual_birth else None,
+                                "difference": difference})
+                        report["spawn_events_compared"] += 1
+                        report["spawn_exercised"] = True
                     # Both canonical byte strings were reconstructed from the
                     # actual JSON Patches and checked against every native
                     # digest. Compare the bytes themselves, not only FNV hashes.
@@ -801,6 +832,12 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             source_frame_stream.close()
             source_frame_stream = None
             trajectory.audit.verify_files()
+            require_equal(report["spawn_events_compared"], actual_audit.birth_counts["controlled"],
+                          "spawn.uncompared_actual_events")
+            if target_tick is None:
+                require_equal(trajectory.audit.birth_counts["controlled"], report["spawn_events_compared"],
+                              "spawn.uncompared_source_events")
+            report["spawn_comparison"]["actual_initialization_history"] = actual_audit.birth_counts["initialization"]
             report["equal"] = True
             expected_captures = sum(step["request"]["method"] == "capture_frame"
                                     for step in trajectory.steps[:len(report["requests"])] )
@@ -818,12 +855,19 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             # A live consumer can continue with the exact returned epoch/version.
             if on_takeover is not None:
                 on_takeover(session, copy.deepcopy(report["takeover"]))
-        if trajectory.audit.manifest.get("particle_shake") is not None:
+        particle_required = trajectory.audit.manifest.get("particle_shake") is not None
+        spawn_required = report["spawn_comparison"]["hook_declared"] or trajectory.audit.birth_counts["controlled"] > 0
+        if particle_required or spawn_required:
             if on_takeover is None:
                 actual_audit.verify_closed()
             else:
                 AuditLog(session.audit_directory, require_closed=True)
-            report["particle_shake"]["final_health_verified"] = True
+            report["particle_shake"]["final_health_verified"] = particle_required
+            report["spawn_comparison"]["final_health_verified"] = spawn_required
+            if on_takeover is None:
+                require_equal(report["spawn_events_compared"], actual_audit.birth_counts["controlled"],
+                              "spawn.uncompared_close_events")
+                report["spawn_comparison"]["actual_initialization_history"] = actual_audit.birth_counts["initialization"]
     except Exception as error:
         for stream in (actual_frames, source_frame_stream):
             if stream is not None:

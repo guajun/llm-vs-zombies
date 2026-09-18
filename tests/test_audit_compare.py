@@ -49,6 +49,26 @@ def animation_audit(directory, handle=65538):
     return records
 
 
+def spawn_audit(directory, *, at="update", tick=0, initialization=False, count=1):
+    rows = animation_audit(directory)
+    offset = 0 if at == "action" else (1 if at == "update" else 2)
+    for name in ("checksums.jsonl", "state-deltas.jsonl", "reanimation-handles.jsonl", "events.jsonl"):
+        for row in rows[name]:
+            if row["seq"] >= offset:
+                row["seq"] += count
+    events = []
+    for ordinal in range(count):
+        events.append({"schema": SCHEMA, "seq": offset + ordinal, "kind": "zombie_initialized",
+            "phase": "initialization" if initialization else "controlled_boundary", "native_phase": "zombie_initialize_exit",
+            "version": None if initialization else {"epoch": 1, "tick": tick, "revision": 0},
+            "payload": {"schema": "lvz.spawn.v1", "kind": "zombie_initialized", "phase": "zombie_initialize_exit",
+                "ordinal": ordinal, "boundary": None if initialization else {"segment": 1, "tick": tick, "revision": 0}}})
+    rows["events.jsonl"] = events + rows["events.jsonl"]
+    for name, values in rows.items():
+        (directory / name).write_text("".join(json.dumps(row) + "\n" for row in values))
+    return rows
+
+
 def plant_animation_audit(directory, *, dead=0, squished=1, valid=False, rules=True):
     records = animation_audit(directory)
     manifest = json.loads((directory / "manifest.json").read_text())
@@ -127,6 +147,36 @@ def particle_audit(directory, pointer=0x10000140, identity=65538, *, age=5, site
 
 
 class AuditTests(unittest.TestCase):
+    def test_controlled_births_bind_to_update_or_next_action_boundary(self):
+        for phase, expected in (("update", [0, 1]), ("action", [1, 0])):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp) / "audit"
+                spawn_audit(directory, at=phase)
+                audit = AuditLog(directory, require_closed=True)
+                self.assertEqual([len(frame.spawn_events) for frame in audit.frames], expected)
+                self.assertEqual(audit.birth_counts, {"controlled": 1, "initialization": 0})
+                tail = AuditTail(directory)
+                self.assertEqual([len(frame.spawn_events) for frame in tail.read_request("a")], expected)
+                tail.verify_closed()
+
+    def test_spawn_wrong_or_missing_boundary_and_live_queue_overflow_fail_closed(self):
+        cases = (({"tick": 8}, "actual pre/post"),
+                 ({"at": "action", "tick": 8}, "next audited pre-step"),
+                 ({"at": "after", "tick": 1}, "no following audited boundary"),
+                 ({"initialization": True}, "lost its controlled boundary"))
+        for options, reason in cases:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp) / "audit"
+                spawn_audit(directory, **options)
+                with self.assertRaisesRegex(EvidenceError, reason):
+                    AuditLog(directory, require_closed=True)
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "audit"
+            spawn_audit(directory, count=2)
+            with mock_patch("llm_vs_zombies.audit_compare._SPAWN_BOUNDARY_LIMIT", 1):
+                with self.assertRaisesRegex(EvidenceError, "reader bound"):
+                    list(AuditTail(directory).read_request("a"))
+
     def test_continued_fnv_matches_independent_reference_across_chunks_and_seeds(self):
         data = bytes(range(256)) * 3 + b"\x00\xfflast"
         for seed in (0, 1, 14695981039346656037, 0xffffffffffffffff):
