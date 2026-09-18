@@ -4,6 +4,7 @@ import base64
 from contextlib import contextmanager
 import json
 from pathlib import Path
+import runpy
 import tempfile
 import unittest
 from unittest.mock import patch as mock_patch
@@ -265,6 +266,70 @@ class ReplayTests(unittest.TestCase):
         (trajectory.directory / "audit/reanimation-handles.jsonl").unlink()
         with self.assertRaisesRegex(EvidenceError, "required raw animation"):
             Trajectory.load(trajectory.directory)
+
+    def boundary_recording(self, name, groups, *, capture=False, transparent=False):
+        source = self.root / name
+
+        class TransparentDraw(ModelTransport):
+            def state(self):
+                state = super().state()
+                state["board"]["render_effect"] = 0
+                return state
+
+        model = (TransparentDraw if transparent else ModelTransport)(source / "audit")
+        with SessionTrace(source / "session.jsonl") as trace, Client(model, trace=trace) as client:
+            identity = identity_from_launcher(client.hello(), ARTIFACTS)
+            capture_initial(client, identity=identity, initialization={"seed": 42, "synthetic": True})
+            for ticks in groups:
+                if capture:
+                    client.request("capture_frame", expect=client.version)
+                client.advance(ticks)
+            client.request("stop_recording", expect=client.version)
+        return build_trajectory(source / "session.jsonl", source / "audit", self.root / (name + "-bundle"))
+
+    def boundary_tools(self):
+        return runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/check-boundary-equivalence.py"))
+
+    def test_boundary_equivalence_compares_single_vs_batch_without_request_metadata(self):
+        left = self.boundary_recording("single", [1] * 100)
+        right = self.boundary_recording("batch", [100])
+        result = self.boundary_tools()["compare"](left.directory, right.directory, purpose="batch", ticks=100)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["frames_compared"], 200)
+        self.assertEqual(result["requests"], [100, 1])
+        self.assertFalse(result["spawn_exercised"])
+        self.assertFalse(result["original_engine_replay_verified"])
+
+    def test_boundary_render_comparison_detects_hidden_effect_despite_unchanged_rng_and_clock(self):
+        left = self.boundary_recording("render-off", [2])
+        right = self.boundary_recording("render-on", [2], capture=True)
+        compare = self.boundary_tools()["compare"]
+        result = compare(left.directory, right.directory, purpose="render", ticks=2)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["difference"]["path"], "/board/render_effect")
+        self.assertEqual(result["phase"], "pre_step")
+        transparent = self.boundary_recording("render-transparent", [2], capture=True, transparent=True)
+        self.assertTrue(compare(left.directory, transparent.directory, purpose="render", ticks=2)["passed"])
+
+    def test_spawn_semantic_comparison_requires_verified_handle_mapping(self):
+        from llm_vs_zombies.audit_compare import AuditFrame
+        normalize = self.boundary_tools()["_spawn_semantics"]
+        normalized = []
+        for handle in (65538, 131074):
+            event = {"payload": {"slot": 7, "ordinal": 9, "boundary": {},
+                "initial": {"raw_scalar_fields": {"00000118": handle, "00000140": 0, "00000144": 0,
+                                                   "00000150": 0, "0000002c": 0x3f800000}},
+                "global_mt_after": {"cursor": 123}}}
+            raw = {"links": [{"path": "/zombies/slots/7/fields/00000118", "raw_handle": handle,
+                              "lookup_matches": True, "normalized_reference": {"status": "live", "node": "owner#0"}}]}
+            frame = AuditFrame(0, "post_step", {}, {}, {}, {}, raw_animations=raw)
+            normalized.append(normalize(event, frame))
+            raw["links"][0]["raw_handle"] += 1
+            with self.assertRaisesRegex(EvidenceError, "cannot be proven"):
+                normalize(event, frame)
+        self.assertEqual(normalized[0], normalized[1])
+        self.assertEqual(normalized[0]["initial"]["raw_scalar_fields"]["0000002c"], 0x3f800000)
+        self.assertEqual(normalized[0]["global_mt_after"]["cursor"], 123)
 
     def test_seek_recomputes_intermediate_actions_and_truncates_only_budget(self):
         taken = []

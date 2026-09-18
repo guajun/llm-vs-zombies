@@ -136,6 +136,26 @@ replayer 比较末帧状态及转场字段，然后刷新观察以获取 Control
 
 支持终局审计不等于自动判定已完成两旗。实验运行器仍需证明场景、实际观察到第 20 波及完成轮数增长，并执行多次冷启动和暂停扰动验收。
 
+## 单步/批量与录像干预的独立验收
+
+`tools/check-boundary-equivalence.py` 只读取两份已封包的真实记录，不启动游戏。两组都应从独立冷启动开始，用同一 DLL、游戏/资源/存档散列、seed、初始化配方与 clock anchor；先验证初态相同，再执行确定的测试输入。组间的运行时间、请求 ID 和推进预算无需相同。
+
+单步/批量组关闭 capture，左组连续执行 100 次 `advance(1)`，右组只执行一次 `advance(100)`，两者均关闭录制并封包。工具要求恰好满足此安排，且没有动作或 capture 混入：
+
+```powershell
+python tools/check-boundary-equivalence.py work/single-trajectory work/batch-trajectory --purpose batch --ticks 100 --output work/batch-acceptance.json
+```
+
+录像干预组使用相同动作时序与 seed/初始化配方，左组关闭 capture，右组按实际录像节奏调用成功的 `capture_frame`。右组所有捕获都必须实际 forced_render、报告 known RNG 未变且前后 GameClock 一致。每次捕获后必须至少有一个受审计的推进帧；在最后一帧才捕获而没有后续审计，不能证明动画等隐藏状态未变，工具会拒绝。视频是否写入 FFmpeg 不影响这里的游戏状态判据，但正式录像实验仍应保留视频和 frame mapping。
+
+```powershell
+python tools/check-boundary-equivalence.py work/capture-off-trajectory work/capture-on-trajectory --purpose render --ticks 100 --output work/render-acceptance.json
+```
+
+两种比较都锁步遍历每个 tick 的 pre/post 完整规范化状态，包含已覆盖 RNG、动画时间/速率/track 等字段，而非只比较末态。强制绘制可能改变这些字段，即使 RNG/Clock 保护通过，也会在首个真实分叉处失败。动作尝试按实际 tick 和顺序比较；受控出生按 tick 和出现顺序比较初始化原始属性、初始位置、随机属性和 RNG 前后态。出生中的四个动画原句柄仅在随后 post 边界的原始旁证证明其角色/句柄映射时转换为稳定节点引用；调用者在初始化后替换句柄、缺少对应旁证或无法证明映射时直接失败，不删除字段来制造相等。
+
+报告明确写出 `spawn_exercised`。100 ticks 内没有出生只证明该区间的状态等价，不能当作出生路径验收；另加覆盖实际出生的较长录像对照，或把相同的初始化配方设置在即将出生的稳定边界后再测试。初始 marker 之前的初始化出生历史不在此区间比较范围，初态本身仍严格比较。工具通过不等于未采集字段也确定，`original_engine_replay_verified` 始终保持 false。
+
 ## 审计、边界与验证
 
 支持动画身份归一化的记录在 `coverage.reanimations.raw_handle_evidence` 声明必需的 `audit/reanimation-handles.jsonl`。该旁证和 checksum/delta 每条 pre/post 的 schema、seq、kind、version、payload 一一对应，使用首态加 JSON Patch 保留原始句柄、槽位及代次、分配池、归属关系。封包复制该文件并绑定 SHA-256；读取器重建旁证，核对原始查找结果、全部 owner 路径、归一化引用与共享节点关系。缺失、截断、数量/边界不符、无效 patch、损坏查找或原生 link fault 都立即拒绝。实际重放的增量 `AuditTail` 执行相同验证。
@@ -150,7 +170,7 @@ replayer 比较末帧状态及转场字段，然后刷新观察以获取 Control
 
 项目自带 LLVM-MinGW 或系统 `cc/clang/gcc` 可把模块中约十行的 FNV C 函数编译成当前 **Python 进程架构**的本机辅助库，缓存在 `work/audit-hash/`。它仅加速本地字节哈希，不注入游戏、不改变算法、不增加 Python 包依赖；加载时用空串、全字节值和含 NUL 数据核对参考结果。编译器不可用时自动使用完全相同的 Python 算法，`LVZ_PYTHON_FNV=1` 可在新进程强制回退。重放报告记录 `audit_hash_backend`。本机已关闭的 007 实验前六帧抽样中，相同校验的 cProfile 时间从 0.447 秒降至 0.022 秒；这只是抽样性能证据，不是整局验收。
 
-2026-09-19 对已关闭的真实 `eval-headless-010-s42-c0` 离线封包验证了 1,000 ticks / 2,000 帧边界和 11 条执行请求，包含约 33.9 MB 状态差分、0.65 MB 动画旁证及精确出生事件。两遍完整重建校验、复制和 SHA-256 封包共 28.62 秒，使用 native C FNV；这次计时只证明该实际录制可完整读取归档，不证明冷重放相等或两旗实验通过。
+2026-09-19 对已关闭的真实 `eval-headless-010-s42-c0` 离线封包验证了 1,000 ticks / 2,000 帧边界和 11 条执行请求，包含约 33.9 MB 状态差分、0.65 MB 动画旁证及精确出生事件。两遍完整重建校验、复制和 SHA-256 封包共 28.62 秒，使用 native C FNV。旧格式的 `eval-headless-007-s42-c0` 同样 1,000 ticks / 2,000 帧边界、11 请求，完整封包用时 7.40 秒；其状态覆盖较小且无动画旁证，不能把两者直接作同工作量速度比较。这些计时只证明对应实际录制可完整读取归档，不证明冷重放相等或两旗实验通过。
 
 报告中的 JSON Pointer 例如 `/zombies/slots/3/fields/0000002c` 精确定位原始位模式差异。FNV 摘要仅用于诊断；文件完整性由 SHA-256 检查。读入日志时拒绝重复 JSON 键、非 JSON 数值、截断尾行和缺失证据。原生审计的完整覆盖能力仍由 `determinism.md` 中的实际能力决定，比较通过不会把 `complete_game_state` 或 `original_engine_replay_verified` 自动改成 true。
 
