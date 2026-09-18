@@ -15,11 +15,13 @@ import subprocess
 import tempfile
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA = "lvz.audit.v1"
+RAW_ANIMATIONS = "reanimation-handles.jsonl"
+AUDIT_FILES = ("manifest.json", "events.jsonl", "checksums.jsonl", "state-deltas.jsonl")
 _FNV_SOURCE = r"""
 #include <stddef.h>
 #include <stdint.h>
@@ -158,6 +160,29 @@ def jsonl(path: Path) -> Iterator[dict]:
 def file_hash(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
+    """Resolve supported evidence files without trusting a manifest path."""
+    coverage = manifest.get("coverage", {})
+    if not isinstance(coverage, dict):
+        raise EvidenceError("invalid native audit coverage")
+    animations = coverage.get("reanimations", {})
+    if not isinstance(animations, dict):
+        raise EvidenceError("invalid animation coverage")
+    descriptor = animations.get("raw_handle_evidence")
+    required = coverage.get("animation_normalization") is True or manifest.get("animation_normalization") is True
+    if descriptor is not None:
+        if (not isinstance(descriptor, dict) or descriptor.get("path") != "audit/" + RAW_ANIMATIONS
+                or descriptor.get("encoding") != "initial_plus_json_patch"
+                or descriptor.get("binding") != ["seq", "kind", "version"]
+                or type(descriptor.get("required")) is not bool):
+            raise EvidenceError("unsupported raw animation evidence descriptor")
+        required |= descriptor["required"]
+    present = (directory / RAW_ANIMATIONS).is_file()
+    if required and not present:
+        raise EvidenceError("required raw animation evidence is missing")
+    return AUDIT_FILES + ((RAW_ANIMATIONS,) if present else ())
 
 
 def _check_state_values(item):
@@ -318,6 +343,124 @@ class AuditFrame:
     state: dict
     digests: dict
     canonical_state: bytes | None = None
+    raw_animations: dict | None = None
+
+
+class _AnimationDecoder:
+    """Validate raw allocation evidence against each normalized frame.
+
+    Raw handles are retained and checked locally, never equated across runs.
+    The decoder retains one reconstructed raw snapshot, not the full history.
+    """
+    def __init__(self):
+        self.state = None
+
+    def accept(self, record, frame):
+        AuditLog._envelope(record)
+        envelope = {"schema": SCHEMA, "seq": frame.seq, "kind": frame.kind,
+                    "version": frame.version, "payload": frame.payload}
+        if any(record[key] != value for key, value in envelope.items()):
+            raise EvidenceError("raw animation/frame envelope mismatch")
+        if self.state is None:
+            if "initial" not in record or "patch" in record:
+                raise EvidenceError("raw animation evidence requires initial state")
+            self.state = record["initial"]
+        else:
+            if "initial" in record or not isinstance(record.get("patch"), list):
+                raise EvidenceError("raw animation evidence requires subsequent patch")
+            self.state = patch(self.state, record["patch"], in_place=True)
+        raw = self.state
+        if raw is None and frame.state.get("board") is None and "reanimations" not in frame.state:
+            return
+        if not isinstance(raw, dict) or raw.get("schema") != "lvz.reanimation-raw.v1":
+            raise EvidenceError("invalid raw animation state schema")
+        pool, slots, links = raw.get("pool"), raw.get("actual_slot_ids"), raw.get("links")
+        uint = lambda value: type(value) is int and 0 <= value <= 0xffffffff
+        if (not isinstance(pool, dict) or set(pool) != {"capacity", "used", "count", "free_head", "next_key"}
+                or not all(uint(value) for value in pool.values()) or not pool["used"] <= pool["capacity"] <= 65536
+                or not isinstance(slots, dict) or pool["count"] != len(slots) or not isinstance(links, list)):
+            raise EvidenceError("invalid raw animation pool")
+        for slot, identity in slots.items():
+            if (not slot.isascii() or not slot.isdecimal() or str(int(slot)) != slot
+                    or int(slot) >= pool["used"] or not uint(identity) or identity >> 16 == 0
+                    or identity & 0xffff != int(slot)):
+                raise EvidenceError("raw animation slot/generation mismatch")
+        normalized = frame.state.get("reanimations")
+        if (not isinstance(normalized, dict) or normalized.get("schema") != "lvz.reanimation-links.v1"
+                or normalized.get("valid") is not True or normalized.get("issues") != []
+                or not isinstance(normalized.get("nodes"), dict)):
+            raise EvidenceError("invalid comparable animation state")
+        paths, anchors, owners = set(), set(), {}
+        for link in links:
+            if not isinstance(link, dict):
+                raise EvidenceError("invalid raw animation link")
+            path, anchor, handle = link.get("path"), link.get("anchor"), link.get("raw_handle")
+            if (not isinstance(path, str) or not path or path in paths or not isinstance(anchor, str)
+                    or not anchor or anchor in anchors or not uint(handle) or type(link.get("slot")) is not int
+                    or link["slot"] != handle & 0xffff or type(link.get("owner_dead")) is not bool
+                    or type(link.get("lookup_matches")) is not bool):
+                raise EvidenceError("invalid raw animation link identity")
+            paths.add(path)
+            anchors.add(anchor)
+            actual = slots.get(str(link["slot"]))
+            matches = handle != 0 and actual == handle
+            if link.get("actual_slot_id") != actual or link["lookup_matches"] != matches:
+                raise EvidenceError("raw animation lookup evidence mismatch")
+            reference = link.get("normalized_reference")
+            if not isinstance(reference, dict):
+                raise EvidenceError("invalid normalized animation reference")
+            try:
+                field = frame.state
+                for token in _tokens(path):
+                    field = field[_index(field, token)]
+            except (KeyError, TypeError) as error:
+                raise EvidenceError("raw animation owner path is missing") from error
+            if reference != field:
+                raise EvidenceError("raw animation reference differs from comparable state")
+            if not handle:
+                if reference != {"status": "null"}:
+                    raise EvidenceError("non-null reference for zero animation handle")
+            elif not matches:
+                reason = "out_of_range" if link["slot"] >= pool["capacity"] else (
+                    "not_allocated" if actual is None else "generation_mismatch")
+                if not link["owner_dead"] or reference != {"status": "expired"} or link.get("lookup_failure") != reason:
+                    raise EvidenceError("invalid or dangling live animation link")
+            else:
+                node = link.get("logical_node")
+                if (not isinstance(node, str) or reference.get("node") != node
+                        or reference.get("status") not in {"live", "retiring"} or node not in normalized["nodes"]):
+                    raise EvidenceError("raw animation logical node mismatch")
+                owners.setdefault(node, []).append(anchor)
+        if set(owners) != set(normalized["nodes"]):
+            raise EvidenceError("raw animation node evidence is incomplete")
+        expected_paths = set()
+        board = frame.state.get("board", {})
+        for key, value in board.items() if isinstance(board, dict) else ():
+            if isinstance(value, dict) and "status" in value:
+                expected_paths.add("/board/" + key.replace("~", "~0").replace("/", "~1"))
+        for pool_name in ("zombies", "plants", "mowers", "grid_items"):
+            for slot, entity in frame.state.get(pool_name, {}).get("slots", {}).items():
+                for key, value in entity.get("fields", {}).items():
+                    if isinstance(value, dict) and "status" in value:
+                        expected_paths.add(f"/{pool_name}/slots/{slot}/fields/{key}")
+        if paths != expected_paths:
+            raise EvidenceError("raw animation owner evidence is incomplete")
+        for node, anchors_for_node in owners.items():
+            if normalized["nodes"][node].get("owners") != anchors_for_node:
+                raise EvidenceError("raw animation owner alias graph mismatch")
+
+
+def _event_sequences(events, frames):
+    """Old birth annotations shared a frame seq; newer births consume one."""
+    versions = {frame.seq: frame.version for frame in frames}
+    primary = list(versions)
+    for event in events:
+        if event["kind"] == "zombie_first_boundary_observed" and event["seq"] in versions:
+            if event["version"] != versions[event["seq"]]:
+                raise EvidenceError("birth annotation/frame version mismatch")
+        else:
+            primary.append(event["seq"])
+    return primary
 
 
 class _FrameDecoder:
@@ -366,6 +509,9 @@ class _FrameDecoder:
         computed, encoded = _state_digests(self.state, self.cache, changed, with_encoded=True)
         if self.state.get("schema") != SCHEMA or hashes.get("digests") != computed:
             raise EvidenceError("state digest/schema mismatch after JSON Patch reconstruction")
+        if "reanimations" in self.state and (not isinstance(self.state["reanimations"], dict)
+                                             or self.state["reanimations"].get("valid") is not True):
+            raise EvidenceError("native animation links are invalid")
         frame = AuditFrame(hashes["seq"], hashes["kind"], hashes["version"],
                            hashes["payload"], self.state, hashes["digests"], encoded)
         if frame.kind == "pre_step":
@@ -423,7 +569,10 @@ class AuditLog:
             raise EvidenceError("invalid native audit manifest")
         if self.manifest.get("loaded_signatures_match") is not True:
             raise EvidenceError("native target signatures did not match")
+        self.evidence_files = audit_files(self.directory, self.manifest)
         self.events = list(jsonl(self.directory / "events.jsonl"))
+        if any(event.get("kind") == "reanimation_link_fault" for event in self.events):
+            raise EvidenceError("native animation link fault invalidates strict evidence")
         self._headers = [AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, frame.digests)
                          for frame in self._frames(reuse_state=True)]
         self._frame_headers = [(frame.seq, frame.payload.get("request_id")) for frame in self._headers]
@@ -433,7 +582,6 @@ class AuditLog:
             self._request_frames.setdefault(rid, []).append(frame)
             self._frame_indices.setdefault(rid, []).append(index)
         self.frames = FrameSelection(self)
-        primary = [seq for seq, _ in self._frame_headers]
         last_event = -1
         for event in self.events:
             self._envelope(event)
@@ -441,30 +589,64 @@ class AuditLog:
                 raise EvidenceError("audit event sequence moved backwards")
             last_event = event["seq"]
             self._requests.setdefault(event["payload"].get("request_id"), []).append(event)
-            # Birth observations share the step sequence; they are annotations.
-            if event["kind"] != "zombie_first_boundary_observed":
-                primary.append(event["seq"])
+        primary = _event_sequences(self.events, self._headers)
         if sorted(primary) != list(range(len(primary))):
             raise EvidenceError("native audit sequence is missing or duplicated")
-        if require_closed and (not self.events or self.events[-1]["kind"] != "recording_closed"):
-            raise EvidenceError("native recording lacks a completed recording_closed boundary")
+        if require_closed:
+            final = self.events
+            if final and final[-1]["kind"] == "spawn_hook_closed":
+                health = final[-1]["payload"]
+                births = [event for event in final if event["kind"] == "zombie_initialized"]
+                if (health.get("healthy") is not True or any(type(health.get(key)) is not int or health[key] != 0
+                        for key in ("faults", "overflow", "wrong_thread_calls", "queued", "active_initializers"))
+                        or health.get("captured") != len(births)
+                        or [event["payload"].get("ordinal") for event in births] != list(range(len(births)))):
+                    raise EvidenceError("final spawn hook evidence is unhealthy or incomplete")
+                if len(final) < 2 or final[-1]["version"] != final[-2]["version"]:
+                    raise EvidenceError("spawn hook close boundary differs from recording close")
+                final = final[:-1]
+            if not final or final[-1]["kind"] != "recording_closed":
+                raise EvidenceError("native recording lacks a completed recording_closed boundary")
 
     @staticmethod
     def _envelope(record):
         if record.get("schema") != SCHEMA or type(record.get("seq")) is not int or record["seq"] < 0:
             raise EvidenceError("invalid native audit schema/sequence")
-        version(record.get("version"))
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
+        if record["kind"] == "spawn_hook_fault":
+            raise EvidenceError("native spawn hook fault invalidates strict evidence")
+        if record["kind"] == "zombie_initialized":
+            spawn = record["payload"]
+            if (record.get("native_phase") != "zombie_initialize_exit" or spawn.get("schema") != "lvz.spawn.v1"
+                    or spawn.get("kind") != "zombie_initialized" or spawn.get("phase") != "zombie_initialize_exit"):
+                raise EvidenceError("invalid exact zombie initialization evidence")
+            if record.get("phase") == "initialization":
+                if record.get("version") is not None or "boundary" not in spawn or spawn["boundary"] is not None:
+                    raise EvidenceError("initialization spawn must have an explicitly unassigned boundary")
+                return
+            boundary = spawn.get("boundary")
+            if (record.get("phase") != "controlled_boundary" or not isinstance(boundary, dict)
+                    or record.get("version") != {"epoch": boundary.get("segment"), "tick": boundary.get("tick"),
+                                                 "revision": boundary.get("revision")}):
+                raise EvidenceError("controlled spawn boundary/version mismatch")
+        version(record.get("version"))
 
     def _frames(self, *, reuse_state=False):
         from itertools import zip_longest
         decoder = _FrameDecoder(reuse_state=reuse_state)
-        for hashes, delta in zip_longest(jsonl(self.directory / "checksums.jsonl"),
-                                         jsonl(self.directory / "state-deltas.jsonl")):
-            if hashes is None or delta is None:
-                raise EvidenceError("checksum/delta record count mismatch")
-            yield decoder.accept(hashes, delta)
+        readers = [jsonl(self.directory / name) for name in ("checksums.jsonl", "state-deltas.jsonl")]
+        animation = _AnimationDecoder() if RAW_ANIMATIONS in self.evidence_files else None
+        if animation:
+            readers.append(jsonl(self.directory / RAW_ANIMATIONS))
+        for records in zip_longest(*readers):
+            if any(record is None for record in records):
+                raise EvidenceError("checksum/delta/raw animation record count mismatch")
+            frame = decoder.accept(records[0], records[1])
+            if animation:
+                animation.accept(records[2], frame)
+                frame = replace(frame, raw_animations=animation.state if reuse_state else copy.deepcopy(animation.state))
+            yield frame
         decoder.finish()
 
     def request_frames(self, request_id: str) -> FrameSelection:
@@ -491,9 +673,11 @@ class AuditTail:
         if (self.manifest.get("schema") != SCHEMA or not isinstance(self.manifest.get("target"), str)
                 or self.manifest.get("loaded_signatures_match") is not True):
             raise EvidenceError("invalid live audit target manifest")
+        self.evidence_files = audit_files(self.directory, self.manifest)
         self.events, self._headers = [], []
-        self._positions = {name: 0 for name in ("events.jsonl", "checksums.jsonl", "state-deltas.jsonl")}
+        self._positions = {name: 0 for name in self.evidence_files if name != "manifest.json"}
         self._decoder = _FrameDecoder(reuse_state=True)
+        self._animation = _AnimationDecoder() if RAW_ANIMATIONS in self.evidence_files else None
         self._next_seq, self._last_event_seq = 0, -1
         self._identities = {}
         self._requests, self._request_frames = {}, {}
@@ -520,28 +704,39 @@ class AuditTail:
 
     def read_request(self, request_id: str):
         from itertools import zip_longest
-        primary = []
+        # A sidecar may not silently appear/disappear partway through a run.
+        if audit_files(self.directory, self.manifest) != self.evidence_files:
+            raise EvidenceError("live audit evidence file set changed")
+        new_events, new_frames = [], []
         for event in self._new_records("events.jsonl"):
+            if event.get("kind") == "reanimation_link_fault":
+                raise EvidenceError("native animation link fault invalidates strict evidence")
             AuditLog._envelope(event)
             if event["seq"] < self._last_event_seq:
                 raise EvidenceError("live audit event sequence moved backwards")
             self._last_event_seq = event["seq"]
             self.events.append(event)
+            new_events.append(event)
             self._requests.setdefault(event["payload"].get("request_id"), []).append(event)
-            if event["kind"] != "zombie_first_boundary_observed":
-                primary.append(event["seq"])
-        for hashes, delta in zip_longest(self._new_records("checksums.jsonl"), self._new_records("state-deltas.jsonl")):
-            if hashes is None or delta is None:
-                raise EvidenceError("live checksum/delta record count mismatch")
-            frame = self._decoder.accept(hashes, delta)
+        readers = [self._new_records(name) for name in ("checksums.jsonl", "state-deltas.jsonl")]
+        if self._animation:
+            readers.append(self._new_records(RAW_ANIMATIONS))
+        for records in zip_longest(*readers):
+            if any(record is None for record in records):
+                raise EvidenceError("live checksum/delta/raw animation record count mismatch")
+            frame = self._decoder.accept(records[0], records[1])
+            if self._animation:
+                self._animation.accept(records[2], frame)
+                frame = replace(frame, raw_animations=self._animation.state)
             if frame.payload.get("request_id") != request_id:
                 raise EvidenceError("unexpected intervening request in live frame audit")
             header = AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, frame.digests)
             self._headers.append(header)
             self._request_frames.setdefault(request_id, []).append(header)
-            primary.append(frame.seq)
+            new_frames.append(header)
             yield frame
         self._decoder.finish()
+        primary = _event_sequences(new_events, new_frames)
         if sorted(primary) != list(range(self._next_seq, self._next_seq + len(primary))):
             raise EvidenceError("live audit sequence is missing or duplicated")
         self._next_seq += len(primary)

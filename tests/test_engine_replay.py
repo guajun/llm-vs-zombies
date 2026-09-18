@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch as mock_patch
 
-from llm_vs_zombies.audit_compare import AuditTail, SCHEMA, EvidenceError, digests
+from llm_vs_zombies.audit_compare import AuditTail, SCHEMA, EvidenceError, canonical, digests, file_hash
 from llm_vs_zombies.client import Client, OutcomeUnknown, RemoteError
 from llm_vs_zombies.engine_replay import (ReplayDivergence, ReplaySession, Trajectory,
     build_trajectory, capture_initial, identity_from_launcher, replay)
@@ -24,12 +24,19 @@ ARTIFACTS = {"input_hashes": {"game": "1" * 64}, "module_hashes": {"runtime": "2
 
 class ModelTransport:
     def __init__(self, directory, *, epoch=1, revision=0, divergence=None, wrong_result=False, terminal_tick=None,
-                 pixel_byte=1, wrong_capture_guard=False, capture_timeout=False):
+                 pixel_byte=1, wrong_capture_guard=False, capture_timeout=False, animation_handle=None):
         self.directory = directory
         directory.mkdir(parents=True)
-        (directory / "manifest.json").write_text(json.dumps(GAME), encoding="utf-8")
+        self.game, self.animation_handle = copy.deepcopy(GAME), animation_handle
+        if animation_handle is not None:
+            self.game["coverage"]["reanimations"] = {"raw_handle_evidence": {
+                "path": "audit/reanimation-handles.jsonl", "encoding": "initial_plus_json_patch",
+                "binding": ["seq", "kind", "version"], "required": True}}
+        (directory / "manifest.json").write_text(json.dumps(self.game), encoding="utf-8")
         self.files = {name: (directory / name).open("w", encoding="utf-8", newline="\n")
                       for name in ("events.jsonl", "checksums.jsonl", "state-deltas.jsonl")}
+        if animation_handle is not None:
+            self.files["reanimation-handles.jsonl"] = (directory / "reanimation-handles.jsonl").open("w", encoding="utf-8", newline="\n")
         self.seq, self.tick, self.revision, self.epoch, self.sun = 0, 0, revision, epoch, 500
         self.previous, self.divergence, self.wrong_result = None, divergence, wrong_result
         self.requests = []
@@ -46,10 +53,15 @@ class ModelTransport:
                 "game_clock": self.tick, "wave": 1, "plants": [], "zombies": [], "seeds": []}
 
     def state(self):
-        return {"schema": SCHEMA, "rng": {"target": GAME["target"], "state": 1 + self.tick + self.rng_delta},
+        state = {"schema": SCHEMA, "rng": {"target": GAME["target"], "state": 1 + self.tick + self.rng_delta},
                 "board": {"tick": self.tick, "sun": self.sun,
                           "render_effect": self.draw_count,
                           "hidden": 999 if self.divergence == self.tick else 0}}
+        if self.animation_handle is not None:
+            state["board"]["animation"] = {"status": "live", "node": "test#0"}
+            state["reanimations"] = {"schema": "lvz.reanimation-links.v1", "valid": True, "issues": [],
+                "nodes": {"test#0": {"state": {"time": self.tick}, "owners": ["test"]}}}
+        return state
 
     def write(self, name, value):
         self.files[name].write(json.dumps(value, separators=(",", ":")) + "\n")
@@ -64,6 +76,14 @@ class ModelTransport:
             self.write("checksums.jsonl", dict(value, digests=digests(state)))
             delta = {"initial": state} if self.previous is None else {"patch": [{"op": "replace", "path": "", "value": state}]}
             self.write("state-deltas.jsonl", dict(value, **delta))
+            if self.animation_handle is not None:
+                handle = self.animation_handle
+                raw = {"schema": "lvz.reanimation-raw.v1", "pool": {"capacity": 4, "used": 3, "count": 1,
+                    "free_head": 3, "next_key": handle >> 16}, "actual_slot_ids": {"2": handle},
+                    "links": [{"path": "/board/animation", "anchor": "test", "raw_handle": handle,
+                        "slot": 2, "owner_dead": False, "lookup_matches": True, "actual_slot_id": handle,
+                        "logical_node": "test#0", "normalized_reference": state["board"]["animation"]}]}
+                self.write("reanimation-handles.jsonl", dict(value, **({"initial": raw} if self.previous is None else {"patch": []})))
             self.previous = state
         else:
             self.write("events.jsonl", value)
@@ -74,7 +94,7 @@ class ModelTransport:
         self.requests.append(copy.deepcopy(request))
         method, params, rid = request["method"], request["params"], request["request_id"]
         if method == "hello":
-            result = {"build": BUILD, "game": GAME, "session": "synthetic", "pid": 123,
+            result = {"build": BUILD, "game": self.game, "session": "synthetic", "pid": 123,
                       "capabilities": dict.fromkeys(("observe", "advance", "commit", "audit_snapshot", "capture_frame"), True)}
         elif method == "observe":
             result = self.observe()
@@ -191,7 +211,8 @@ class ReplayTests(unittest.TestCase):
         def initialize(trajectory, output):
             self.live = ModelTransport(output / "audit", epoch=99, revision=2,
                                        divergence=divergence, wrong_result=wrong_result, terminal_tick=terminal_tick,
-                                       pixel_byte=2, wrong_capture_guard=wrong_capture_guard, capture_timeout=capture_timeout)
+                                       pixel_byte=2, wrong_capture_guard=wrong_capture_guard, capture_timeout=capture_timeout,
+                                       animation_handle=131074 if "reanimations" in trajectory.audit.manifest.get("coverage", {}) else None)
             identity = copy.deepcopy(self.identity)
             if wrong_identity:
                 identity["artifacts"]["module_hashes"]["runtime"] = "4" * 64
@@ -208,6 +229,42 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(len(result["requests"][0]["result"]["action_results"]), 2)
         self.assertEqual(steps[1]["expect"], {"epoch": 99, "tick": 0, "revision": 4})
         self.assertEqual(result["reached_version"]["tick"], 5)
+
+    def animation_recording(self):
+        source = self.root / "animation-source"
+        model = ModelTransport(source / "audit", animation_handle=65538)
+        with SessionTrace(source / "session.jsonl") as trace, Client(model, trace=trace) as client:
+            self.identity = identity_from_launcher(client.hello(), ARTIFACTS)
+            capture_initial(client, identity=self.identity, initialization={"synthetic": True})
+            client.advance(2)
+            client.request("stop_recording", expect=client.version)
+        return build_trajectory(source / "session.jsonl", source / "audit", self.root / "animation-bundle")
+
+    def test_animation_sidecar_is_bound_copied_and_checked_during_actual_replay(self):
+        trajectory = self.animation_recording()
+        key = "audit/reanimation-handles.jsonl"
+        self.assertEqual(trajectory.manifest["files"][key], file_hash(trajectory.directory / key))
+        result = replay(trajectory, self.initializer(), self.root / "animation-replayed")
+        self.assertTrue(result["equal"])
+        self.assertNotEqual(file_hash(trajectory.directory / key), file_hash(self.root / "animation-replayed" / key))
+        with (trajectory.directory / key).open("a") as stream:
+            stream.write("{}\n")
+        with self.assertRaisesRegex(EvidenceError, "SHA-256"):
+            Trajectory.load(trajectory.directory)
+
+    def test_normalized_trajectory_cannot_drop_raw_evidence_binding(self):
+        import hashlib
+        trajectory = self.animation_recording()
+        manifest = trajectory.manifest
+        del manifest["files"]["audit/reanimation-handles.jsonl"]
+        manifest["trajectory_id"] = hashlib.sha256(canonical({key: value for key, value in manifest.items()
+                                                            if key != "trajectory_id"})).hexdigest()
+        (trajectory.directory / "trajectory.json").write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(EvidenceError, "file set is incomplete"):
+            Trajectory.load(trajectory.directory)
+        (trajectory.directory / "audit/reanimation-handles.jsonl").unlink()
+        with self.assertRaisesRegex(EvidenceError, "required raw animation"):
+            Trajectory.load(trajectory.directory)
 
     def test_seek_recomputes_intermediate_actions_and_truncates_only_budget(self):
         taken = []

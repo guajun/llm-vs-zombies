@@ -15,6 +15,7 @@ struct Backend {
     virtual bool Ready() const = 0;
     virtual std::uintptr_t BoardIdentity() const = 0;
     virtual int NativeTick() const = 0;
+    virtual int NativeWave() { return Observe().value("wave",0); }
     virtual Json Observe() = 0;
     virtual Json Execute(const Json& action) = 0;
     virtual Json Hello() = 0;
@@ -43,6 +44,7 @@ public:
     void AfterStep();
     void Stop(const std::string& reason);
     void Disconnect(const std::string& requestId);
+    void Fail(const std::string& message);
     Json Observe();
     Json Version() const;
     Json Status() const;
@@ -58,6 +60,7 @@ private:
     bool initialized_=false, ready_=false, inStep_=false;
     bool recordingClosed_=false;
     bool terminalFrozen_=false;
+    std::string fault_;
     int nativeTick_=0, preTick_=0;
     std::map<std::string, Entry> cache_;
     std::map<std::string, CaptureEntry> captureCache_;

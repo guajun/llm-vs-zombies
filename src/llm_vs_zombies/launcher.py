@@ -198,6 +198,10 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
             state["initial_observation"] = observation
             write_json(run / "launcher.json", state)
             write_json(run / "observations/initial.json", observation)
+            if initialize:
+                from .records import record_initial_state
+                record_initial_state(run, observation_path=run / "observations/initial.json",
+                                     hello=state["hello"], scenario_verified=state["scenario_verified"])
         return state
     except BaseException as error:
         receipt_path = sandbox / "native-receipt.json"

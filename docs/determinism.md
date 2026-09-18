@@ -46,11 +46,12 @@ lvz::determinism::Shutdown();
 - `manifest.json`：目标签名、实现能力和显式覆盖缺口。
 - `checksums.jsonl`：每组件及整体的 FNV-1a 64 位诊断摘要。它不是密码学签名，不用于资产真实性证明。
 - `state-deltas.jsonl`：首个完整规范化状态，随后保存 JSON Patch，可重建每次审计并展开首个字段差异。
+- `reanimation-handles.jsonl`：与每个状态摘要同 seq/version 的原始动画句柄、实际池 ID、链接验证及逻辑映射；首条完整、后续 JSON Patch。比较态使用持续的语义身份关联，不能把规范化通过称为原始句柄逐位相等，见 [动画关联审计](determinism-reanimation.md)。
 - `events.jsonl`：动作/请求/其他 runtime 审计消息，以及 `zombie_first_boundary_observed`。后者含 ID、slot、全部覆盖的原始标量字段，`exact_spawn=false`。
 
 `Initialize` 同时安装 `spawn_hook`，每次 `Audit` 先清空其队列并检查健康状态；`request_started/pre_step` 以及连续动作之间依据 `observation.version` 标注新的控制边界。`post_step/request_completed` 等事件后清空边界标签，预览生成不会沿用上一动作的版本。新增 `zombie_initialized` 外层 `phase` 为 `initialization` 或 `controlled_boundary`，`native_phase` 及原始 payload 的 `phase` 为 `zombie_initialize_exit`。`Shutdown` 先 drain、检查、记录最终健康状态，再移除本模块 hook；移除失败不允许卸载 DLL。具体 ABI、容量和验收语义见 [精确出口记录说明](determinism-spawn-hook.md)。
 
-规范化保留对象池的槽位、代次 ID、已用长度、容量、空闲链头、下一代次和空闲槽链接。活跃对象按 slot 键记录，排除 App/Board 指针、对象布局 padding。僵尸、植物、弹丸、收集物、场地物和推车均有记录；Board 记录格子、行路权重、波表、已允许类型、出怪阈值/倒计时、冰道/冰冻、阳光与关卡进度；卡槽记录冷却、激活和使用次数。
+规范化保留模拟实体池的槽位、代次 ID、已用长度、容量、空闲链头、下一代次和空闲槽链接。活跃对象按 slot 键记录，排除 App/Board 指针、对象布局 padding。僵尸、植物、弹丸、收集物、场地物和推车均有记录；Board 记录格子、行路权重、波表、已允许类型、出怪阈值/倒计时、冰道/冰冻、阳光与关卡进度；卡槽记录冷却、激活和使用次数。已声明的 animation handle 字段转换为验证后的语义引用，实际 raw 数值保存在独立旁证中。
 
 字段键使用结构内十六进制 offset。32 位标量作为 `uint32` 写入，浮点保存 IEEE-754 原始位，因此正负零、NaN payload 及最末位变化不会被 JSON 小数四舍五入吞掉。可依据上述结构定义解码；僵尸 `0000001c` 为行、`0000002c/30/34` 为 X/Y/速度位模式、`00000050` 为 variant、`000000c8` 为本体血量。记录 x87 控制字及 SSE 控制位；暂未锁定或证明时间源无关。
 

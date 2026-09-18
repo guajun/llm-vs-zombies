@@ -7,6 +7,112 @@ from pathlib import Path
 from typing import Iterator
 
 SCHEMA_VERSION = 1
+ARCHIVE_DIRECTORIES = ("inputs", "checkpoints", "video", "observations", "decisions", "audit", "trajectory")
+ARCHIVE_ROOT_FILES = ("events.jsonl", "config.json", "capture.closed", "summary.json", "evaluation.md", "README.md")
+
+
+def archive_policy() -> dict:
+    return {"schema": 1, "directories": list(ARCHIVE_DIRECTORIES),
+            "root_files": list(ARCHIVE_ROOT_FILES), "root_patterns": ["*.json"],
+            "excluded": ["manifest.json", "sandbox/**", "exports/**"],
+            "inventory": "exact allowlisted file set; SHA256 of each file"}
+
+
+def local_files(root: Path, directory: Path) -> Iterator[Path]:
+    """Walk explicit evidence/source roots, rejecting symlinks and junctions."""
+    for path in sorted(directory.iterdir()):
+        if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+            raise ValueError(f"linked evidence/source path is not allowed: {path}")
+        if not path.resolve().is_relative_to(root.resolve()):
+            raise ValueError(f"evidence/source path escapes root: {path}")
+        if path.is_dir():
+            yield from local_files(root, path)
+        elif path.is_file():
+            yield path
+
+
+def _evidence_files(run: Path) -> list[Path]:
+    files = []
+    for path in run.iterdir():
+        included = path.name in ARCHIVE_DIRECTORIES or path.name in ARCHIVE_ROOT_FILES or path.suffix == ".json"
+        if not included or path.name == "manifest.json":
+            continue
+        if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+            raise ValueError(f"linked evidence path is not allowed: {path}")
+        if path.name in ARCHIVE_DIRECTORIES:
+            if not path.is_dir():
+                raise ValueError(f"evidence directory is not a directory: {path.name}")
+            files.extend(local_files(run, path))
+        elif path.is_file():
+            files.append(path)
+    return sorted(files)
+
+
+def _assert_closed(run: Path, files: list[Path]) -> None:
+    if (run / "capture.lock").exists():
+        raise ValueError("native capture is active or crashed; do not finalize until capture is closed/recovered")
+    locks = [p.relative_to(run).as_posix() for p in files if p.name.endswith(".lock")]
+    if locks:
+        raise ValueError(f"decision trace/evidence writer is active or crashed; inspect and close its lock: {locks[0]}")
+
+
+def record_initial_state(run: Path, *, observation_path: Path, hello: dict,
+                         scenario_verified: bool, audit_snapshot_path: Path | None = None) -> dict:
+    """Bind saved live initialization evidence; never upgrade replay verification.
+
+    Call after launcher saves its actual observation. The optional snapshot is a
+    replay-initial marker or an audit_snapshot envelope from that same boundary.
+    """
+    manifest = read_json(run / "manifest.json")
+    if manifest.get("status") != "recording":
+        raise ValueError("cannot update initialization metadata of a finalized run")
+    if type(scenario_verified) is not bool or not isinstance(hello, dict) or not isinstance(hello.get("capabilities"), dict):
+        raise ValueError("live initialization requires hello capabilities and a scenario verification result")
+
+    def evidence(path: Path) -> tuple[dict, dict]:
+        if not path.is_absolute():
+            path = run / path
+        path = path.resolve()
+        if not path.is_relative_to(run.resolve()) or path == (run / "manifest.json").resolve():
+            raise ValueError("initial evidence must be a file inside the run")
+        relative = path.relative_to(run.resolve())
+        if not (relative.parts[0] in ARCHIVE_DIRECTORIES or len(relative.parts) == 1 and path.suffix == ".json"):
+            raise ValueError("initial evidence must be inside the archive allowlist")
+        value = read_json(path)
+        if not isinstance(value, dict):
+            raise ValueError("initial evidence must be a JSON object")
+        return value, {"path": path.relative_to(run.resolve()).as_posix(), "sha256": sha256(path)}
+
+    observation, observed_file = evidence(observation_path)
+    version = observation.get("version")
+    if not isinstance(version, dict) or any(type(version.get(k)) is not int or version[k] < 0
+                                            for k in ("epoch", "tick", "revision")):
+        raise ValueError("initial observation lacks a valid actual runtime version")
+    initial = {"captured": True, "captured_at": now(), "observation": observed_file,
+               "version": version, "scenario_verified": scenario_verified,
+               "complete_game_state": False, "audit_snapshot_captured": False}
+    if audit_snapshot_path is not None:
+        snapshot, snapshot_file = evidence(audit_snapshot_path)
+        captured_version = snapshot.get("version")
+        if captured_version is None and isinstance(snapshot.get("observation"), dict):
+            captured_version = snapshot["observation"].get("version")
+        if (not isinstance(captured_version, dict)
+                or any(type(captured_version.get(k)) is not int for k in ("epoch", "tick", "revision"))
+                or captured_version != version or not isinstance(snapshot.get("state"), dict)):
+            raise ValueError("initial audit snapshot is not from the observation boundary")
+        initial.update(audit_snapshot_captured=True, audit_snapshot=snapshot_file)
+    game = hello.get("game", {})
+    if not isinstance(game, dict):
+        raise ValueError("hello game identity must be an object")
+    manifest["initial_state"] = initial
+    manifest["capabilities"] = {"state_review": True, "runtime_reported": hello["capabilities"],
+                                "audit_coverage": game.get("coverage"),
+                                "target_reported": game,
+                                "original_engine_replay_verified": False,
+                                "source": "live hello; implementation claims, not experiment acceptance"}
+    manifest["runtime_hello_sha256"] = hashlib.sha256(canonical(hello)).hexdigest()
+    write_json(run / "manifest.json", manifest)
+    return manifest
 
 
 def now() -> str:
@@ -86,6 +192,15 @@ def events(run: Path) -> Iterator[dict]:
 
 def validate(run: Path) -> dict:
     manifest = read_json(run / "manifest.json")
+    if "archive_policy" in manifest:
+        if manifest["archive_policy"] != archive_policy() or manifest.get("status") != "finalized":
+            raise ValueError("unsupported archive policy or unfinalized seal")
+        files = _evidence_files(run)
+        _assert_closed(run, files)
+        actual = {p.relative_to(run).as_posix() for p in files}
+        expected = set(manifest.get("checksums", {}))
+        if actual != expected:
+            raise ValueError(f"archive inventory mismatch: missing={sorted(expected-actual)}, added={sorted(actual-expected)}")
     count = states = 0
     last = None
     terminal = None
@@ -100,7 +215,7 @@ def validate(run: Path) -> dict:
         candidate = (run / filename).resolve()
         if not candidate.is_relative_to(run.resolve()):
             raise ValueError("checksum path escapes run directory")
-        if sha256(candidate) != digest:
+        if not candidate.is_file() or sha256(candidate) != digest:
             raise ValueError(f"checksum mismatch: {filename}")
     return dict(records=count, states=states, last_tick=last["tick"],
                 status=manifest["status"], synthetic=manifest.get("synthetic", False),
@@ -130,18 +245,24 @@ def compare(left: Path, right: Path) -> dict:
 
 
 def finish(run: Path, outcome: str) -> dict:
-    if (run / "capture.lock").exists():
-        raise ValueError("native capture is active or crashed; do not finalize until capture is closed/recovered")
-    report = validate(run)
     manifest = read_json(run / "manifest.json")
     if manifest["status"] != "recording":
         raise ValueError("run is already finalized")
-    immutable_files = [run / "events.jsonl", run / "config.json"]
-    for folder in ("inputs", "checkpoints", "video", "observations", "decisions"):
-        if (run / folder).exists():
-            immutable_files.extend(p for p in (run / folder).rglob("*") if p.is_file())
-    manifest.update(status="finalized", finished_at=now(), outcome=outcome,
-                    checksums={p.relative_to(run).as_posix(): sha256(p) for p in immutable_files})
-    write_json(run / "manifest.json", manifest)
+    if not all((run / name).is_file() for name in ("events.jsonl", "config.json")):
+        raise ValueError("recording requires events.jsonl and config.json before finalization")
+    _assert_closed(run, _evidence_files(run))
+    report = validate(run)
     write_json(run / "summary.json", {**report, "status": "finalized", "outcome": outcome})
+    immutable_files = _evidence_files(run)
+    before = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in immutable_files}
+    checksums = {p.relative_to(run).as_posix(): sha256(p) for p in immutable_files}
+    current_files = _evidence_files(run)
+    _assert_closed(run, current_files)
+    if current_files != immutable_files or any((p.stat().st_size, p.stat().st_mtime_ns) != before[p] for p in current_files):
+        raise ValueError("evidence changed during finalization; close all writers before retrying")
+    manifest.update(status="finalized", finished_at=now(), outcome=outcome,
+                    archive_policy=archive_policy(), checksums=checksums)
+    pending = run / "manifest.json.pending"
+    write_json(pending, manifest)
+    pending.replace(run / "manifest.json")
     return manifest

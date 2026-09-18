@@ -12,12 +12,20 @@ Json Success(const std::string& id,Json result) {
 Json Controller::Version() const { return {{"epoch",epoch_},{"tick",tick_},{"revision",revision_}}; }
 Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Version(); return value; }
 Json Controller::Status() const {
-    return {{"state",pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight"))},
+    return {{"state",!fault_.empty()?"audit_failed":(pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight")))},
+        {"fault",fault_.empty()?Json(nullptr):Json(fault_)},
         {"version",Version()},{"pending_request_id",pending_?Json(pending_->id):Json(nullptr)},
         {"executed_ticks",pending_?pending_->executed:0}};
 }
-void Controller::Audit(const std::string& kind,const Json& payload) { backend_.Audit(kind,payload,Observe()); }
+void Controller::Audit(const std::string& kind,const Json& payload) {
+    // Native audit captures authoritative state itself. Its envelope only needs
+    // a version; constructing client plantability grids here doubles their cost
+    // on every simulated tick without adding any recorded information.
+    try { backend_.Audit(kind,payload,{{"version",Version()}}); }
+    catch(const std::exception& error) { Fail(error.what());throw; }
+}
 void Controller::Boundary() {
+    if(!fault_.empty()) return;
     auto current=backend_.BoardIdentity();
     auto ready=backend_.Ready();
     auto clock=backend_.NativeTick();
@@ -31,7 +39,17 @@ void Controller::Boundary() {
     }
     initialized_=true; board_=current; ready_=ready; nativeTick_=clock;
 }
-bool Controller::ShouldStep() const { return !recordingClosed_ && !terminalFrozen_ && (!ready_ || pending_.has_value()); }
+bool Controller::ShouldStep() const { return fault_.empty() && !recordingClosed_ && !terminalFrozen_ && (!ready_ || pending_.has_value()); }
+void Controller::Fail(const std::string& message) {
+    if(fault_.empty()) fault_=message.empty()?"Native boundary audit failed":message;
+    terminalFrozen_=true;inStep_=false;
+    if(!pending_) return;
+    auto p=std::move(*pending_);pending_.reset();
+    auto response=Error(p.id,"audit_failed",fault_);
+    response["error"]["details"]={{"version",Version()},{"requested_ticks",p.requested},
+        {"executed_ticks",p.executed},{"action_results",p.actions},{"restart_required",true}};
+    Complete(p.key,std::move(response));
+}
 void Controller::BeforeStep() {
     if (!ready_ || !pending_) return;
     preTick_=backend_.NativeTick(); inStep_=true;
@@ -65,7 +83,7 @@ void Controller::AfterStep() {
     }
     // An unexpected update count is an error, never silently called one step.
     if (delta!=1) { Finish(delta==0?"no_game_tick":"step_count_mismatch"); return; }
-    if (pending_->untilWave && backend_.Observe().value("wave",0)!=pending_->startWave) { Finish("wave_changed"); return; }
+    if (pending_->untilWave && backend_.NativeWave()!=pending_->startWave) { Finish("wave_changed"); return; }
     if (pending_->executed>=pending_->requested) Finish("budget_exhausted");
 }
 void Controller::Complete(const std::string& key,Json response) {
@@ -78,10 +96,11 @@ void Controller::Complete(const std::string& key,Json response) {
 }
 void Controller::Finish(const std::string& reason) {
     if (!pending_) return;
-    auto p=std::move(*pending_); pending_.reset(); inStep_=false;
+    auto p=*pending_; inStep_=false;
     Json result={{"action_results",p.actions},{"requested_ticks",p.requested},{"executed_ticks",p.executed},
         {"stop_reason",reason},{"observation",Observe()}};
     Audit("request_completed",{{"request_id",p.id},{"result",result}});
+    pending_.reset();
     if(reason=="no_game_tick"||reason=="step_count_mismatch") {
         auto error=Error(p.id,reason,"Native update count did not equal one; advancement stopped at the observed boundary");
         error["error"]["details"]=std::move(result);Complete(p.key,std::move(error));
@@ -136,6 +155,9 @@ void Controller::Request(const Json& req,Reply reply) {
             else if(it->second.response) reply(*it->second.response);
             else reply(Error(id,"request_result_expired","Capture response expired; the same ID will never trigger another capture"));
             return;
+        }
+        if(!fault_.empty()&&method!="stop_recording"&&method!="pause"&&method!="cancel") {
+            reply(Error(id,"audit_failed",fault_+"; begin a new process and run"));return;
         }
         if(method=="capture_frame") {
             if(canonical.size()>4096) { reply(Error(id,"invalid_params","Capture request must fit within 4096 bytes"));return; }
@@ -246,7 +268,7 @@ void Controller::Request(const Json& req,Reply reply) {
         if(!actions.is_array()||actions.size()>MaxActions||(method=="advance"&&!actions.empty())) {
             Complete(id,Error(id,"invalid_params","Expected at most 256 actions; advance takes no actions")); return;
         }
-        pending_=Pending{id,id,count.get<int>(),0,backend_.Observe().value("wave",0),untilWave,Json::array()};
+        pending_=Pending{id,id,count.get<int>(),0,backend_.NativeWave(),untilWave,Json::array()};
         Audit("request_started",{{"request_id",id},{"request",req}});
         for(size_t i=0;i<actions.size();++i) {
             Json outcome;
@@ -261,6 +283,7 @@ void Controller::Request(const Json& req,Reply reply) {
         }
         if(pending_->requested==0) Finish("budget_exhausted");
     } catch(const std::exception& e) {
+        if(!fault_.empty() && cache_.contains(id) && cache_.at(id).response) return;
         if(cache_.contains(id)) { if(pending_&&pending_->id==id) pending_.reset(); Complete(id,Error(id,"invalid_request",e.what())); }
         else reply(Error(id,"invalid_request",e.what()));
     }

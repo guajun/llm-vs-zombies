@@ -11,6 +11,8 @@ namespace lvz::determinism {
 bool ValidateTargetImage() noexcept;
 void Initialize(const std::filesystem::path& runDir);
 nlohmann::json ProbeTarget();
+// Comparable scalar state + verified semantic animation references, not raw
+// opaque animation handles. Per-step raw evidence is persisted separately.
 nlohmann::json CaptureState();
 nlohmann::json CaptureRng();
 // This restores RNG only, not the Board or a complete game checkpoint.

@@ -1,7 +1,9 @@
 #include "audit.hpp"
 #include "model.hpp"
+#include "json_diff.hpp"
 #include "memory.hpp"
 #include "spawn_hook.hpp"
+#include "reanimation_audit.hpp"
 #include <array>
 #include <fstream>
 #include <set>
@@ -14,8 +16,12 @@ constexpr uintptr_t kAppPointer = 0x6a9ec0;
 DWORD ownerThread = 0;
 bool initialized = false;
 uint64_t sequence = 0;
-std::ofstream checksums, changes, events;
+std::ofstream checksums, changes, events, reanimationHandles;
 Json previous;
+ReanimationAuditor reanimationAuditor;
+Json reanimationEvidence;
+Json previousReanimationEvidence;
+bool reanimationLinksValid=true;
 Json lastObservationVersion=Json::object();
 std::set<uint32_t> previousZombies;
 
@@ -35,7 +41,8 @@ bool TargetSignatures() noexcept {
     static constexpr uint8_t update[] = {0x55,0x8b,0xec,0x83,0xe4,0xf8,0x53,0x55,0x56,0x57,0x8b,0xf9,0x80,0xbf,0xce,0x04,0x00,0x00,0x00};
     static constexpr uint8_t crtRand[] = {0xe8,0xb1,0xa9,0x00,0x00,0x8b,0x48,0x14,0x69,0xc9,0xfd,0x43,0x03,0x00,0x81,0xc1,0xc3,0x9e,0x26,0x00};
     return Match(0x5a98d0, seed) && Match(0x5a9940, next)
-        && Match(0x5a9930, global) && Match(0x452650, update) && Match(0x61e087, crtRand);
+        && Match(0x5a9930, global) && Match(0x452650, update) && Match(0x61e087, crtRand)
+        && ValidateReanimationTarget();
 }
 uintptr_t CrtStateAddress() {
     // rand/srand call the engine's statically linked _getptd (not this DLL's CRT).
@@ -188,8 +195,9 @@ Json Coverage() {
         {"exact_initializer_exit",SpawnHookStatus().value("installed",false)},
         {"final_spawn_after_caller",false},{"initializer_exit_live_validated",false},
         {"raw_float_bits",true},{"pool_slot_and_free_list",true},
+        {"reanimations",ReanimationCoverage()},
         {"rng_scope","global MT incl. cursor + game-thread CRT; local MT/other threads not intercepted"},
-        {"uncovered",{"reanimation track instances","particle/effect pools","Challenge state except completed rounds",
+        {"uncovered",{"unreferenced animations and attachment graphs","particle/effect pools","Challenge state except completed rounds",
                       "PottedPlant coin specification","grid motion trails","UI/input state","time-source interception",
                       "RNG calls/instances on other threads","MT instances on the stack between boundaries"}}};
 }
@@ -209,11 +217,15 @@ bool ValidateTargetImage() noexcept {
     return TargetSignatures();
 }
 Json ProbeTarget() {
-    auto spawn=SpawnHookStatus();
-    spawn["semantic"]="exact_initializer_exit";
-    spawn["live_validated"]=false;
+    // This object is part of hello's immutable run identity. Counters/queue
+    // depth belong to audit health events, never to the target description.
+    Json spawn={{"installed",SpawnHookStatus().value("installed",false)},
+        {"semantic","exact_initializer_exit"},
+        {"phase","ZombieInitialize exit, before caller resumes"},
+        {"live_validated",false}};
     return {{"schema",kSchema},{"target",kTarget},{"loaded_signatures_match",ValidateTargetImage()},
         {"addresses_evidence","determinism/evidence.json"},
+        {"normalize_scope","verified animation handle semantic identity; raw handle evidence is stored separately"},
         {"rng_capture",ValidateTargetImage()}, {"rng_restore",ValidateTargetImage()},
         {"rng_seed",ValidateTargetImage()},
         {"spawn_hook",std::move(spawn)},
@@ -226,15 +238,17 @@ void Initialize(const std::filesystem::path& runDir) {
     if(!ValidateTargetImage()) throw std::runtime_error("Unsupported PvZ engine image: deterministic adapter rejected");
     const auto directory=runDir/"audit";
     std::filesystem::create_directories(directory);
-    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl"})
+    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl"})
         if(std::filesystem::exists(directory/file) && std::filesystem::file_size(directory/file))
             throw std::runtime_error("Audit output already exists; create a fresh run");
     checksums.open(directory/"checksums.jsonl",std::ios::out|std::ios::binary);
     changes.open(directory/"state-deltas.jsonl",std::ios::out|std::ios::binary);
     events.open(directory/"events.jsonl",std::ios::out|std::ios::binary);
-    if(!checksums||!changes||!events) throw std::runtime_error("Cannot open audit outputs");
+    reanimationHandles.open(directory/"reanimation-handles.jsonl",std::ios::out|std::ios::binary);
+    if(!checksums||!changes||!events||!reanimationHandles) throw std::runtime_error("Cannot open audit outputs");
     ownerThread=GetCurrentThreadId(); initialized=true; sequence=0;
     previous=nullptr; previousZombies.clear();lastObservationVersion=Json::object();
+    reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
     bool hookInstalled=false;
     try {
         std::string error;
@@ -249,7 +263,7 @@ void Initialize(const std::filesystem::path& runDir) {
             if(!RemoveSpawnHook(removeError))
                 throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
         }
-        checksums.close();changes.close();events.close();initialized=false;
+        checksums.close();changes.close();events.close();reanimationHandles.close();initialized=false;
         throw;
     }
 }
@@ -342,7 +356,10 @@ Json CaptureState() {
     __asm__ volatile("fnstcw %0":"=m"(x87));
     __asm__ volatile("stmxcsr %0":"=m"(mxcsr));
     state["fp_environment"]={{"x87_control",x87},{"mxcsr_control",mxcsr&~0x3fu}};
-    if(!board) { state["board"]=nullptr; return state; }
+    if(!board) {
+        state["board"]=nullptr;reanimationEvidence=nullptr;reanimationLinksValid=true;
+        return state;
+    }
     Json fields=Json::object(); Byte(fields,board,0x164);
     WordRange(fields,board,0x168,0x5c4); Byte(fields,board,0x5c4);
     WordRange(fields,board,0x5c8,0x6b4);
@@ -363,7 +380,10 @@ Json CaptureState() {
     state["seeds"]=Seeds(board);
     auto challenge=Read<uint32_t>(board+0x160);
     state["challenge"]={{"completed_rounds",challenge?Json(Read<uint32_t>(challenge+0x6c)):Json(nullptr)}};
-    return state;
+    auto reanimations=reanimationAuditor.Capture(state);
+    reanimationEvidence=std::move(reanimations.raw);
+    reanimationLinksValid=reanimations.valid;
+    return std::move(reanimations.comparable);
 }
 void Audit(const std::string& kind,const Json& payload,const Json& observation) {
     RequireThread();
@@ -382,10 +402,22 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
         return;
     }
     Json state=CaptureState();
+    // Exactly the same capture as this checksum/delta, with the same seq and
+    // version. Read-only audit_snapshot calls only refresh the in-memory cache.
+    auto rawAnimations=envelope;
+    if(previousReanimationEvidence.is_null()) rawAnimations["initial"]=reanimationEvidence;
+    else rawAnimations["patch"]=Json::diff(previousReanimationEvidence,reanimationEvidence);
+    Write(reanimationHandles,rawAnimations);
+    previousReanimationEvidence=reanimationEvidence;
+    if(!reanimationLinksValid) {
+        auto fault=envelope;fault["kind"]="reanimation_link_fault";
+        fault["payload"]=state.at("reanimations").at("issues");Write(events,fault);
+        Flush();throw std::runtime_error("Live owner has invalid animation links; strict audit stopped");
+    }
     auto hashes=envelope; hashes["digests"]=Digests(state); Write(checksums,hashes);
     auto delta=envelope;
     if(previous.is_null()) delta["initial"]=state;
-    else delta["patch"]=Json::diff(previous,state);
+    else delta["patch"]=ExactJsonDiff(previous,state);
     Write(changes,delta); previous=std::move(state);
     if(previous.contains("zombies")) {
         std::set<uint32_t> current;
@@ -395,7 +427,13 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
             current.insert(id);
             if(!previousZombies.contains(id)) {
                 auto birth=envelope; birth["seq"]=sequence++;birth["kind"]="zombie_first_boundary_observed";
-                birth["payload"]={{"id",id},{"slot",slot.key()},{"raw_fields",entry["fields"]},
+                auto rawFields=entry["fields"];
+                const auto prefix="/zombies/slots/"+slot.key()+"/fields/";
+                for(const auto& link:reanimationEvidence.at("links")) {
+                    const auto path=link.at("path").get<std::string>();
+                    if(path.starts_with(prefix)) rawFields[path.substr(prefix.size())]=link.at("raw_handle");
+                }
+                birth["payload"]={{"id",id},{"slot",slot.key()},{"raw_fields",std::move(rawFields)},
                     {"exact_spawn",false}}; Write(events,birth);
             }
         }
@@ -404,8 +442,8 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
     if(sequence%100==0) Flush();
 }
 void Flush() {
-    RequireThread(); checksums.flush();changes.flush();events.flush();
-    if(!checksums||!changes||!events) throw std::runtime_error("Audit output flush failed");
+    RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();
+    if(!checksums||!changes||!events||!reanimationHandles) throw std::runtime_error("Audit output flush failed");
 }
 void Shutdown() {
     if(!initialized) return;
@@ -415,8 +453,9 @@ void Shutdown() {
         {"version",lastObservationVersion},{"payload",finalHealth}});
     std::string error;
     if(!RemoveSpawnHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
-    Flush(); checksums.close(); changes.close(); events.close();
-    if(checksums.fail()||changes.fail()||events.fail()) throw std::runtime_error("Audit output close failed");
+    Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();
+    if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()) throw std::runtime_error("Audit output close failed");
     initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
+    reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
 }
 }

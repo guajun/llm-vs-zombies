@@ -1,6 +1,6 @@
 # ZombieInitialize 精确出口记录
 
-`determinism/spawn_hook.hpp/.cpp` 是原版初始化函数的观测模块。它复用 AvZ 内置 MinHook，但不安装或替换主循环、不调用另一个 AvZ 实例。当前已经通过本地 x86 ABI 测试，**尚待真实游戏运行验收**。
+`determinism/spawn_hook.hpp/.cpp` 是原版初始化函数的观测模块。它复用 AvZ 内置 MinHook，但不安装或替换主循环、不调用另一个 AvZ 实例。已通过本地 x86 ABI 测试，并在本机隐藏窗口验收 `009` 观察到真实初始化出口：到 tick 1519 / wave 1 时累计 83 条事件（含预览），推进期间未出现 hook 故障。完整类别、hook 开/关一致性和调用者最终放置仍待验收，不能由这些已观察事件推定。
 
 ## 目标与 ABI 证据
 
@@ -64,7 +64,7 @@ hook 内只复制到预分配队列：最多 1024 条未 drain 记录、32 层�
 
 ## CaptureState 范围复核
 
-本次未修改现有 `audit.cpp`。已向 root 提交以下具体检查点：
+前期范围复核提交了以下检查点；随后已经集成出口 hook 和[动画关联规范化](determinism-reanimation.md)，其余缺口仍按实际覆盖声明：
 
 1. 当前实体标量段已排除 App/Board 指针及已知 bool padding。对象池未占用槽只保留 free-list/ID；不应扩大为整块对象内存散列。
 2. Board 波表 `0x6B4 + wave*200` 每波 50 槽中，首个 `-1` 之后的尾槽不保证由 `PickZombieWaves` 初始化；规范化宜截到首个终止符，不能将未使用尾槽当作出怪差异。

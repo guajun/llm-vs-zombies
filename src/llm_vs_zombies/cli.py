@@ -10,7 +10,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .records import EventWriter, compare, events, finish, now, read_json, sha256, validate, write_json
+from .records import EventWriter, compare, events, finish, local_files, now, read_json, sha256, validate, write_json
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -22,7 +22,7 @@ def create_run(root: Path, config: Path, name: str | None = None, *, synthetic=F
         raise ValueError("run name must contain only letters, digits, '-' or '_'")
     run = root / "experiments" / "runs" / run_id
     run.mkdir(parents=True, exist_ok=False)
-    for subdir in ("inputs", "checkpoints", "video", "observations", "decisions", "exports"):
+    for subdir in ("inputs", "checkpoints", "video", "observations", "decisions", "audit", "exports"):
         (run / subdir).mkdir()
     source = root / "dependencies.lock.json"
     dependencies = read_json(source) if source.exists() else {}
@@ -31,26 +31,63 @@ def create_run(root: Path, config: Path, name: str | None = None, *, synthetic=F
         raise ValueError("scenario_save must be inside the project")
     if candidate.is_file():
         shutil.copy2(candidate, run / "inputs/reference-save.dat")
-    source_files = []
+    source_files = set()
     for folder, suffixes in (("src", {".py"}), ("logger", {".cpp", ".hpp", ".json"}),
                              ("runtime", {".cpp", ".hpp", ".h", ".cmake", ".MIT"}),
                              ("determinism", {".cpp", ".hpp", ".h", ".json"}),
-                             ("launcher", {".cpp", ".hpp", ".h", ".cmake"}),
+                             ("launcher", {".cpp", ".hpp", ".h", ".cmake", ".ps1"}),
                              ("recording", {".cpp", ".hpp", ".h"}),
+                             ("tests", {".cpp", ".hpp", ".h", ".py", ".json"}),
+                             ("avz/framework/inc", {".h", ".hpp"}),
+                             ("avz/framework/src", {".cpp", ".c", ".h", ".hpp"}),
+                             ("docs", {".md"}),
+                             ("experiments/configs", {".json"}),
                              ("examples", {".py", ".json"}),
                              ("tools", {".py", ".ps1"}), ("replay", {".html", ".md"})):
-        source_files.extend(p for p in (root / folder).rglob("*") if p.is_file() and p.suffix in suffixes)
-    source_files.extend(root / p for p in ("CMakeLists.txt", "pyproject.toml", "dependencies.lock.json", "LICENSE", "docs/runtime-protocol.md") if (root / p).exists())
-    with zipfile.ZipFile(run / "inputs/implementation.zip", "x", compression=zipfile.ZIP_DEFLATED) as archive:
+        directory = root / folder
+        if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():
+            raise ValueError(f"linked source directory is not allowed: {folder}")
+        if directory.exists():
+            source_files.update(p for p in local_files(root, directory) if p.suffix in suffixes)
+    for name in ("CMakeLists.txt", "pyproject.toml", "dependencies.lock.json", "LICENSE", "README.md",
+                 ".gitmodules", "avz/framework/LICENSE", "avz/framework/metadata.json"):
+        path = root / name
+        if path.is_symlink() or (path.exists() and not path.resolve().is_relative_to(root.resolve())):
+            raise ValueError(f"linked source file is not allowed: {name}")
+        if path.is_file():
+            source_files.add(path)
+    source_archive = run / "inputs/implementation.zip"
+    with zipfile.ZipFile(source_archive, "x", compression=zipfile.ZIP_DEFLATED) as archive:
         for source_file in sorted(source_files):
             archive.write(source_file, source_file.relative_to(root).as_posix())
+        archive.writestr("ARCHIVE-REBUILD.md", """# Rebuild this source snapshot
+
+The archive includes project sources, tests, build scripts, vendored JSON,
+and the AvZ headers/sources actually present at capture time. It is not a Git
+checkout: do not rely on `git submodule update` inside this extracted archive.
+
+Install CMake, Ninja and the LLVM-MinGW i686 toolchain identified and hashed in
+dependencies.lock.json. Extract that toolchain into the same third_party path
+used by tools/build-avz.ps1, then run tools/build-avz.ps1 and launcher/build.ps1.
+Run `ctest --test-dir build/cmake --output-on-failure` and the Python tests with
+PYTHONPATH=src. AvZ source checks in runtime/avz_overlay.cmake still apply.
+
+Original game binaries/resources, third_party binaries, private experiment
+sandboxes and generated build output are deliberately excluded. The reference
+save is separately stored at inputs/reference-save.dat when available. Runtime
+experiments still require the user's compatible, hash-locked local game files.
+This is a source snapshot; no bit-identical compiler output is promised.
+""")
     dll = root / "build/recorder.dll"
     write_json(run / "config.json", configuration)
     write_json(run / "manifest.json", dict(schema_version=1, run_id=run_id,
         created_at=now(), status="recording", synthetic=synthetic, configuration=configuration,
-        provenance=dependencies, capabilities=dict(state_review=True, game_input_replay=False,
-        complete_rng_restore=False, exact_spawn_hook=False),
+        provenance=dependencies, capabilities=dict(state_review=True, runtime_reported=None,
+        audit_coverage=None, original_engine_replay_verified=False,
+        source="not connected; runtime capabilities have not been observed"),
         implementation={"source_archive": "inputs/implementation.zip",
+                        "source_archive_sha256": sha256(source_archive),
+                        "source_archive_scope": "project and test sources, build scripts, vendored dependencies, AvZ inc/src; see ARCHIVE-REBUILD.md",
                         "recorder_sha256": sha256(dll) if dll.exists() else None},
         initial_state={"captured": False, "note": "Scenario file is a candidate; record the actual loaded state before evaluation."}))
     return run

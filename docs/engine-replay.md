@@ -138,11 +138,19 @@ replayer 比较末帧状态及转场字段，然后刷新观察以获取 Control
 
 ## 审计、边界与验证
 
+支持动画身份归一化的记录在 `coverage.reanimations.raw_handle_evidence` 声明必需的 `audit/reanimation-handles.jsonl`。该旁证和 checksum/delta 每条 pre/post 的 schema、seq、kind、version、payload 一一对应，使用首态加 JSON Patch 保留原始句柄、槽位及代次、分配池、归属关系。封包复制该文件并绑定 SHA-256；读取器重建旁证，核对原始查找结果、全部 owner 路径、归一化引用与共享节点关系。缺失、截断、数量/边界不符、无效 patch、损坏查找或原生 link fault 都立即拒绝。实际重放的增量 `AuditTail` 执行相同验证。
+
+跨运行比较的是 manifest 声明的 **semantic identity**；原始动画句柄可因分配历史不同而不同，不做逐位等同，也不把旁证归档称为完整内存确定性。旧 manifest 和旧轨迹没有旁证仍兼容；只要旁证存在，就必须校验并纳入轨迹文件身份。声明 `animation_normalization=true` 或 `raw_handle_evidence.required=true` 却缺少旁证的记录不会降级成旧格式。
+
+精确出生钩子的初始化期记录使用 `phase:initialization`、`version:null`、`payload.boundary:null`，读取器只为此明确契约接受未赋边界。受控期仍须把 `boundary.segment/tick/revision` 与事件 version 精确对应。出生事件保留全局序号；旧版共用帧 seq 的首次可见注释仍可读，新版独立 seq 必须连续。`recording_closed` 后允许一条同版本的 `spawn_hook_closed`，其健康状态、零溢出/故障/排队/活动初始化数，以及已捕获事件数与连续 ordinal 均须核验。
+
 `audit_compare.py` 支持原生 nlohmann JSON diff 产生的 add/remove/replace，检查 JSON Pointer、数组下标、缺失路径、前后序号、每帧原生 delta、摘要与 state schema。逐帧状态从首态与 patch 流式重建，不把整局的所有完整状态同时驻留内存。实际重放使用 `AuditTail` 只处理上次完成之后新增的记录，检查文件替换、截断、序号缺口和每个新增帧；不会按请求数反复重扫整局前缀。请求事件和帧元数据也按 request_id 建索引。
 
 每帧仍验证所有组件摘要和整体摘要。优化只复用未变组件的规范化编码、检查新写入 patch 的值，并使用流式状态。比较时直接比较重建出的规范化字节，避免把 FNV 摘要相等误当无碰撞的完整状态证明；只有出现差异才递归展开首个字段路径。
 
 项目自带 LLVM-MinGW 或系统 `cc/clang/gcc` 可把模块中约十行的 FNV C 函数编译成当前 **Python 进程架构**的本机辅助库，缓存在 `work/audit-hash/`。它仅加速本地字节哈希，不注入游戏、不改变算法、不增加 Python 包依赖；加载时用空串、全字节值和含 NUL 数据核对参考结果。编译器不可用时自动使用完全相同的 Python 算法，`LVZ_PYTHON_FNV=1` 可在新进程强制回退。重放报告记录 `audit_hash_backend`。本机已关闭的 007 实验前六帧抽样中，相同校验的 cProfile 时间从 0.447 秒降至 0.022 秒；这只是抽样性能证据，不是整局验收。
+
+2026-09-19 对已关闭的真实 `eval-headless-010-s42-c0` 离线封包验证了 1,000 ticks / 2,000 帧边界和 11 条执行请求，包含约 33.9 MB 状态差分、0.65 MB 动画旁证及精确出生事件。两遍完整重建校验、复制和 SHA-256 封包共 28.62 秒，使用 native C FNV；这次计时只证明该实际录制可完整读取归档，不证明冷重放相等或两旗实验通过。
 
 报告中的 JSON Pointer 例如 `/zombies/slots/3/fields/0000002c` 精确定位原始位模式差异。FNV 摘要仅用于诊断；文件完整性由 SHA-256 检查。读入日志时拒绝重复 JSON 键、非 JSON 数值、截断尾行和缺失证据。原生审计的完整覆盖能力仍由 `determinism.md` 中的实际能力决定，比较通过不会把 `complete_game_state` 或 `original_engine_replay_verified` 自动改成 true。
 

@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Any
 
-from .records import read_json, sha256, write_json
+from .records import finish, read_json, sha256, write_json
 
 SCHEMA = "lvz.evaluation.v1"
 PLAN_SCHEMA = "lvz.evaluation-plan.v1"
@@ -487,6 +487,7 @@ def _recovery_probe(root: Path, name: str, plan: Plan, seed: int) -> tuple[Path,
         result = {"recipe": recipe, "request_id": request_id, "resolved_status": status,
                   "after_disconnect": observation, "invalid_action": failure, "recovery": recovery}
         write_json(run / "recovery-probe.json", result)
+    finish(run, "recovery_probe_completed")
     return run, result
 
 
@@ -590,6 +591,7 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                 # live_session closed the recorder before packaging; startup-only
                 # failures never get synthetic observations or finalize calls.
                 trajectory = build_trajectory(run / "decisions/evaluation.jsonl", run / "audit", run / "trajectory")
+                finish(run, case["outcome"])
                 add("recording", True, {"trajectory_id": trajectory.manifest["trajectory_id"]}, run / "trajectory/trajectory.json")
                 case["cold_starts"].append({"run": str(run), "kind": "source", "passed": True})
                 anchor = trajectory.initial["initialization"]["clock_anchor"]
@@ -609,6 +611,7 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                             write_json(replay_run / "initial-comparison.json", {"equal": difference is None, "difference": difference})
                             add("initial_state", difference is None, difference, replay_run / "initial-comparison.json")
                             yield ReplaySession(replay_client, identity_from_launcher(replay_client.hello_result, state), replay_run / "audit")
+                        finish(replay_run, "engine_replay_candidate_completed")
                     destination = output / f"seed-{seed}-replay-{repeat}"
                     replay_result = replay(trajectory, initializer, destination)
                     passed = replay_result.get("equal") is True

@@ -17,6 +17,7 @@ struct Fake final:Backend {
     int captureCalls=0;
     size_t captureBytes=8;
     bool captureChangesRng=false,captureThrows=false;
+    std::string auditThrowKind;
     bool Ready()const override{return fight;}
     std::uintptr_t BoardIdentity()const override{return board;}
     int NativeTick()const override{return clock;}
@@ -46,6 +47,7 @@ struct Fake final:Backend {
             {"known_rng_unchanged",!captureChangesRng},{"game_clock_before",clock},{"game_clock_after",clock}};
     }
     void Audit(const std::string& kind,const Json& payload,const Json& observation)override{
+        if(kind==auditThrowKind) throw std::runtime_error("fixture audit unavailable");
         audit.push_back(kind);evidence.push_back({{"kind",kind},{"payload",payload},{"observation",observation}});
     }
 };
@@ -240,6 +242,24 @@ void CaptureTests() {
           &&f.captureCalls==captures,"capture ignored closed recording");
     Check(f.Backend::CaptureFrame(Json::object())["capture_ok"]==false,"default capture backend must remain unsupported");
 }
+void AuditFailureTests() {
+    for(const auto& phase:{"request_started","pre_step","post_step","request_completed"}) {
+        Fake f;Controller c(f);c.Boundary();f.auditThrowKind=phase;
+        auto request=Request(c,"audit-failure","advance",{{"max_ticks",1}});
+        std::optional<Json> response;int replies=0;
+        c.Request(request,[&](Json value){response=std::move(value);++replies;});
+        if(!response) try { Step(c,f); } catch(const std::exception&) {}
+        Check(response&&(*response)["error"]["code"]=="audit_failed"&&replies==1,"audit failure did not resolve the original request exactly once");
+        Check(!c.ShouldStep()&&c.Status()["state"]=="audit_failed","audit failure did not freeze simulation");
+        Check((*response)["error"]["details"]["executed_ticks"]==((std::string(phase)=="post_step"||std::string(phase)=="request_completed")?1:0),"audit failure lost actual advancement");
+        Check(Immediate(c,request)==*response,"audit failure duplicate lost its immutable result");
+        Check(Immediate(c,Request(c,"new-mutation","advance",{{"max_ticks",1}}))["error"]["code"]=="audit_failed","failed audit allowed another mutation");
+        f.board=2;f.clock=0;c.Boundary();
+        Check(!c.ShouldStep()&&Immediate(c,request)==*response,"board change cleared a failed run's dedup result");
+        f.auditThrowKind.clear();
+        Check(Immediate(c,Request(c,"seal-failed-run","stop_recording"))["result"]["closed"]==true,"failed run could not close its evidence");
+    }
+}
 void PipeTests() {
     Fake f;Controller c(f);c.Boundary();PipeServer server;server.Start();
     std::atomic<bool> done=false;std::exception_ptr error;
@@ -275,4 +295,4 @@ void PipeTests() {
     auto status=Immediate(c,Json{{"protocol",1},{"request_id","s"},{"method","status"},{"params",{{"request_id","disconnect-test"}}}});
     Check(status["result"]["response"]["result"]["stop_reason"]=="client_disconnected","disconnect reason was not retained for reconnect");
 }
-int main(){try{CoreTests();TerminalTests();InitializationStateTests();CaptureTests();PipeTests();std::cout<<"runtime tests passed: controller invariants, terminal boundaries, initialization sidecars, bounded capture dedup and real fragmented named-pipe I/O\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{CoreTests();TerminalTests();InitializationStateTests();CaptureTests();AuditFailureTests();PipeTests();std::cout<<"runtime tests passed: controller invariants, terminal boundaries, initialization sidecars, bounded capture dedup and real fragmented named-pipe I/O\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

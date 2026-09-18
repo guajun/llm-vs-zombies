@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA as AUDIT_SCHEMA, canonical,
-                            digests, file_hash, first_difference, hash_backend, jsonl, read_json, version)
+                            audit_files, digests, file_hash, first_difference, hash_backend, jsonl, read_json, version)
 from .client import Client, OutcomeUnknown, RemoteError
 
 SCHEMA = "lvz.engine-replay.v1"
@@ -431,7 +431,8 @@ class Trajectory:
         unsigned = {key: value for key, value in manifest.items() if key != "trajectory_id"}
         if manifest.get("schema") != SCHEMA or manifest.get("trajectory_id") != _hash(unsigned):
             raise EvidenceError("trajectory schema/content identity mismatch")
-        expected_files = {"audit/manifest.json", "audit/events.jsonl", "audit/checksums.jsonl", "audit/state-deltas.jsonl"}
+        audit_directory = path.parent / "audit"
+        expected_files = {"audit/" + name for name in audit_files(audit_directory, read_json(audit_directory / "manifest.json"))}
         if manifest.get("source") == "session_trace":
             expected_files.add("session.jsonl")
         elif manifest.get("source") == "native":
@@ -442,7 +443,7 @@ class Trajectory:
             raise EvidenceError("trajectory evidence file set is incomplete")
         for name, checksum in manifest["files"].items():
             candidate = (path.parent / name).resolve()
-            if not candidate.is_relative_to(path.parent.resolve()) or file_hash(candidate) != checksum:
+            if not candidate.is_relative_to(path.parent.resolve()) or not candidate.is_file() or file_hash(candidate) != checksum:
                 raise EvidenceError(f"evidence SHA-256 mismatch: {name}")
         audit = AuditLog(path.parent / "audit", require_closed=True)
         if manifest["source"] == "session_trace":
@@ -476,7 +477,7 @@ def build_trajectory(trace: str | Path | None, audit_directory: str | Path,
     output.mkdir(parents=True, exist_ok=False)
     (output / "audit").mkdir()
     filenames = []
-    for name in ("manifest.json", "events.jsonl", "checksums.jsonl", "state-deltas.jsonl"):
+    for name in audit.evidence_files:
         dest = f"audit/{name}"
         shutil.copyfile(Path(audit_directory) / name, output / dest)
         filenames.append(dest)

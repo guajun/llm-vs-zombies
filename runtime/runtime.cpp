@@ -53,6 +53,7 @@ public:
     }
     std::uintptr_t BoardIdentity() const override { return reinterpret_cast<std::uintptr_t>(AGetMainObject()); }
     int NativeTick() const override { return AGetMainObject()?AGetMainObject()->GameClock():0; }
+    int NativeWave() override { return AGetMainObject()?AGetMainObject()->Wave():0; }
     Json Observe() override {
         Json out={{"game_ui",AGetPvzBase()->GameUi()},{"game_clock",NativeTick()},
             {"scene",nullptr},{"wave",0},{"sun",0},{"plants",Json::array()},{"zombies",Json::array()},{"seeds",Json::array()}};
@@ -227,7 +228,7 @@ void Shutdown() {
     server->Stop();delete server;server=nullptr;
     lvz::determinism::Shutdown();controller.reset();
 }
-bool BeforeFrame() {
+bool BeforeFrameImpl() {
     if(!controller) return true;
     CheckThread();
     if(initializationState=="initializing") FinishContinueDialog();
@@ -250,17 +251,27 @@ bool BeforeFrame() {
     controller->Boundary();server->Drain(*controller);
     return controller->ShouldStep();
 }
+bool BeforeFrame() {
+    try { return BeforeFrameImpl(); }
+    catch(const std::exception& error) { if(controller) controller->Fail(error.what());return false; }
+}
 bool BeforeEngineFrame() {
     if(!controller) return true;
-    CheckThread();controller->Boundary();
-    if(!controller->ShouldStep()) return false;
-    controller->BeforeStep();return true;
+    try {
+        CheckThread();controller->Boundary();
+        if(!controller->ShouldStep()) return false;
+        controller->BeforeStep();return true;
+    } catch(const std::exception& error) { controller->Fail(error.what());return false; }
 }
-void AfterEngineFrame() { if(controller) {CheckThread();controller->AfterStep();} }
+void AfterEngineFrame() {
+    if(controller) try { CheckThread();controller->AfterStep(); }
+    catch(const std::exception& error) { controller->Fail(error.what()); }
+}
 void RecordEnvironmentCollect(uint32_t itemId,int type,int x,int y) {
     if(!controller) return;
     CheckThread();
     Json payload={{"source","environment_assist"},{"op","collect_attempt"},{"item_id",itemId},{"type",type},{"x",x},{"y",y}};
-    backend.Audit("environment_collect",payload,controller->Observe());
+    try { backend.Audit("environment_collect",payload,{{"version",controller->Version()}}); }
+    catch(const std::exception& error) { controller->Fail(error.what()); }
 }
 }
