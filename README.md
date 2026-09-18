@@ -80,6 +80,7 @@ tests/              记录完整性、复盘与本机 C++ 写入测试
 
 ## 资料与开发
 
+- [实验就绪实施与验收：GitHub issues](docs/implementation-board.md)
 - [雾夜两仪详细教程](docs/雾夜两仪详细教程.md)
 - [PvZ 录制与回放方案](docs/PvZ录制与回放方案.md)
 - [LLM 交互控制设计：常驻适配器与 Python REPL](docs/LLM交互控制设计.md)

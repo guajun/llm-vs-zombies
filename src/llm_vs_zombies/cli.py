@@ -33,9 +33,12 @@ def create_run(root: Path, config: Path, name: str | None = None, *, synthetic=F
         shutil.copy2(candidate, run / "inputs/reference-save.dat")
     source_files = []
     for folder, suffixes in (("src", {".py"}), ("logger", {".cpp", ".hpp", ".json"}),
+                             ("runtime", {".cpp", ".hpp", ".h", ".cmake", ".MIT"}),
+                             ("determinism", {".cpp", ".hpp", ".h", ".json"}),
+                             ("examples", {".py", ".json"}),
                              ("tools", {".py", ".ps1"}), ("replay", {".html", ".md"})):
         source_files.extend(p for p in (root / folder).rglob("*") if p.is_file() and p.suffix in suffixes)
-    source_files.extend(root / p for p in ("CMakeLists.txt", "pyproject.toml", "dependencies.lock.json") if (root / p).exists())
+    source_files.extend(root / p for p in ("CMakeLists.txt", "pyproject.toml", "dependencies.lock.json", "LICENSE", "docs/runtime-protocol.md") if (root / p).exists())
     with zipfile.ZipFile(run / "inputs/implementation.zip", "x", compression=zipfile.ZIP_DEFLATED) as archive:
         for source_file in sorted(source_files):
             archive.write(source_file, source_file.relative_to(root).as_posix())
