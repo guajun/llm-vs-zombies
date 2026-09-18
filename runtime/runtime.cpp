@@ -218,7 +218,8 @@ void Start(const std::filesystem::path& directory) {
     if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
         reinterpret_cast<LPCWSTR>(&Start),&pinned)) throw std::runtime_error("Cannot pin resident runtime");
     lvz::determinism::Initialize(directory);
-    controller=std::make_unique<Controller>(backend);controller->Boundary();
+    JournalOptions journal;journal.path=directory/"decisions/runtime-requests.bin";
+    controller=std::make_unique<Controller>(backend,std::move(journal));controller->Boundary();
     server=new PipeServer();server->Start();
 }
 bool Started() { return controller!=nullptr; }

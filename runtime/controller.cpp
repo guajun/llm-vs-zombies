@@ -12,8 +12,10 @@ Json Success(const std::string& id,Json result) {
 Json Controller::Version() const { return {{"epoch",epoch_},{"tick",tick_},{"revision",revision_}}; }
 Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Version(); return value; }
 Json Controller::Status() const {
-    return {{"state",!fault_.empty()?"audit_failed":(pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight")))},
+    return {{"state",!fault_.empty()?"audit_failed":(!storageFault_.empty()||!journal_.Fault().empty()?"dedup_storage_failed":(pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight"))))},
         {"fault",fault_.empty()?Json(nullptr):Json(fault_)},
+        {"dedup_storage_fault",storageFault_.empty()?(journal_.Fault().empty()?Json(nullptr):Json(journal_.Fault())):Json(storageFault_)},
+        {"dedup",{{"entries",journal_.Entries()},{"disk_bytes",journal_.Bytes()},{"index_bytes",RequestJournal::BucketCount*sizeof(uint64_t)},{"hot_results",cache_.size()},{"sealed",journal_.Sealed()}}},
         {"version",Version()},{"pending_request_id",pending_?Json(pending_->id):Json(nullptr)},
         {"executed_ticks",pending_?pending_->executed:0}};
 }
@@ -25,7 +27,7 @@ void Controller::Audit(const std::string& kind,const Json& payload) {
     catch(const std::exception& error) { Fail(error.what());throw; }
 }
 void Controller::Boundary() {
-    if(!fault_.empty()) return;
+    if(!fault_.empty()||!storageFault_.empty()||!journal_.Fault().empty()) return;
     auto current=backend_.BoardIdentity();
     auto ready=backend_.Ready();
     auto clock=backend_.NativeTick();
@@ -34,12 +36,18 @@ void Controller::Boundary() {
         // free-running menu/card-selection updates after the experiment ends.
         if(ready_ && (!ready || current!=board_)) terminalFrozen_=true;
         if (pending_) Finish("scene_changed");
-        ++epoch_; tick_=revision_=0; cache_.clear();cachedBytes_=0;
+        if(!fault_.empty()||!storageFault_.empty()||!journal_.Fault().empty()) return;
+        ++epoch_; tick_=revision_=0; cache_.clear();journal_.Epoch(epoch_);
         captureCache_.clear();captureResponses_.clear();captureMetadataBytes_=0;
     }
     initialized_=true; board_=current; ready_=ready; nativeTick_=clock;
 }
-bool Controller::ShouldStep() const { return fault_.empty() && !recordingClosed_ && !terminalFrozen_ && (!ready_ || pending_.has_value()); }
+bool Controller::ShouldStep() const { return fault_.empty() && storageFault_.empty() && journal_.Fault().empty() && !recordingClosed_ && !terminalFrozen_ && (!ready_ || pending_.has_value()); }
+void Controller::StorageFail(const std::string& message) {
+    if(storageFault_.empty()) storageFault_=message;
+    terminalFrozen_=true;
+    if(pending_) Finish("dedup_storage_failed");
+}
 void Controller::Fail(const std::string& message) {
     if(fault_.empty()) fault_=message.empty()?"Native boundary audit failed":message;
     terminalFrozen_=true;inStep_=false;
@@ -86,13 +94,36 @@ void Controller::AfterStep() {
     if (pending_->untilWave && backend_.NativeWave()!=pending_->startWave) { Finish("wave_changed"); return; }
     if (pending_->executed>=pending_->requested) Finish("budget_exhausted");
 }
-void Controller::Complete(const std::string& key,Json response) {
+void Controller::Complete(const std::string& key,Json response,bool seal) {
     auto it=cache_.find(key);
     if (it==cache_.end()) return;
     it->second.response=response;
-    cachedBytes_+=response.dump().size();
+    bool persisted=false;
+    try {
+        if(seal) {
+            // A previous double-write failure can leave an exact final result
+            // only in RAM. Never seal an archive until those results are saved.
+            for(auto old=cache_.begin();old!=cache_.end();) {
+                if(old==it||!old->second.response) { ++old;continue; }
+                journal_.Complete(old->second.token,old->first,old->second.response->dump(),true);
+                old=cache_.erase(old);
+            }
+        }
+        journal_.Complete(it->second.token,key,response.dump());
+        if(seal) journal_.Seal();
+        persisted=true;
+    } catch(const JournalError& error) {
+        storageFault_=error.what();terminalFrozen_=true;
+        if(seal) {
+            response=Error(key,"recording_close_incomplete",error.what());
+            response["error"]["details"]={{"native_recording_closed",recordingClosed_},{"journal_sealed",false},{"restart_required",true}};
+            it->second.response=response;
+        }
+    }
     auto callbacks=std::move(it->second.waiters);
+    if(persisted) cache_.erase(it);
     for (auto& reply:callbacks) reply(response);
+    if(pending_&&(!storageFault_.empty()||!journal_.Fault().empty())) StorageFail("request journal storage failed during a pending advancement");
 }
 void Controller::Finish(const std::string& reason) {
     if (!pending_) return;
@@ -111,6 +142,13 @@ void Controller::Disconnect(const std::string& requestId) { if(pending_&&pending
 
 void Controller::Request(const Json& req,Reply reply) {
     std::string id;
+    // A completion can evict its hot Entry before an audit exception unwinds
+    // here. Track delivery independently, including callbacks living past this
+    // stack frame, so an already answered request never uses a moved callback.
+    auto delivered=std::make_shared<bool>(false);
+    reply=[original=std::move(reply),delivered](Json response) {
+        *delivered=true;original(std::move(response));
+    };
     try {
         if(!req.is_object() || !req.contains("request_id") || !req["request_id"].is_string()) {
             reply(Error("","invalid_request","request_id must be a string")); return;
@@ -124,7 +162,11 @@ void Controller::Request(const Json& req,Reply reply) {
         if(!params.is_object()) { reply(Error(id,"invalid_request","params must be an object")); return; }
         if(method=="hello") {
             auto result=backend_.Hello(); result["protocol"]=1; result["epoch"]=epoch_;
-            result["limits"]={{"max_ticks",MaxTicks},{"max_actions",MaxActions},{"dedup_entries_per_epoch",100000},{"dedup_bytes_soft_limit",64*1024*1024},
+            result["limits"]={{"max_ticks",MaxTicks},{"max_actions",MaxActions},{"dedup_entries_per_epoch",journal_.Limits().normalEntries},
+                {"dedup_index_bytes",RequestJournal::BucketCount*sizeof(uint64_t)},{"dedup_disk_bytes",journal_.Limits().normalBytes},
+                {"dedup_control_reserve_entries",journal_.Limits().reserveEntries},{"dedup_control_reserve_bytes",journal_.Limits().reserveBytes},
+                {"dedup_close_reserved_entries",1},{"dedup_close_reserved_bytes",journal_.CloseReserveBytes()},{"control_request_bytes",4096},
+                {"dedup_response_storage","append_only_disk_journal"},
                 {"capture_cached_responses",4},{"capture_ids_per_epoch",100000},{"capture_metadata_bytes",16*1024*1024},{"capture_request_bytes",4096}};
             reply(Success(id,std::move(result))); return;
         }
@@ -136,6 +178,10 @@ void Controller::Request(const Json& req,Reply reply) {
                 auto it=cache_.find(wanted); auto result=Status();
                 result["request_state"]=it==cache_.end()?"unknown":(it->second.response?"completed":"pending");
                 if(it!=cache_.end()&&it->second.response) result["response"]=*it->second.response;
+                if(it==cache_.end()) if(auto old=journal_.Find(wanted)) {
+                    result["request_state"]=old->response?"completed":"pending";
+                    if(old->response) result["response"]=Json::parse(*old->response);
+                }
                 reply(Success(id,std::move(result)));
             } else reply(Success(id,Status()));
             return;
@@ -150,6 +196,12 @@ void Controller::Request(const Json& req,Reply reply) {
             else it->second.waiters.push_back(std::move(reply));
             return;
         }
+        if(auto old=journal_.Find(id)) {
+            if(old->payload!=canonical) reply(Error(id,"request_id_conflict","Same request_id has different content in this epoch"));
+            else if(old->response) reply(Json::parse(*old->response));
+            else reply(Error(id,"dedup_storage_failed","Accepted request has no recoverable completion; it will never execute again"));
+            return;
+        }
         if(auto it=captureCache_.find(id);it!=captureCache_.end()) {
             if(it->second.payload!=canonical) reply(Error(id,"request_id_conflict","Same request_id has different content in this epoch"));
             else if(it->second.response) reply(*it->second.response);
@@ -159,6 +211,12 @@ void Controller::Request(const Json& req,Reply reply) {
         if(!fault_.empty()&&method!="stop_recording"&&method!="pause"&&method!="cancel") {
             reply(Error(id,"audit_failed",fault_+"; begin a new process and run"));return;
         }
+        if((!storageFault_.empty()||!journal_.Fault().empty())&&method!="stop_recording"&&method!="pause"&&method!="cancel") {
+            reply(Error(id,"dedup_storage_failed","Request journal is unavailable; advancement is frozen"));return;
+        }
+        // A successful close seals the journal before acknowledging the request.
+        // Later new IDs cannot append rejection/control records to the archive.
+        if(recordingClosed_) { reply(Error(id,"recording_closed","This run has been finalized; begin a new process and run"));return; }
         if(method=="capture_frame") {
             if(canonical.size()>4096) { reply(Error(id,"invalid_params","Capture request must fit within 4096 bytes"));return; }
             if(captureCache_.size()>=100000 || captureMetadataBytes_+canonical.size()>16*1024*1024) {
@@ -202,13 +260,20 @@ void Controller::Request(const Json& req,Reply reply) {
             // audit or the action dedup budget. Expired IDs remain tombstones.
             reply(std::move(response));return;
         }
-        if(cache_.size()>=100000||cachedBytes_+canonical.size()>64*1024*1024) { reply(Error(id,"dedup_capacity","Start a new controlled session before sending more mutations")); return; }
         if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||req.contains("expect")) {
             if(!req.contains("expect") || req["expect"]!=Version()) {
                 reply(Error(id,"stale_observation","expect must exactly match epoch, tick and revision")); return;
             }
         }
-        cachedBytes_+=canonical.size();cache_[id]={std::move(canonical),std::nullopt,{std::move(reply)}};
+        const bool control=method=="pause"||method=="cancel"||method=="stop_recording";
+        if(control&&canonical.size()>4096) { reply(Error(id,"invalid_params","Control requests must fit within 4096 bytes"));return; }
+        // An unsuccessful close must not consume the dedicated final ID/bytes.
+        if(method=="stop_recording"&&pending_) { reply(Error(id,"busy","Stop advancement with pause/cancel before closing recording"));return; }
+        if(control&&method!="stop_recording"&&std::any_of(cache_.begin(),cache_.end(),[](const auto& entry){return entry.second.response.has_value();})) {
+            reply(Error(id,"dedup_storage_failed","Simulation is already frozen; a RAM-only result must be saved by close before admitting further controls"));return;
+        }
+        auto token=journal_.Reserve(id,canonical,control,method=="stop_recording");
+        cache_[id]={std::move(canonical),std::nullopt,{std::move(reply)},token};
         if(method=="pause"||method=="cancel") {
             Stop(method=="cancel"?"cancelled":"paused"); Complete(id,Success(id,{{"observation",Observe()},{"state",Status()["state"]}})); return;
         }
@@ -216,7 +281,7 @@ void Controller::Request(const Json& req,Reply reply) {
         if(recordingClosed_) { Complete(id,Error(id,"recording_closed","This run has been finalized; begin a new process and run"));return; }
         if(method=="stop_recording") {
             Audit("recording_closed",{{"request_id",id}});backend_.CloseRecording();recordingClosed_=true;
-            Complete(id,Success(id,{{"closed",true},{"observation",Observe()}}));return;
+            Complete(id,Success(id,{{"closed",true},{"observation",Observe()}}),true);return;
         }
         if(method=="rng_restore"||method=="rng_seed"||method=="clock_restore") {
             if(!ready_||terminalFrozen_||inStep_) { Complete(id,Error(id,"not_in_fight","State initialization requires a paused fight boundary"));return; }
@@ -282,8 +347,12 @@ void Controller::Request(const Json& req,Reply reply) {
             if(!outcome.value("ok",false)) { Finish("action_failed"); return; }
         }
         if(pending_->requested==0) Finish("budget_exhausted");
+    } catch(const JournalCapacity& e) {
+        reply(Error(id,"dedup_capacity",e.what()));
+    } catch(const JournalError& e) {
+        StorageFail(e.what());reply(Error(id,"dedup_storage_failed",e.what()));
     } catch(const std::exception& e) {
-        if(!fault_.empty() && cache_.contains(id) && cache_.at(id).response) return;
+        if(*delivered) return;
         if(cache_.contains(id)) { if(pending_&&pending_->id==id) pending_.reset(); Complete(id,Error(id,"invalid_request",e.what())); }
         else reply(Error(id,"invalid_request",e.what()));
     }

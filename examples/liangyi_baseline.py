@@ -415,11 +415,14 @@ class LiangyiBaseline:
                     actions = self._cast(view, JALAPENO, [g for g in self._temporary(view) if g[0] == row])
         fast_threats = sorted((z for z in view.zombies if z["type"] not in (23, 32)
                               and (z["type"] != 16 or z.get("state") == 75)
-                              # ZombieInitialize's 1.0.0.1051 digger branch at
-                              # 0x522C74 writes phase 32 (tunneling). Its underground
-                              # passage is not an imminent house-entry event;
-                              # risen/walking miners still use this response.
-                              and (z["type"] != 17 or z.get("state") != 32)
+                              # Diggers tunnel (32), rise (33), then stun (36)
+                              # and walk RIGHT with the pickaxe (37): original
+                              # IsWalkingBackwards 0x52BEE0 / walking 0x52AA40.
+                              # Their small x is not incoming house-entry danger.
+                              # Phase 38 walks left without the pickaxe. Rightward
+                              # miners can still eat cores; pumpkin repair remains
+                              # active, but this filter is not core-threat handling.
+                              and (z["type"] != 17 or z.get("state") not in (32, 33, 36, 37))
                               and z["row"] in (1, 2, 5, 6)
                               and z["x"] < ((390 if z["type"] == 12 else 250) if z["row"] in (2, 5) else 120)),
                              key=lambda z: (z["x"]-(230 if z["row"] in (2, 5) else 0), z["id"]))

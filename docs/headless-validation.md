@@ -45,3 +45,7 @@
 `headless-actions-source-022` 另录制占用格拒绝、真实种植、冷却拒绝、等待、铲除与后续推进，合计 1,000 tick；新进程完整重放的全部边界及 39,776 次粒子调用一致，关闭健康通过。再从另一冷启动重算到 B(250)，真实铲除并种下倭瓜、继续到 B(261)，分支成功独立封包且带父轨迹身份。最后一组故意将实际种植列从 8 改为 7，在 `request[1].result` 的 `/action_results/0/action/col` 明确报告首次差异。三个流程的共享用户档指纹不变。源轨迹 ID `470c76ee7c8046663a7a839aa21604ea1924337aa4912efb6995809572b18ec8`，分支 ID `4c535622f4126a9a5b72791de9d29fbb741e736a40239c0f4012370dede45598`。
 
 020 长局最终在 tick 12,940 / 第 6 波撞到请求/响应去重缓存的 64 MiB 门槛，下一 mutation 返回 `dedup_capacity`；同一门槛又阻止了 `stop_recording`。自有进程已停止，原始 `capture.lock` 和未封口日志保留，正常封存函数正确拒绝将其伪装为完成。该实测失败由 [#8](https://github.com/guajun/llm-vs-zombies/issues/8) 跟踪，不能算完整两旗或正常录制通过。
+
+`headless-dedup-024` 用新 DLL `eb40028a6b65a33f054d3e5f01884bab06bd40e7491a5e1f6c97b0c16aab7d71` 验证磁盘请求历史：真实游戏连续完成 10,353 次零 tick 请求，仅返回结果正文就有 73,402,770 bytes，超过旧 64 MiB 上限。之后查询最早请求、重连按原 ID 重试均返回精确原结果；改动同 ID 的请求被拒绝。整个压力阶段完整审计快照不变，再推进一个真实 tick 成功。原生记录及请求 journal 正常关闭，归档封存和全清单校验通过，共享用户档不变，自有进程停止。这是容量和关闭路径验收，不等同于 10,353 个游戏 tick 的轨迹验证。
+
+配套原生控制器 fixture 实际执行了 200,005 个单 tick 请求，journal 为 112,025,237 bytes，测试进程私有内存从 2,023,424 增到 2,027,520 bytes。另覆盖磁盘写入/封口失败、损坏和截断、终局故障、旧结果查询及专用关闭保留区；完整 CTest 8/8、本机 Python 162/162 通过。fixture 的单步不是原版实机长局。024 本机报告为 `work/dedup-024-acceptance.json`，原生报告为 `work/request-journal-native-acceptance.json`；完整两旗继续独立验证。

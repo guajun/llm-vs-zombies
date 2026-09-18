@@ -79,7 +79,7 @@ with SessionTrace('experiments/runs/my-run/decisions/session.jsonl') as trace:
 - [雾夜两仪详细教程](docs/雾夜两仪详细教程.md)
 - [后台启动与隔离](docs/launcher.md)
 - [运行时协议](docs/runtime-protocol.md)
-- [Python 客户端与 REPL](docs/client-repl.md)
+- [Python 客户端与 REPL](docs/client.md)
 - [录制与视频](docs/video.md)
 - [原版引擎重放](docs/engine-replay.md)
 - [评测与就绪门槛](docs/evaluation.md)

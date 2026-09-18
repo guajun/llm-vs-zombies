@@ -86,18 +86,42 @@ class LiangyiCycleTests(unittest.TestCase):
                 actions = self.decide(policy, state)["actions"]
                 self.assertFalse(any(a.get("type") in (baseline.JALAPENO, baseline.CHERRY) for a in actions))
 
-    def test_walking_miners_retain_emergency_ash_response(self):
-        # Original ZombiePhase 37/38: walking with/without the pickaxe.
-        for phase in (37, 38):
+    def test_left_walking_miner_without_pickaxe_retains_emergency_response(self):
+        # Original phase 38 is NOT IsWalkingBackwards; it can enter the house.
+        state = observation()
+        miner = zombie(17, 5, 120, 270)
+        miner["state"] = 38
+        state["zombies"] = [miner]
+        policy = baseline.LiangyiBaseline()
+        policy.opening_done = True
+        action = self.decide(policy, state)["actions"][-1]
+        self.assertEqual((action["type"], action["row"]), (baseline.JALAPENO, 5))
+
+    def test_emerging_stunned_and_right_walking_miners_are_not_incoming(self):
+        # Recorded 023's miner at ticks 1881, 1942 and 2301. It then moves
+        # right to x56.077 at tick2979 while the existing formation kills it.
+        for phase, x in ((33, 9.424354553222656), (36, 9.424354553222656),
+                         (37, 10.207267761230469)):
             with self.subTest(phase=phase):
                 state = observation()
-                miner = zombie(17, 5, 120, 270)
-                miner["state"] = phase
+                miner = zombie(17, 6, x, 270)
+                miner.update(state=phase, y=475, armor1=100)
                 state["zombies"] = [miner]
                 policy = baseline.LiangyiBaseline()
                 policy.opening_done = True
-                action = self.decide(policy, state)["actions"][-1]
-                self.assertEqual((action["type"], action["row"]), (baseline.JALAPENO, 5))
+                actions = self.decide(policy, state)["actions"]
+                self.assertFalse(any(a.get("type") in (baseline.JALAPENO, baseline.CHERRY) for a in actions))
+
+    def test_right_walking_miner_does_not_disable_real_core_pumpkin_repair(self):
+        state = observation()
+        miner = zombie(17, 2, 9.77683162689209, 270)
+        miner.update(state=37, y=135)
+        state["zombies"] = [miner]
+        next(p for p in state["plants"] if p["type"] == baseline.PUMPKIN and (p["row"], p["col"]) == (2, 1))["hp"] = 100
+        policy = baseline.LiangyiBaseline()
+        policy.opening_done = True
+        action = self.decide(policy, state)["actions"][-1]
+        self.assertEqual((action["type"], action["row"], action["col"]), (baseline.PUMPKIN, 2, 1))
 
     def test_tunneling_miner_does_not_mask_other_ground_emergency(self):
         state = observation()
@@ -120,12 +144,16 @@ class LiangyiCycleTests(unittest.TestCase):
         policy.hold_until = 5032
         return fixture, policy
 
-    def test_recorded_emergency_cherry_covers_its_miner_instead_of_far_crowd(self):
+    def test_recorded_cherry_placement_guard_covers_target_instead_of_far_crowd(self):
         fixture, policy = self.recorded_cherry_state()
         state = fixture["observation"]
         # The original, unfiltered crowd score really selects the recorded miss.
         self.assertEqual(policy._cherry_grids(baseline.View(state), 5)[0], (5, 8))
-        action = self.decide(policy, state)["actions"][-1]
+        # This old miner trigger is now separately excluded as non-incoming.
+        # Exercise the placement guard itself against the real recorded miss.
+        view = baseline.View(state)
+        target = next(z for z in view.zombies if z["id"] == fixture["source"]["trigger_id"])
+        action = policy._cast(view, baseline.CHERRY, policy._emergency_cherry_grids(view, target, 5))[-1]
         self.assertEqual((action["type"], action["row"], action["col"]), (baseline.CHERRY, 6, 2))
         # Independently check actual 1.0.0.1051 circle/rectangle geometry at
         # the recorded blast time: phase 36, zero altitude, mirrored digger
@@ -147,8 +175,14 @@ class LiangyiCycleTests(unittest.TestCase):
         for row in (5, 6):
             for col in (1, 2, 3):
                 state["plantable"][str(baseline.CHERRY)][row-1][col-1] = False
-        actions = self.decide(policy, state)["actions"]
-        self.assertFalse(any(a.get("type") == baseline.CHERRY for a in actions))
+        view = baseline.View(state)
+        target = next(z for z in view.zombies if z["id"] == fixture["source"]["trigger_id"])
+        self.assertIsNone(policy._cast(view, baseline.CHERRY, policy._emergency_cherry_grids(view, target, 5)))
+
+    def test_full_recorded_023_rising_miner_no_longer_spends_emergency_ash(self):
+        fixture, policy = self.recorded_cherry_state()
+        actions = self.decide(policy, fixture["observation"])["actions"]
+        self.assertFalse(any(a.get("type") in (baseline.JALAPENO, baseline.CHERRY) for a in actions))
 
     def test_planned_cherry_still_uses_original_crowd_ranking(self):
         fixture, policy = self.recorded_cherry_state()
