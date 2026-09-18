@@ -28,10 +28,11 @@ struct ReanimationAudit {
 };
 class ReanimationAuditor {
 public:
-    // Read-only capture on the same stopped game thread as ownerState.
-    ReanimationAudit Capture(const nlohmann::json& ownerState);
-    // Pure normalization shared by production and standalone evidence tests.
-    ReanimationAudit Normalize(const nlohmann::json& ownerState,const ReanimationPoolSnapshot& pool);
+    // Read-only capture on the same stopped game thread as ownerState. Pass
+    // std::move(state) to reuse its owned JSON tree instead of copying a frame.
+    ReanimationAudit Capture(nlohmann::json ownerState);
+    // Lvalues remain unchanged; owned/rvalue trees move into comparable.
+    ReanimationAudit Normalize(nlohmann::json ownerState,const ReanimationPoolSnapshot& pool);
     // Required at each independent run/B(0), not every frame.
     void Reset();
 private:

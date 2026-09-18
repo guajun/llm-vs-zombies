@@ -18,13 +18,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA as AUDIT_SCHEMA, canonical,
-                            audit_files, digests, file_hash, first_difference, hash_backend, jsonl, read_json, version)
+                            audit_files, digests, file_hash, first_difference, hash_backend, jsonl, particle_semantics, read_json, version)
 from .client import Client, OutcomeUnknown, RemoteError
 
 SCHEMA = "lvz.engine-replay.v1"
 READ_ONLY = {"hello", "observe", "status", "audit_snapshot"}
 STEP_METHODS = {"commit", "advance"}
-INTERVENTIONS = STEP_METHODS | {"capture_frame"}
+INTERVENTIONS = STEP_METHODS | {"capture_frame", "pause"}
 
 
 def _write(path: Path, value: Any) -> None:
@@ -169,6 +169,7 @@ def _trace_steps(path: Path) -> tuple[dict, list[dict]]:
     ids = set()
     capture_errors = set()
     last_capture = None
+    last_pause = None
     for seq, event in enumerate(jsonl(path)):
         if type(event.get("schema")) is not int or event["schema"] != 1 or type(event.get("seq")) is not int or event["seq"] != seq:
             raise EvidenceError("SessionTrace schema/sequence mismatch")
@@ -192,6 +193,9 @@ def _trace_steps(path: Path) -> tuple[dict, list[dict]]:
             if initial is not None and stopped and data.get("method") not in READ_ONLY:
                 raise EvidenceError("mutation after recording was closed")
             if data.get("method") in INTERVENTIONS | {"stop_recording"}:
+                if last_pause is not None and "state_after" not in last_pause:
+                    raise EvidenceError("pause requires a post-control audit snapshot before any later mutation")
+                last_pause = None
                 last_capture = None
             pending = data
         elif kind == "response":
@@ -213,6 +217,12 @@ def _trace_steps(path: Path) -> tuple[dict, list[dict]]:
                     raise EvidenceError("source request did not complete successfully; action failures must be in action_results")
                 elif pending["method"] in STEP_METHODS:
                     steps.append({"request": pending, "result": data["result"]})
+                elif pending["method"] == "pause":
+                    if (not steps or steps[-1]["request"]["method"] not in STEP_METHODS
+                            or steps[-1]["result"].get("executed_ticks", 0) <= 0):
+                        raise EvidenceError("pause replay requires an already completed advancement")
+                    last_pause = {"request": pending, "result": data["result"]}
+                    steps.append(last_pause)
                 elif pending["method"] == "stop_recording":
                     if data["result"].get("closed") is not True:
                         raise EvidenceError("source recording did not close")
@@ -229,6 +239,14 @@ def _trace_steps(path: Path) -> tuple[dict, list[dict]]:
                         if not isinstance(result.get("state"), dict) or result["state"].get("schema") != AUDIT_SCHEMA:
                             raise EvidenceError("capture post-state snapshot is malformed")
                         last_capture.setdefault("state_after", result["state"])
+                elif last_pause is not None and pending["method"] == "audit_snapshot":
+                    result = data["result"]
+                    if (result.get("version") != last_pause["result"].get("observation", {}).get("version")
+                            or not isinstance(result.get("state"), dict) or result["state"].get("schema") != AUDIT_SCHEMA):
+                        raise EvidenceError("pause post-state snapshot is missing its unchanged boundary")
+                    if "state_after" in last_pause and last_pause["state_after"] != result["state"]:
+                        raise EvidenceError("game state changed while paused")
+                    last_pause["state_after"] = result["state"]
             pending = None
         elif initial is not None and kind in {"invalid_response", "exception"}:
             if (kind == "exception" and isinstance(data, dict) and data.get("request_id") in capture_errors
@@ -243,7 +261,7 @@ def _trace_steps(path: Path) -> tuple[dict, list[dict]]:
 
 def _native_steps(audit: AuditLog) -> list[dict]:
     steps, pending = [], None
-    for event in audit.events:
+    for event in audit.control_events:
         payload = event["payload"]
         if event["kind"] == "request_started":
             if pending is not None:
@@ -316,6 +334,7 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
         raise EvidenceError("native authoritative requests/results differ from source trajectory")
     current = initial["observation"]["version"]
     request_ids = set()
+    pause_state_checks = {}
     for step_index, step in enumerate(steps):
         req, result = step["request"], step.get("result")
         request_id = req.get("request_id")
@@ -325,11 +344,27 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
         if (type(req.get("protocol")) is not int or req["protocol"] != 1
                 or req.get("method") not in INTERVENTIONS):
             raise EvidenceError("trajectory skipped a mutation or has stale request version")
-        version(req.get("expect"))
+        if req["method"] != "pause" or "expect" in req:
+            version(req.get("expect"))
         params = req.get("params")
         if not isinstance(params, dict):
             raise EvidenceError("request params must be an object")
         method = req["method"]
+        if method == "pause":
+            before = steps[step_index - 1] if step_index else None
+            if (params != {} or ("expect" in req and req["expect"] != current) or before is None
+                    or before["request"]["method"] not in STEP_METHODS or before["result"]["executed_ticks"] <= 0
+                    or not isinstance(result, dict) or result.get("state") != "paused_at_boundary"
+                    or result.get("observation") != before["result"]["observation"]
+                    or result["observation"].get("version") != current or not isinstance(step.get("state_after"), dict)):
+                raise EvidenceError("pause is not a proven no-op at a completed paused boundary")
+            if audit.request_headers(request_id) or audit.request_events(request_id):
+                raise EvidenceError("no-op pause unexpectedly created native actions or steps")
+            previous_frames = audit.request_headers(before["request"]["request_id"])
+            if not previous_frames or previous_frames[-1].kind != "post_step":
+                raise EvidenceError("pause is missing the previous completed audit boundary")
+            pause_state_checks[previous_frames[-1].seq] = step["state_after"]
+            continue
         if method == "capture_frame":
             response = step["capture_response"]
             after = version(step.get("after_version"))
@@ -406,6 +441,13 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
         if native_actions != expected_actions:
             raise EvidenceError("native action attempts/results were lost or reordered")
         current = after
+    if pause_state_checks:
+        # Pauses are uncommon control probes. One sequential pass proves their
+        # post-snapshots equal the actual prior post-step without random seeks
+        # or equating a non-cryptographic digest with the full reconstructed state.
+        for frame in audit._frames(reuse_state=True):
+            if frame.seq in pause_state_checks and frame.canonical_state != canonical(pause_state_checks[frame.seq]):
+                raise EvidenceError("pause changed the captured game state")
 
 
 @dataclass
@@ -531,6 +573,10 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
               "mode": "cold_start_recompute", "original_engine_replay_verified": False,
               "scope": "captured state and actual action outcomes", "requests": [], "equal": False}
     report["audit_hash_backend"] = hash_backend()
+    report["particle_shake"] = {"mode": trajectory.audit.manifest.get("particle_shake", {}).get("mode", "not_declared"),
+                                "original_engine_bitwise_unmodified": False if trajectory.audit.manifest.get("particle_shake") else None,
+                                "semantic_seed_calls_compared": 0, "raw_pointer_seeds_compared": False,
+                                "final_health_verified": False}
     source_captures = [step for step in trajectory.steps if step["request"]["method"] == "capture_frame"]
     report["capture_interventions"] = {
         "source": "session_trace" if trajectory.manifest["source"] == "session_trace" else "unknown_native_only",
@@ -539,12 +585,15 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
         "scope": "executed_prefix" if target_tick is not None else "entire_trajectory",
         "pixel_content_compared": False,
     }
+    report["pause_controls"] = {"recorded": sum(step["request"]["method"] == "pause" for step in trajectory.steps),
+                                "executed": 0, "verified_noop": 0}
 
     def require_equal(expected, actual, stage):
         difference = first_difference(expected, actual)
         if difference:
             raise ReplayDivergence({"stage": stage, "difference": difference})
 
+    source_frame_stream = actual_frames = None
     try:
         with initializer(trajectory, output) as session:
             if not isinstance(session, ReplaySession):
@@ -556,6 +605,12 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             require_equal(session.identity["build"], hello.get("build"), "live_build")
             require_equal(session.identity["game"], hello.get("game"), "live_game")
             required = {"observe", "audit_snapshot"} | {step["request"]["method"] for step in trajectory.steps if step["request"]["method"] in STEP_METHODS}
+            if report["pause_controls"]["recorded"]:
+                # Protocol v1 implements these controller methods, but historic
+                # hello manifests omit their capability keys. Probe status and
+                # execute pause normally; explicit denial still fails closed.
+                if any(hello.get("capabilities", {}).get(name) is False for name in ("pause", "status")):
+                    raise EvidenceError("runtime explicitly denies pause/status control")
             if any(step["capture_response"]["ok"] and step["capture_response"]["result"]["capture_ok"] for step in source_captures):
                 required.add("capture_frame")
             for capability in required:
@@ -613,6 +668,37 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     params["max_ticks" if req["method"] == "advance" else "advance_ticks"] = target_tick - client.version["tick"]
                 actual_id = f"replay-{report['branch_id']}-{ordinal}"
                 actual_ids[req["request_id"]] = actual_id
+                if req["method"] == "pause":
+                    def paused_status(label):
+                        status = client.request("status")
+                        if (not {"state", "fault", "version", "pending_request_id", "executed_ticks"} <= set(status)
+                                or status.get("state") != "paused_at_boundary" or status["pending_request_id"] is not None
+                                or type(status["executed_ticks"]) is not int or status["executed_ticks"] != 0 or status["fault"] is not None):
+                            raise EvidenceError("pause control requires an already paused runtime without pending work")
+                        require_equal(mapped_version(source_before), status.get("version"), label)
+                        return status
+                    status_before = paused_status(f"pause[{ordinal}].before_status")
+                    before = client.request("audit_snapshot")
+                    require_equal(client.version, before.get("version"), f"pause[{ordinal}].before_snapshot_version")
+                    actual = client.request("pause", params, expect=mapped_version(req["expect"]) if "expect" in req else None,
+                                            request_id=actual_id)
+                    execution = {"ordinal": ordinal, "source_request_id": req["request_id"],
+                                 "actual_request_id": actual_id, "method": "pause", "params": params, "result": actual,
+                                 "partial": False, "status_before": status_before}
+                    report["requests"].append(execution)
+                    report["pause_controls"]["executed"] += 1
+                    wanted = copy.deepcopy(expected)
+                    wanted["observation"] = mapped_observation(expected["observation"])
+                    require_equal(wanted, actual, f"pause[{ordinal}].result")
+                    execution["status_after"] = paused_status(f"pause[{ordinal}].after_status")
+                    after = client.request("audit_snapshot")
+                    require_equal(before.get("version"), after.get("version"), f"pause[{ordinal}].snapshot_version")
+                    require_equal(before.get("state"), after.get("state"), f"pause[{ordinal}].state_unchanged")
+                    require_equal(step["state_after"], after.get("state"), f"pause[{ordinal}].source_state")
+                    execution["verified_noop"] = True
+                    report["pause_controls"]["verified_noop"] += 1
+                    reached_version = client.version
+                    continue
                 if req["method"] == "capture_frame":
                     report["capture_interventions"]["attempted"] += 1
                     try:
@@ -680,6 +766,10 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     require_equal(req["request_id"], left.payload.get("request_id"), "source_frame_request")
                     require_equal(left.kind, right.kind, f"audit[{ordinal}:{index}].phase")
                     require_equal(mapped_version(left.version), right.version, f"audit[{ordinal}:{index}].version")
+                    require_equal([particle_semantics(event, map_version=mapped_version) for event in left.particle_seeds],
+                                  [particle_semantics(event) for event in right.particle_seeds],
+                                  f"audit[{ordinal}:{index}].particle_shake")
+                    report["particle_shake"]["semantic_seed_calls_compared"] += len(right.particle_seeds)
                     # Both canonical byte strings were reconstructed from the
                     # actual JSON Patches and checked against every native
                     # digest. Compare the bytes themselves, not only FNV hashes.
@@ -705,6 +795,12 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     snapshot = client.request("audit_snapshot")
                     require_equal(client.version, snapshot.get("version"), "final_snapshot_boundary")
                     require_equal(last_source_frame.state, snapshot.get("state"), "post_request_state")
+            # Seek normally leaves the source suffix unread. Its byte binding
+            # must be checked synchronously before publishing success; relying
+            # on generator GC would discard a close-time evidence exception.
+            source_frame_stream.close()
+            source_frame_stream = None
+            trajectory.audit.verify_files()
             report["equal"] = True
             expected_captures = sum(step["request"]["method"] == "capture_frame"
                                     for step in trajectory.steps[:len(report["requests"])] )
@@ -722,7 +818,19 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             # A live consumer can continue with the exact returned epoch/version.
             if on_takeover is not None:
                 on_takeover(session, copy.deepcopy(report["takeover"]))
+        if trajectory.audit.manifest.get("particle_shake") is not None:
+            if on_takeover is None:
+                actual_audit.verify_closed()
+            else:
+                AuditLog(session.audit_directory, require_closed=True)
+            report["particle_shake"]["final_health_verified"] = True
     except Exception as error:
+        for stream in (actual_frames, source_frame_stream):
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception as close_error:
+                    report.setdefault("evidence_close_failures", []).append(str(close_error))
         report["equal"] = False
         report["failure"] = error.report if isinstance(error, ReplayDivergence) else {"type": type(error).__name__, "message": str(error)}
         _write(output / "replay-report.json", report)

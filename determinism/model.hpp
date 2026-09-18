@@ -3,8 +3,6 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <iomanip>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -29,18 +27,20 @@ inline MtState SeedMt(uint32_t seed) {
     return state;
 }
 
+template<size_t Size> inline std::string FixedHex(uint64_t value) {
+    static constexpr char digits[]="0123456789abcdef";
+    std::string result(Size,'0');
+    for(size_t i=Size;i>0;--i) {result[i-1]=digits[value&15];value>>=4;}
+    return result;
+}
 // Diagnostic checksum, deliberately not a cryptographic file identity.
 inline std::string Digest(std::string_view text) {
     uint64_t value = 14695981039346656037ULL;
     for (unsigned char byte : text) { value ^= byte; value *= 1099511628211ULL; }
-    std::ostringstream out;
-    out << std::hex << std::setfill('0') << std::setw(16) << value;
-    return out.str();
+    return FixedHex<16>(value);
 }
 inline std::string Hex(uint32_t value) {
-    std::ostringstream out;
-    out << std::hex << std::setfill('0') << std::setw(8) << value;
-    return out.str();
+    return FixedHex<8>(value);
 }
 inline Json EncodeMt(const MtState& state) {
     return {{"algorithm", "sexy_mt19937_31"}, {"words", state.words},
@@ -65,9 +65,17 @@ inline MtState DecodeMt(const Json& value) {
 }
 inline Json Digests(const Json& state) {
     Json result = Json::object();
-    for (auto it = state.begin(); it != state.end(); ++it)
-        result[it.key()] = Digest(it.value().dump());
-    result["all"] = Digest(state.dump());
+    std::string whole="{";
+    for (auto it = state.begin(); it != state.end(); ++it) {
+        auto encoded=it.value().dump();
+        result[it.key()] = Digest(encoded);
+        if(it!=state.begin()) whole+=',';
+        whole+=Json(it.key()).dump();whole+=':';whole+=encoded;
+    }
+    whole+='}';
+    // Native snapshots are objects. Preserve the old behavior for other
+    // supported values rather than applying object encoding accidentally.
+    result["all"] = Digest(state.is_object()?whole:state.dump());
     return result;
 }
 }

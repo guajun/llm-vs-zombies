@@ -9,7 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch as mock_patch
 
-from llm_vs_zombies.audit_compare import AuditTail, SCHEMA, EvidenceError, canonical, digests, file_hash
+from llm_vs_zombies.audit_compare import (AuditTail, SCHEMA, EvidenceError, canonical, digests, file_hash,
+                                        PARTICLE_SHAKE_MODE, _particle_digest)
 from llm_vs_zombies.client import Client, OutcomeUnknown, RemoteError
 from llm_vs_zombies.engine_replay import (ReplayDivergence, ReplaySession, Trajectory,
     build_trajectory, capture_initial, identity_from_launcher, replay)
@@ -21,14 +22,24 @@ GAME = {"schema": SCHEMA, "target": "synthetic-test-only", "loaded_signatures_ma
 BUILD = {"runtime_protocol": 1, "avz_commit": "synthetic-test-only", "pointer_bits": 32}
 ARTIFACTS = {"input_hashes": {"game": "1" * 64}, "module_hashes": {"runtime": "2" * 64},
              "profile_hashes": {"profile": "3" * 64}}
+PARTICLE_MODE = {"mode": PARTICLE_SHAKE_MODE, "installed": True, "original_engine_bitwise_unmodified": False,
+                 "semantic_change": "test verified ID substitution", "raw_evidence": "particle-shake-seeds.jsonl"}
 
 
 class ModelTransport:
     def __init__(self, directory, *, epoch=1, revision=0, divergence=None, wrong_result=False, terminal_tick=None,
-                 pixel_byte=1, wrong_capture_guard=False, capture_timeout=False, animation_handle=None):
+                 pixel_byte=1, wrong_capture_guard=False, capture_timeout=False, animation_handle=None,
+                 particle_pointer=None, particle_id=65538, particle_overflow=False, pause_changes_state=False, status_pending=False,
+                 deny_pause=False):
         self.directory = directory
         directory.mkdir(parents=True)
         self.game, self.animation_handle = copy.deepcopy(GAME), animation_handle
+        self.particle_pointer, self.particle_id, self.particle_overflow = particle_pointer, particle_id, particle_overflow
+        self.particle_count, self.particle_digest = 0, 14695981039346656037
+        self.pause_changes_state, self.status_pending = pause_changes_state, status_pending
+        self.deny_pause = deny_pause
+        if particle_pointer is not None:
+            self.game["particle_shake"] = PARTICLE_MODE
         if animation_handle is not None:
             self.game["coverage"]["reanimations"] = {"raw_handle_evidence": {
                 "path": "audit/reanimation-handles.jsonl", "encoding": "initial_plus_json_patch",
@@ -38,6 +49,8 @@ class ModelTransport:
                       for name in ("events.jsonl", "checksums.jsonl", "state-deltas.jsonl")}
         if animation_handle is not None:
             self.files["reanimation-handles.jsonl"] = (directory / "reanimation-handles.jsonl").open("w", encoding="utf-8", newline="\n")
+        if particle_pointer is not None:
+            self.files["particle-shake-seeds.jsonl"] = (directory / "particle-shake-seeds.jsonl").open("w", encoding="utf-8", newline="\n")
         self.seq, self.tick, self.revision, self.epoch, self.sun = 0, 0, revision, epoch, 500
         self.previous, self.divergence, self.wrong_result = None, divergence, wrong_result
         self.requests = []
@@ -62,7 +75,26 @@ class ModelTransport:
             state["board"]["animation"] = {"status": "live", "node": "test#0"}
             state["reanimations"] = {"schema": "lvz.reanimation-links.v1", "valid": True, "issues": [],
                 "nodes": {"test#0": {"state": {"time": self.tick}, "owners": ["test"]}}}
+        if self.particle_pointer is not None:
+            state["particle_shake"] = {"mode": PARTICLE_SHAKE_MODE, "controlled_calls": self.particle_count,
+                                       "controlled_digest": self.particle_digest}
         return state
+
+    def particle_call(self):
+        identity, pointer, factor = self.particle_id, self.particle_pointer, self.tick + 1
+        payload = {"mode": PARTICLE_SHAKE_MODE, "ordinal": self.particle_count, "callsite_rva": 0x116ba5,
+            "particle_id": identity, "slot": 2, "generation": identity >> 16, "age": factor, "duration": 100000, "crossfade_duration": 0,
+            "factor": factor, "canonical_seed": (identity * factor) & 0xffffffff, "pool_verified": True,
+            "control_phase": "pre_step", "pool": {"used": 3, "capacity": 4, "count": 1, "free_head": 3, "next_key": 2}}
+        event = {"schema": SCHEMA, "seq": self.seq, "kind": "particle_shake_seed", "phase": "controlled_boundary",
+                 "native_phase": "before_srand", "version": self.version(), "payload": payload}
+        self.seq += 1
+        self.write("events.jsonl", event)
+        self.write("particle-shake-seeds.jsonl", dict(event, schema="lvz.particle-shake-raw.v1", payload=dict(payload,
+            particle_address=pointer, emitter_address=100, system_address=200, holder_address=300,
+            pool_block_address=pointer - 2 * 0xa0, original_seed=(pointer * factor) & 0xffffffff)))
+        self.particle_count += 1
+        self.particle_digest = _particle_digest(self.particle_digest, payload)
 
     def write(self, name, value):
         self.files[name].write(json.dumps(value, separators=(",", ":")) + "\n")
@@ -97,12 +129,26 @@ class ModelTransport:
         if method == "hello":
             result = {"build": BUILD, "game": self.game, "session": "synthetic", "pid": 123,
                       "capabilities": dict.fromkeys(("observe", "advance", "commit", "audit_snapshot", "capture_frame"), True)}
+            if self.deny_pause:
+                result["capabilities"]["pause"] = False
         elif method == "observe":
             result = self.observe()
         elif method == "audit_snapshot":
             result = {"state": self.state(), "version": self.version()}
+        elif method == "status":
+            result = {"state": "stepping" if self.status_pending else "paused_at_boundary", "fault": None,
+                      "version": self.version(), "pending_request_id": "other" if self.status_pending else None,
+                      "executed_ticks": 0}
+        elif method == "pause":
+            if self.pause_changes_state:
+                self.draw_count += 1
+            result = {"state": "paused_at_boundary", "observation": self.observe()}
         elif method == "stop_recording":
             self.event("recording_closed", {"request_id": rid})
+            if self.particle_pointer is not None:
+                self.event("particle_shake_closed", {"installed": True, "captured": self.particle_count,
+                    "controlled_calls": self.particle_count, "queued": 0, "wrong_thread_calls": 0,
+                    "faults": 0, "overflow": int(self.particle_overflow), "healthy": not self.particle_overflow})
             result = {"closed": True, "observation": self.observe()}
         elif method == "capture_frame":
             if self.capture_timeout:
@@ -151,6 +197,8 @@ class ModelTransport:
             if reason != "action_failed":
                 for _ in range(count):
                     self.event("pre_step", {"request_id": rid, "requested_ticks": count, "executed_ticks": executed})
+                    if self.particle_pointer is not None:
+                        self.particle_call()
                     self.tick += 1
                     self.revision = 0
                     executed += 1
@@ -207,18 +255,24 @@ class ReplayTests(unittest.TestCase):
         self.temp.cleanup()
 
     def initializer(self, *, divergence=None, wrong_result=False, wrong_identity=False, terminal_tick=None,
-                    wrong_capture_guard=False, capture_timeout=False):
+                    wrong_capture_guard=False, capture_timeout=False, wrong_particle_id=False, particle_overflow=False,
+                    pause_changes_state=False, status_pending=False, deny_pause=False):
         @contextmanager
         def initialize(trajectory, output):
             self.live = ModelTransport(output / "audit", epoch=99, revision=2,
                                        divergence=divergence, wrong_result=wrong_result, terminal_tick=terminal_tick,
                                        pixel_byte=2, wrong_capture_guard=wrong_capture_guard, capture_timeout=capture_timeout,
-                                       animation_handle=131074 if "reanimations" in trajectory.audit.manifest.get("coverage", {}) else None)
+                                       animation_handle=131074 if "reanimations" in trajectory.audit.manifest.get("coverage", {}) else None,
+                                       particle_pointer=0x20000140 if trajectory.audit.manifest.get("particle_shake") else None,
+                                       particle_id=131074 if wrong_particle_id else 65538, particle_overflow=particle_overflow,
+                                       pause_changes_state=pause_changes_state, status_pending=status_pending, deny_pause=deny_pause)
             identity = copy.deepcopy(self.identity)
             if wrong_identity:
                 identity["artifacts"]["module_hashes"]["runtime"] = "4" * 64
             with SessionTrace(output / "actual.jsonl") as trace, Client(self.live, trace=trace) as client:
                 yield ReplaySession(client, identity, output / "audit")
+                if self.live.particle_pointer is not None:
+                    client.request("stop_recording", expect=client.version)
         return initialize
 
     def test_full_replay_preserves_failed_attempt_order_and_epoch_mapping(self):
@@ -231,6 +285,35 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(steps[1]["expect"], {"epoch": 99, "tick": 0, "revision": 4})
         self.assertEqual(result["reached_version"]["tick"], 5)
 
+    def test_seek_source_suffix_tamper_is_rejected_before_success_or_takeover(self):
+        base = self.initializer()
+        taken_over = []
+
+        @contextmanager
+        def mutate_during_seek(trajectory, output):
+            with base(trajectory, output) as session:
+                original = self.live.exchange
+
+                def exchange(payload, timeout):
+                    result = original(payload, timeout)
+                    if json.loads(payload)["method"] == "audit_snapshot" and self.live.tick == 2:
+                        path = trajectory.audit.directory / "events.jsonl"
+                        # Modify the unread footer after the partial request
+                        # was checked, while the source generator is suspended.
+                        with path.open("ab") as stream:
+                            stream.write(b"\n")
+                    return result
+
+                self.live.exchange = exchange
+                yield session
+
+        output = self.root / "seek-tamper"
+        with self.assertRaises(EvidenceError):
+            replay(self.trajectory, mutate_during_seek, output, target_tick=2,
+                   on_takeover=lambda *args: taken_over.append(args))
+        self.assertFalse(json.loads((output / "replay-report.json").read_text())["equal"])
+        self.assertEqual(taken_over, [])
+
     def animation_recording(self):
         source = self.root / "animation-source"
         model = ModelTransport(source / "audit", animation_handle=65538)
@@ -240,6 +323,92 @@ class ReplayTests(unittest.TestCase):
             client.advance(2)
             client.request("stop_recording", expect=client.version)
         return build_trajectory(source / "session.jsonl", source / "audit", self.root / "animation-bundle")
+
+    def particle_recording(self):
+        source = self.root / "particle-source"
+        model = ModelTransport(source / "audit", particle_pointer=0x10000140)
+        with SessionTrace(source / "session.jsonl") as trace, Client(model, trace=trace) as client:
+            self.identity = identity_from_launcher(client.hello(), ARTIFACTS)
+            capture_initial(client, identity=self.identity, initialization={"seed": 42, "synthetic": True})
+            client.advance(2)
+            client.advance(1)
+            client.request("stop_recording", expect=client.version)
+        return build_trajectory(source / "session.jsonl", source / "audit", self.root / "particle-bundle")
+
+    def pause_recording(self, *, snapshot=True, side_effect=False):
+        source = self.root / "pause-source"
+        model = ModelTransport(source / "audit", pause_changes_state=side_effect)
+        with SessionTrace(source / "session.jsonl") as trace, Client(model, trace=trace) as client:
+            capture_initial(client, identity=self.identity, initialization={"synthetic": True})
+            client.advance(2)
+            client.request("pause")  # Historical runtime contract does not require expect.
+            if snapshot:
+                client.request("audit_snapshot")
+            client.request("stop_recording", expect=client.version)
+        return source
+
+    def test_completed_pause_is_replayed_and_proved_noop_with_actual_snapshots(self):
+        source = self.pause_recording()
+        trajectory = build_trajectory(source / "session.jsonl", source / "audit", self.root / "pause-bundle")
+        self.assertEqual(trajectory.steps[-1]["request"]["method"], "pause")
+        result = replay(trajectory, self.initializer(), self.root / "pause-actual")
+        self.assertTrue(result["equal"])
+        self.assertEqual(result["pause_controls"], {"recorded": 1, "executed": 1, "verified_noop": 1})
+        self.assertTrue(any(request["method"] == "pause" for request in self.live.requests))
+        seek = replay(trajectory, self.initializer(), self.root / "pause-seek", target_tick=2)
+        self.assertEqual(seek["pause_controls"]["executed"], 0)
+
+    def test_pause_without_snapshot_or_with_source_side_effect_is_rejected(self):
+        for snapshot, effect, reason in ((False, False, "post-control audit snapshot"), (True, True, "changed the captured")):
+            with self.subTest(snapshot=snapshot, effect=effect):
+                source = self.pause_recording(snapshot=snapshot, side_effect=effect)
+                with self.assertRaisesRegex(EvidenceError, reason):
+                    build_trajectory(source / "session.jsonl", source / "audit", self.root / "rejected-pause")
+                # Keep independent real traces while allowing this fixture helper's fixed name.
+                source.rename(self.root / ("pause-source-saved-" + str(snapshot)))
+
+    def test_pause_refuses_pending_work_and_detects_actual_hidden_side_effect(self):
+        source = self.pause_recording()
+        trajectory = build_trajectory(source / "session.jsonl", source / "audit", self.root / "pause-bundle")
+        with self.assertRaisesRegex(EvidenceError, "explicitly denies"):
+            replay(trajectory, self.initializer(deny_pause=True), self.root / "pause-denied")
+        self.assertFalse(any(request["method"] == "pause" for request in self.live.requests))
+        with self.assertRaisesRegex(EvidenceError, "without pending work"):
+            replay(trajectory, self.initializer(status_pending=True), self.root / "pause-busy")
+        self.assertFalse(any(request["method"] == "pause" for request in self.live.requests))
+        with self.assertRaises(ReplayDivergence) as caught:
+            replay(trajectory, self.initializer(pause_changes_state=True), self.root / "pause-changed")
+        self.assertIn("state_unchanged", caught.exception.report["stage"])
+
+    def test_particle_mode_replays_all_seed_calls_with_epoch_mapping_and_raw_binding(self):
+        trajectory = self.particle_recording()
+        key = "audit/particle-shake-seeds.jsonl"
+        self.assertEqual(trajectory.manifest["files"][key], file_hash(trajectory.directory / key))
+        result = replay(trajectory, self.initializer(), self.root / "particle-replayed")
+        self.assertTrue(result["equal"])
+        self.assertEqual(result["particle_shake"]["mode"], PARTICLE_SHAKE_MODE)
+        self.assertEqual(result["particle_shake"]["semantic_seed_calls_compared"], 3)
+        self.assertTrue(result["particle_shake"]["final_health_verified"])
+        self.assertFalse(result["particle_shake"]["raw_pointer_seeds_compared"])
+        self.assertNotEqual(file_hash(trajectory.directory / key), file_hash(self.root / "particle-replayed" / key))
+        with (trajectory.directory / key).open("a") as stream:
+            stream.write("{}\n")
+        with self.assertRaisesRegex(EvidenceError, "SHA-256"):
+            Trajectory.load(trajectory.directory)
+
+    def test_particle_changed_id_fails_even_when_original_addresses_are_not_compared(self):
+        trajectory = self.particle_recording()
+        with self.assertRaises(ReplayDivergence) as caught:
+            replay(trajectory, self.initializer(wrong_particle_id=True), self.root / "particle-id-diverged")
+        self.assertIn("particle_shake", caught.exception.report["stage"])
+
+    def test_particle_final_overflow_fails_instead_of_publishing_equal(self):
+        trajectory = self.particle_recording()
+        with self.assertRaisesRegex(EvidenceError, "health/count"):
+            replay(trajectory, self.initializer(particle_overflow=True), self.root / "particle-overflow")
+        report = json.loads((self.root / "particle-overflow/replay-report.json").read_text())
+        self.assertFalse(report["equal"])
+        self.assertFalse(report["particle_shake"]["final_health_verified"])
 
     def test_animation_sidecar_is_bound_copied_and_checked_during_actual_replay(self):
         trajectory = self.animation_recording()

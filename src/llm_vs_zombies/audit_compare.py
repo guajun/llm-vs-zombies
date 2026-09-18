@@ -15,13 +15,23 @@ import subprocess
 import tempfile
 import threading
 import uuid
+import struct
+from collections import deque
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA = "lvz.audit.v1"
 RAW_ANIMATIONS = "reanimation-handles.jsonl"
+PARTICLE_SHAKE_RAW = "particle-shake-seeds.jsonl"
+PARTICLE_SHAKE_MODE = "deterministic_particle_shake_v1"
 AUDIT_FILES = ("manifest.json", "events.jsonl", "checksums.jsonl", "state-deltas.jsonl")
+_POINTER_CACHE_SIZE = 16384
+_POINTER_CACHE_MAX_CHARS = 512
+_OWNER_RETIREMENT_RULES = ["owner_dead", "plant_squished_remove_effects"]
+_PARTICLE_BOUNDARY_LIMIT = 8192
+_JSONL_MAX_RECORD_BYTES = 32 << 20
 _FNV_SOURCE = r"""
 #include <stddef.h>
 #include <stdint.h>
@@ -36,14 +46,24 @@ uint64_t lvz_fnv1a(const unsigned char* bytes, size_t length) {
     }
     return hash;
 }
+#if defined(_WIN32)
+__declspec(dllexport)
+#endif
+uint64_t lvz_fnv1a_continue(uint64_t hash, const unsigned char* bytes, size_t length) {
+    for (size_t i = 0; i < length; ++i) {
+        hash ^= bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
 """
 _hash_lock = threading.Lock()
 _hash_initialized = False
 _hash_native = None
+_hash_continue = None
 
 
-def _python_fnv(encoded: bytes) -> int:
-    result = 14695981039346656037
+def _python_fnv(encoded: bytes, result: int = 14695981039346656037) -> int:
     for byte in encoded:
         result = ((result ^ byte) * 1099511628211) & ((1 << 64) - 1)
     return result
@@ -55,7 +75,7 @@ def _native_hash():
     Stdlib-only installations retain the exact Python implementation. Project
     LLVM-MinGW or a native cc/clang/gcc can compile the reviewed source above.
     """
-    global _hash_initialized, _hash_native
+    global _hash_initialized, _hash_native, _hash_continue
     with _hash_lock:
         if _hash_initialized:
             return _hash_native
@@ -97,10 +117,17 @@ def _native_hash():
             function = module.lvz_fnv1a
             function.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
             function.restype = ctypes.c_uint64
+            continued = module.lvz_fnv1a_continue
+            continued.argtypes = [ctypes.c_uint64, ctypes.c_char_p, ctypes.c_size_t]
+            continued.restype = ctypes.c_uint64
             for fixture in (b"", b"hello", bytes(range(256)), b"\x00\xff\x00"):
                 if function(fixture, len(fixture)) != _python_fnv(fixture):
                     return None
+                for seed in (0, 1, 0xffffffffffffffff, 14695981039346656037):
+                    if continued(seed, fixture, len(fixture)) != _python_fnv(fixture, seed):
+                        return None
             _hash_native = function  # ctypes retains its owning loaded library.
+            _hash_continue = continued
         except (OSError, AttributeError, subprocess.SubprocessError):
             return None
         return _hash_native
@@ -114,6 +141,12 @@ def _fnv(encoded: bytes) -> str:
     function = _hash_native if _hash_initialized else _native_hash()
     value = function(encoded, len(encoded)) if function is not None else _python_fnv(encoded)
     return f"{value:016x}"
+
+
+def _fnv_continue(seed: int, encoded: bytes) -> int:
+    if not _hash_initialized:
+        _native_hash()
+    return _hash_continue(seed, encoded, len(encoded)) if _hash_continue is not None else _python_fnv(encoded, seed)
 
 
 class EvidenceError(ValueError):
@@ -157,6 +190,58 @@ def jsonl(path: Path) -> Iterator[dict]:
             yield value
 
 
+class EventStream:
+    """Repeatable, hash-bound JSONL view; no event payloads remain resident.
+
+    Each read checks inode/size/timestamps and all bytes against the original
+    SHA-256. Closing an early iterator also verifies the unread suffix.
+    """
+    def __init__(self, path: Path):
+        self.path = path
+        self.signature = self._signature()
+        self.sha256 = file_hash(path)
+        self._check_signature()
+
+    def _signature(self):
+        stat = self.path.stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+    def _check_signature(self):
+        if self._signature() != self.signature:
+            raise EvidenceError(f"closed audit file was changed/replaced/truncated: {self.path.name}")
+
+    def verify(self):
+        self._check_signature()
+        if file_hash(self.path) != self.sha256:
+            raise EvidenceError(f"closed audit file SHA-256 changed: {self.path.name}")
+        self._check_signature()
+
+    def __iter__(self):
+        self._check_signature()
+        digest, completed = hashlib.sha256(), False
+        try:
+            with self.path.open("rb") as stream:
+                number = 0
+                while line := stream.readline(_JSONL_MAX_RECORD_BYTES + 1):
+                    number += 1
+                    if len(line) > _JSONL_MAX_RECORD_BYTES:
+                        raise EvidenceError("audit JSONL record exceeds reader bound 32 MiB")
+                    digest.update(line)
+                    if not line.endswith(b"\n"):
+                        raise EvidenceError(f"{self.path.name}:{number}: incomplete JSONL tail")
+                    value = decode(line)
+                    if not isinstance(value, dict):
+                        raise EvidenceError(f"{self.path.name}:{number}: object required")
+                    yield value
+            completed = True
+            if digest.hexdigest() != self.sha256:
+                raise EvidenceError(f"closed audit file SHA-256 changed: {self.path.name}")
+        finally:
+            self._check_signature()
+            if not completed and file_hash(self.path) != self.sha256:
+                raise EvidenceError(f"closed audit file SHA-256 changed: {self.path.name}")
+
+
 def file_hash(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -170,6 +255,8 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     animations = coverage.get("reanimations", {})
     if not isinstance(animations, dict):
         raise EvidenceError("invalid animation coverage")
+    if "owner_retirement_rules" in animations and animations["owner_retirement_rules"] != _OWNER_RETIREMENT_RULES:
+        raise EvidenceError("unsupported animation owner retirement rules")
     descriptor = animations.get("raw_handle_evidence")
     required = coverage.get("animation_normalization") is True or manifest.get("animation_normalization") is True
     if descriptor is not None:
@@ -182,7 +269,20 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     present = (directory / RAW_ANIMATIONS).is_file()
     if required and not present:
         raise EvidenceError("required raw animation evidence is missing")
-    return AUDIT_FILES + ((RAW_ANIMATIONS,) if present else ())
+    result = AUDIT_FILES + ((RAW_ANIMATIONS,) if present else ())
+    particle = manifest.get("particle_shake")
+    particle_file = (directory / PARTICLE_SHAKE_RAW).is_file()
+    if particle is not None:
+        if (not isinstance(particle, dict) or particle.get("mode") != PARTICLE_SHAKE_MODE
+                or particle.get("installed") is not True or particle.get("original_engine_bitwise_unmodified") is not False
+                or particle.get("raw_evidence") != PARTICLE_SHAKE_RAW or not isinstance(particle.get("semantic_change"), str)):
+            raise EvidenceError("unsupported or undeclared particle shake semantics")
+        if not particle_file:
+            raise EvidenceError("required raw particle shake evidence is missing")
+        result += (PARTICLE_SHAKE_RAW,)
+    elif particle_file:
+        raise EvidenceError("raw particle shake evidence lacks an explicit engine mode")
+    return result
 
 
 def _check_state_values(item):
@@ -235,10 +335,10 @@ def version(value: Any) -> dict[str, int]:
     return value
 
 
-def _tokens(pointer: str) -> list[str]:
+def _parse_tokens(pointer: str) -> tuple[str, ...]:
     if pointer == "":
-        return []
-    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        return ()
+    if not pointer.startswith("/"):
         raise EvidenceError("invalid JSON Pointer")
     result = []
     for part in pointer[1:].split("/"):
@@ -250,7 +350,24 @@ def _tokens(pointer: str) -> list[str]:
                 index += 1
             index += 1
         result.append(part.replace("~1", "/").replace("~0", "~"))
-    return result
+    return tuple(result)
+
+
+@lru_cache(maxsize=_POINTER_CACHE_SIZE)
+def _cached_tokens(pointer: str) -> tuple[str, ...]:
+    # lru_cache stores successful returns only. Tuples cannot be changed by a
+    # caller; the cache never stores a target container or dynamic validity.
+    return _parse_tokens(pointer)
+
+
+def _tokens(pointer: str) -> tuple[str, ...]:
+    if not isinstance(pointer, str):
+        raise EvidenceError("invalid JSON Pointer")
+    # Avoid hashing malformed/unhashable inputs and retaining arbitrarily long
+    # valid paths. Long paths still receive the same complete strict parsing.
+    if type(pointer) is str and len(pointer) <= _POINTER_CACHE_MAX_CHARS:
+        return _cached_tokens(pointer)
+    return _parse_tokens(pointer)
 
 
 def _index(container, token: str, *, add=False):
@@ -344,6 +461,150 @@ class AuditFrame:
     digests: dict
     canonical_state: bytes | None = None
     raw_animations: dict | None = None
+    particle_seeds: tuple[dict, ...] = ()
+
+
+def particle_semantics(event, *, map_version=lambda value: value):
+    """Exclude raw addresses/global ordinal, retaining actual call order."""
+    return {"version": map_version(event["version"]), "phase": event["phase"],
+            "native_phase": event["native_phase"],
+            "payload": {key: value for key, value in event["payload"].items() if key != "ordinal"}}
+
+
+class _ParticleEvidence:
+    def __init__(self):
+        self.captured = 0
+        self.controlled_calls = 0
+
+    def accept(self, event, raw):
+        AuditLog._envelope(event)
+        if not isinstance(raw, dict) or raw.get("schema") != "lvz.particle-shake-raw.v1":
+            raise EvidenceError("invalid raw particle shake evidence schema")
+        if any(raw.get(key) != event.get(key) for key in ("seq", "kind", "version", "phase", "native_phase")):
+            raise EvidenceError("particle shake raw/semantic envelope mismatch")
+        payload, original = event["payload"], raw.get("payload")
+        extras = {"particle_address", "emitter_address", "system_address", "holder_address", "pool_block_address", "original_seed"}
+        if not isinstance(original, dict) or set(original) != set(payload) | extras:
+            raise EvidenceError("particle shake raw payload must retain complete semantic and pointer evidence")
+        if any(original[key] != value for key, value in payload.items()):
+            raise EvidenceError("particle shake raw/semantic payload mismatch")
+        uint = lambda value: type(value) is int and 0 <= value <= 0xffffffff
+        if (payload.get("mode") != PARTICLE_SHAKE_MODE or payload.get("pool_verified") is not True
+                or type(payload.get("ordinal")) is not int or payload["ordinal"] != self.captured
+                or any(not uint(payload.get(key)) for key in ("particle_id", "slot", "generation", "factor", "canonical_seed"))
+                or any(not uint(original[key]) for key in extras)):
+            raise EvidenceError("invalid particle shake mode, identity, ordinal, or seed")
+        expected_phases = {"pre_step", "request_started", "action"} if event["phase"] == "controlled_boundary" else {"initialization"}
+        if payload.get("control_phase") not in expected_phases:
+            raise EvidenceError("particle shake control phase is inconsistent")
+        age, duration, site = payload.get("age"), payload.get("duration"), payload.get("callsite_rva")
+        crossfade = payload.get("crossfade_duration")
+        if (type(age) is not int or type(duration) is not int or type(crossfade) is not int
+                or not 0 <= age <= 0x7fffffff or not 1 <= duration <= 0x7fffffff
+                or not 0 <= crossfade <= 0x7fffffff or (age >= duration and crossfade == 0)):
+            raise EvidenceError("invalid particle shake age/duration/crossfade")
+        if type(site) is not int or site not in {0x116b3c, 0x116ba5}:
+            raise EvidenceError("particle shake event came from an unsupported callsite")
+        factor = (duration - 1 if age == 0 else age - 1) if site == 0x116b3c else age
+        identity = payload["particle_id"]
+        if (payload["factor"] != factor or payload["slot"] != identity & 0xffff
+                or payload["generation"] != identity >> 16 or payload["generation"] == 0
+                or payload["canonical_seed"] != (identity * factor) & 0xffffffff
+                or original["original_seed"] != (original["particle_address"] * factor) & 0xffffffff
+                or any(original[key] == 0 for key in extras - {"original_seed"})
+                or original["particle_address"] != original["pool_block_address"] + payload["slot"] * 0xa0):
+            raise EvidenceError("particle shake generation/factor/seed relation is invalid")
+        pool = payload.get("pool")
+        if (not isinstance(pool, dict) or set(pool) != {"used", "capacity", "count", "free_head", "next_key"}
+                or any(not uint(value) for value in pool.values())
+                or not 1 <= pool["count"] <= pool["used"] <= pool["capacity"] <= 1024
+                or pool["free_head"] > pool["used"] or not 1 <= pool["next_key"] <= 65535
+                or payload["slot"] >= pool["used"]):
+            raise EvidenceError("invalid verified particle pool evidence")
+        self.captured += 1
+        self.controlled_calls += event["phase"] == "controlled_boundary"
+
+    def close(self, event):
+        health = event["payload"]
+        if (health.get("installed") is not True or health.get("healthy") is not True
+                or any(type(health.get(key)) is not int or health[key] != 0
+                       for key in ("queued", "wrong_thread_calls", "faults", "overflow"))
+                or type(health.get("captured")) is not int or health["captured"] != self.captured
+                or type(health.get("controlled_calls")) is not int or health["controlled_calls"] != self.controlled_calls
+                or ("last_fault_code" in health and (type(health["last_fault_code"]) is not int or health["last_fault_code"] != 0))):
+            raise EvidenceError("particle shake hook health/count is incomplete or unhealthy")
+
+
+class _EventSummary:
+    def __init__(self):
+        self.tail = deque(maxlen=3)
+        self.birth_count = 0
+        self.count = 0
+        self.last_seq = -1
+        self.recording_closed = False
+
+    def accept(self, event):
+        AuditLog._envelope(event)
+        if event["kind"] == "reanimation_link_fault":
+            raise EvidenceError("native animation link fault invalidates strict evidence")
+        if event["seq"] < self.last_seq:
+            raise EvidenceError("audit event sequence moved backwards")
+        if self.recording_closed and event["kind"] not in {"particle_shake_closed", "spawn_hook_closed"}:
+            raise EvidenceError("native event after recording close")
+        if not self.recording_closed and event["kind"] in {"particle_shake_closed", "spawn_hook_closed"}:
+            raise EvidenceError("native hook close precedes recording close")
+        self.last_seq = event["seq"]
+        if event["kind"] == "zombie_initialized":
+            if type(event["payload"].get("ordinal")) is not int or event["payload"]["ordinal"] != self.birth_count:
+                raise EvidenceError("spawn ordinal is missing or duplicated")
+            self.birth_count += 1
+        self.recording_closed |= event["kind"] == "recording_closed"
+        self.tail.append(event)
+        self.count += 1
+
+
+def _closed_events(summary, *, particle=None, spawn_required=False):
+    """Validate the declared close sequence and all hook health summaries."""
+    final = list(summary.tail)
+    if spawn_required and (not final or final[-1]["kind"] != "spawn_hook_closed"):
+        raise EvidenceError("required spawn hook close health is missing")
+    if final and final[-1]["kind"] == "spawn_hook_closed":
+        health = final[-1]["payload"]
+        if (health.get("healthy") is not True or any(type(health.get(key)) is not int or health[key] != 0
+                for key in ("faults", "overflow", "wrong_thread_calls", "queued", "active_initializers"))
+                or type(health.get("captured")) is not int or health["captured"] != summary.birth_count):
+            raise EvidenceError("final spawn hook evidence is unhealthy or incomplete")
+        if len(final) < 2 or final[-1]["version"] != final[-2]["version"]:
+            raise EvidenceError("spawn hook close boundary differs from recording close")
+        final = final[:-1]
+    if particle is not None:
+        if not final or final[-1]["kind"] != "particle_shake_closed":
+            raise EvidenceError("required particle shake close health is missing")
+        particle.close(final[-1])
+        if len(final) < 2 or final[-1]["version"] != final[-2]["version"]:
+            raise EvidenceError("particle shake close boundary differs from recording close")
+        final = final[:-1]
+    elif any(event["kind"] == "particle_shake_closed" for event in final):
+        raise EvidenceError("particle shake close has no declared engine mode")
+    if not final or final[-1]["kind"] != "recording_closed":
+        raise EvidenceError("native recording lacks a completed recording_closed boundary")
+
+
+def _particle_boundary(event, frame, previous):
+    before = event["version"]
+    if event["payload"]["control_phase"] == "pre_step":
+        if previous is None or previous.kind != "pre_step" or frame.kind != "post_step" or before != previous.version:
+            raise EvidenceError("particle shake call is not bound to its actual pre/post update")
+    elif (frame.kind != "pre_step" or before["epoch"] != frame.version["epoch"]
+            or before["tick"] != frame.version["tick"] or before["revision"] > frame.version["revision"]):
+        raise EvidenceError("particle shake action call is not bound to its next audited pre-step")
+
+
+def _particle_digest(previous, payload):
+    """Native canonical word order; runtime epoch/revision never enter state."""
+    values = [payload[key] for key in ("callsite_rva", "particle_id", "factor", "canonical_seed", "age", "duration", "crossfade_duration")]
+    values += [payload["pool"][key] for key in ("used", "capacity", "free_head", "count", "next_key")]
+    return _fnv_continue(previous, struct.pack("<12Q", *values))
 
 
 class _AnimationDecoder:
@@ -352,8 +613,9 @@ class _AnimationDecoder:
     Raw handles are retained and checked locally, never equated across runs.
     The decoder retains one reconstructed raw snapshot, not the full history.
     """
-    def __init__(self):
+    def __init__(self, manifest=None):
         self.state = None
+        self.owner_retirement_rules = (manifest or {}).get("coverage", {}).get("reanimations", {}).get("owner_retirement_rules") == _OWNER_RETIREMENT_RULES
 
     def accept(self, record, frame):
         AuditLog._envelope(record)
@@ -390,7 +652,7 @@ class _AnimationDecoder:
                 or normalized.get("valid") is not True or normalized.get("issues") != []
                 or not isinstance(normalized.get("nodes"), dict)):
             raise EvidenceError("invalid comparable animation state")
-        paths, anchors, owners = set(), set(), {}
+        paths, anchors, owners, checked_flags = set(), set(), {}, {}
         for link in links:
             if not isinstance(link, dict):
                 raise EvidenceError("invalid raw animation link")
@@ -411,20 +673,53 @@ class _AnimationDecoder:
                 raise EvidenceError("invalid normalized animation reference")
             try:
                 field = frame.state
-                for token in _tokens(path):
+                tokens = _tokens(path)
+                for token in tokens:
                     field = field[_index(field, token)]
             except (KeyError, TypeError) as error:
                 raise EvidenceError("raw animation owner path is missing") from error
             if reference != field:
                 raise EvidenceError("raw animation reference differs from comparable state")
+            owner_squished = False
+            plant_path = bool(tokens and tokens[0] == "plants")
+            if "owner_squished" in link and (not plant_path or not self.owner_retirement_rules):
+                raise EvidenceError("owner_squished requires a plant owner and declared retirement rules")
+            if self.owner_retirement_rules:
+                dead_offsets = {"plants": "00000141", "zombies": "000000ec", "mowers": "00000030", "grid_items": "00000020"}
+                if tokens and tokens[0] in dead_offsets:
+                    if len(tokens) != 5 or tokens[1] != "slots" or tokens[3] != "fields":
+                        raise EvidenceError("invalid entity animation owner path")
+                    owner_key = tokens[:3]
+                    if owner_key not in checked_flags:
+                        fields = frame.state[tokens[0]]["slots"][tokens[2]]["fields"]
+                        dead = fields.get(dead_offsets[tokens[0]])
+                        squished = fields.get("00000142") if plant_path else 0
+                        if not uint(dead) or not uint(squished):
+                            raise EvidenceError("animation owner retirement fields are missing or invalid")
+                        checked_flags[owner_key] = (dead != 0, squished != 0)
+                    actual_dead, actual_squished = checked_flags[owner_key]
+                    if link["owner_dead"] != actual_dead:
+                        raise EvidenceError("raw owner_dead differs from the actual owner field")
+                    if plant_path:
+                        if type(link.get("owner_squished")) is not bool or link["owner_squished"] != actual_squished:
+                            raise EvidenceError("raw owner_squished differs from the actual plant field")
+                        owner_squished = actual_squished
+                elif link["owner_dead"]:
+                    raise EvidenceError("non-entity animation owner cannot claim owner_dead")
+            if "retirement_reason" in link and (not self.owner_retirement_rules or reference.get("status") != "expired"):
+                raise EvidenceError("unexpected animation retirement reason")
             if not handle:
                 if reference != {"status": "null"}:
                     raise EvidenceError("non-null reference for zero animation handle")
             elif not matches:
                 reason = "out_of_range" if link["slot"] >= pool["capacity"] else (
                     "not_allocated" if actual is None else "generation_mismatch")
-                if not link["owner_dead"] or reference != {"status": "expired"} or link.get("lookup_failure") != reason:
+                if not (link["owner_dead"] or owner_squished) or reference != {"status": "expired"} or link.get("lookup_failure") != reason:
                     raise EvidenceError("invalid or dangling live animation link")
+                if self.owner_retirement_rules:
+                    retirement = "owner_dead" if link["owner_dead"] else "plant_squished_remove_effects"
+                    if link.get("retirement_reason") != retirement:
+                        raise EvidenceError("animation retirement reason differs from actual lifecycle flags")
             else:
                 node = link.get("logical_node")
                 if (not isinstance(node, str) or reference.get("node") != node
@@ -448,19 +743,6 @@ class _AnimationDecoder:
         for node, anchors_for_node in owners.items():
             if normalized["nodes"][node].get("owners") != anchors_for_node:
                 raise EvidenceError("raw animation owner alias graph mismatch")
-
-
-def _event_sequences(events, frames):
-    """Old birth annotations shared a frame seq; newer births consume one."""
-    versions = {frame.seq: frame.version for frame in frames}
-    primary = list(versions)
-    for event in events:
-        if event["kind"] == "zombie_first_boundary_observed" and event["seq"] in versions:
-            if event["version"] != versions[event["seq"]]:
-                raise EvidenceError("birth annotation/frame version mismatch")
-        else:
-            primary.append(event["seq"])
-    return primary
 
 
 class _FrameDecoder:
@@ -533,6 +815,136 @@ class _FrameDecoder:
             raise EvidenceError("audit ends in an unfinished step")
 
 
+class _AuditStreamDecoder:
+    """Single merge cursor: one state, one frame of seeds, and small counters."""
+    def __init__(self, manifest, files, *, reuse_state):
+        self.frames = _FrameDecoder(reuse_state=reuse_state)
+        self.animation = _AnimationDecoder(manifest) if RAW_ANIMATIONS in files else None
+        self.particle = _ParticleEvidence() if PARTICLE_SHAKE_RAW in files else None
+        self.summary = _EventSummary()
+        self.pending = []
+        self.next_seq = 0
+        self.last_frame = None
+        self.controlled_calls = 0
+        self.rolling = 14695981039346656037
+        self.reuse_state = reuse_state
+        self.peak_pending = 0
+
+    def event(self, event, raw):
+        self.summary.accept(event)
+        shared = (event["kind"] == "zombie_first_boundary_observed" and self.last_frame is not None
+                  and event["seq"] == self.last_frame.seq)
+        if shared:
+            if event["version"] != self.last_frame.version:
+                raise EvidenceError("birth annotation/frame version mismatch")
+        elif event["seq"] != self.next_seq:
+            raise EvidenceError("native audit sequence is missing or duplicated")
+        else:
+            self.next_seq += 1
+        if event["kind"] == "particle_shake_seed":
+            if self.particle is None or raw is None:
+                raise EvidenceError("particle shake semantic/raw evidence or declared engine mode is missing")
+            self.particle.accept(event, raw)
+            if event["phase"] == "controlled_boundary":
+                if len(self.pending) >= _PARTICLE_BOUNDARY_LIMIT:
+                    raise EvidenceError("particle calls before an audited boundary exceed reader bound 8192")
+                self.pending.append(event)
+                self.peak_pending = max(self.peak_pending, len(self.pending))
+            elif self.last_frame is not None:
+                raise EvidenceError("particle shake lost its controlled boundary after recording started")
+        elif event["kind"] == "particle_shake_closed":
+            if self.particle is None:
+                raise EvidenceError("particle shake close has no declared engine mode")
+            self.particle.close(event)
+
+    def frame(self, records):
+        if self.summary.recording_closed:
+            raise EvidenceError("native frame after recording close")
+        frame = self.frames.accept(records[0], records[1])
+        if frame.seq != self.next_seq:
+            raise EvidenceError("native audit sequence is missing or duplicated")
+        self.next_seq += 1
+        if self.animation:
+            self.animation.accept(records[2], frame)
+            frame = replace(frame, raw_animations=self.animation.state if self.reuse_state else copy.deepcopy(self.animation.state))
+        for event in self.pending:
+            _particle_boundary(event, frame, self.last_frame)
+            self.controlled_calls += 1
+            self.rolling = _particle_digest(self.rolling, event["payload"])
+        if self.particle:
+            state = frame.state.get("particle_shake")
+            if (not isinstance(state, dict) or state.get("mode") != PARTICLE_SHAKE_MODE
+                    or type(state.get("controlled_calls")) is not int or state["controlled_calls"] != self.controlled_calls
+                    or type(state.get("controlled_digest")) is not int or state["controlled_digest"] != self.rolling):
+                raise EvidenceError("particle shake state count/digest differs from verified seed events")
+        elif "particle_shake" in frame.state:
+            raise EvidenceError("particle shake state requires an explicit engine mode")
+        result = replace(frame, particle_seeds=tuple(self.pending))
+        self.pending.clear()
+        self.last_frame = AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, {})
+        return result
+
+    def finish(self, *, final=False):
+        self.frames.finish()
+        if final and self.pending:
+            raise EvidenceError("particle shake calls have no following audited boundary")
+
+
+def _walk_audit(decoder, read, *, retain_event=None, request_id=None, constrain_request=False):
+    """Merge sorted event/frame sequences without retaining the event history."""
+    from itertools import zip_longest
+    event_reader = iter(read("events.jsonl"))
+    names = ["checksums.jsonl", "state-deltas.jsonl"]
+    if decoder.animation:
+        names.append(RAW_ANIMATIONS)
+    frame_readers = [iter(read(name)) for name in names]
+    rows = zip_longest(*frame_readers)
+    raw = iter(read(PARTICLE_SHAKE_RAW)) if decoder.particle else iter(())
+
+    def next_event():
+        event = next(event_reader, None)
+        if event is not None:
+            AuditLog._envelope(event)
+        return event
+
+    def next_frame():
+        records = next(rows, None)
+        if records is not None:
+            if any(record is None for record in records):
+                raise EvidenceError("checksum/delta/raw animation record count mismatch")
+            AuditLog._envelope(records[0])
+        return records
+
+    try:
+        event, records = next_event(), next_frame()
+        while event is not None or records is not None:
+            if records is not None and (event is None or records[0]["seq"] <= event["seq"]):
+                frame = decoder.frame(records)
+                if constrain_request and frame.payload.get("request_id") != request_id:
+                    raise EvidenceError("unexpected intervening request in live frame audit")
+                yield frame
+                records = next_frame()
+            else:
+                decoder.event(event, next(raw, None) if event["kind"] == "particle_shake_seed" else None)
+                if retain_event is not None and event["kind"] != "particle_shake_seed":
+                    retain_event(event)
+                event = next_event()
+        if next(raw, None) is not None:
+            raise EvidenceError("particle shake semantic/raw record count mismatch")
+        decoder.finish()
+    finally:
+        first_error = None
+        for reader in [event_reader, *frame_readers, raw]:
+            close = getattr(reader, "close", None)
+            if close:
+                try:
+                    close()
+                except Exception as error:
+                    first_error = first_error or error
+        if first_error is not None:
+            raise first_error
+
+
 class FrameSelection:
     """Reconstruct lazily so a full match does not retain every full state."""
     def __init__(self, owner, indices=None):
@@ -547,18 +959,26 @@ class FrameSelection:
         current = next(wanted, None)
         if current is None:
             return
-        for index, frame in enumerate(self.owner._frames()):
-            if index == current:
-                yield frame
-                current = next(wanted, None)
-                if current is None:
-                    return
+        frames = self.owner._frames()
+        try:
+            for index, frame in enumerate(frames):
+                if index == current:
+                    yield frame
+                    current = next(wanted, None)
+                    if current is None:
+                        return
+        finally:
+            frames.close()
 
     def __getitem__(self, index):
         if isinstance(index, slice):
             return FrameSelection(self.owner, self.indices[index])
         wanted = self.indices[index]
-        return next(iter(FrameSelection(self.owner, [wanted])))
+        selection = iter(FrameSelection(self.owner, [wanted]))
+        try:
+            return next(selection)
+        finally:
+            selection.close()
 
 
 class AuditLog:
@@ -570,43 +990,42 @@ class AuditLog:
         if self.manifest.get("loaded_signatures_match") is not True:
             raise EvidenceError("native target signatures did not match")
         self.evidence_files = audit_files(self.directory, self.manifest)
-        self.events = list(jsonl(self.directory / "events.jsonl"))
-        if any(event.get("kind") == "reanimation_link_fault" for event in self.events):
-            raise EvidenceError("native animation link fault invalidates strict evidence")
-        self._headers = [AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, frame.digests)
-                         for frame in self._frames(reuse_state=True)]
-        self._frame_headers = [(frame.seq, frame.payload.get("request_id")) for frame in self._headers]
+        self._files = {name: EventStream(self.directory / name) for name in self.evidence_files}
+        self.events = self._files["events.jsonl"]
+        self._control_events, self._headers, self._frame_headers = [], [], []
         self._requests, self._request_frames, self._frame_indices = {}, {}, {}
-        for index, frame in enumerate(self._headers):
+        decoder = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True)
+        for index, frame in enumerate(_walk_audit(decoder, self._files.__getitem__, retain_event=self._retain_event)):
+            header = AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, {})
             rid = frame.payload.get("request_id")
-            self._request_frames.setdefault(rid, []).append(frame)
+            self._headers.append(header)
+            self._frame_headers.append((frame.seq, rid))
+            self._request_frames.setdefault(rid, []).append(header)
             self._frame_indices.setdefault(rid, []).append(index)
+        decoder.finish(final=True)
+        self._particle, self._summary = decoder.particle, decoder.summary
+        self.peak_pending_particle_calls = decoder.peak_pending
         self.frames = FrameSelection(self)
-        last_event = -1
-        for event in self.events:
-            self._envelope(event)
-            if event["seq"] < last_event:
-                raise EvidenceError("audit event sequence moved backwards")
-            last_event = event["seq"]
-            self._requests.setdefault(event["payload"].get("request_id"), []).append(event)
-        primary = _event_sequences(self.events, self._headers)
-        if sorted(primary) != list(range(len(primary))):
-            raise EvidenceError("native audit sequence is missing or duplicated")
         if require_closed:
-            final = self.events
-            if final and final[-1]["kind"] == "spawn_hook_closed":
-                health = final[-1]["payload"]
-                births = [event for event in final if event["kind"] == "zombie_initialized"]
-                if (health.get("healthy") is not True or any(type(health.get(key)) is not int or health[key] != 0
-                        for key in ("faults", "overflow", "wrong_thread_calls", "queued", "active_initializers"))
-                        or health.get("captured") != len(births)
-                        or [event["payload"].get("ordinal") for event in births] != list(range(len(births)))):
-                    raise EvidenceError("final spawn hook evidence is unhealthy or incomplete")
-                if len(final) < 2 or final[-1]["version"] != final[-2]["version"]:
-                    raise EvidenceError("spawn hook close boundary differs from recording close")
-                final = final[:-1]
-            if not final or final[-1]["kind"] != "recording_closed":
-                raise EvidenceError("native recording lacks a completed recording_closed boundary")
+            _closed_events(self._summary, particle=self._particle,
+                           spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
+
+    def _retain_event(self, event):
+        self._control_events.append(event)
+        self._requests.setdefault(event["payload"].get("request_id"), []).append(event)
+
+    def verify_files(self):
+        """Explicit success barrier, including sources never opened by a seek."""
+        if audit_files(self.directory, self.manifest) != self.evidence_files:
+            raise EvidenceError("closed audit evidence file set changed")
+        for evidence in self._files.values():
+            evidence.verify()
+
+    @property
+    def control_events(self):
+        """Verified control/birth index, excluding high-volume particle calls."""
+        self.events.verify()
+        return iter(self._control_events)
 
     @staticmethod
     def _envelope(record):
@@ -614,8 +1033,15 @@ class AuditLog:
             raise EvidenceError("invalid native audit schema/sequence")
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
-        if record["kind"] == "spawn_hook_fault":
-            raise EvidenceError("native spawn hook fault invalidates strict evidence")
+        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault"}:
+            raise EvidenceError("native hook fault invalidates strict evidence")
+        if record["kind"] == "particle_shake_seed":
+            if record.get("native_phase") != "before_srand" or record.get("phase") not in {"controlled_boundary", "initialization"}:
+                raise EvidenceError("invalid particle shake capture phase")
+            if record["phase"] == "initialization":
+                if "version" not in record or record["version"] is not None:
+                    raise EvidenceError("initialization particle shake must have explicitly unassigned version")
+                return
         if record["kind"] == "zombie_initialized":
             spawn = record["payload"]
             if (record.get("native_phase") != "zombie_initialize_exit" or spawn.get("schema") != "lvz.spawn.v1"
@@ -633,21 +1059,12 @@ class AuditLog:
         version(record.get("version"))
 
     def _frames(self, *, reuse_state=False):
-        from itertools import zip_longest
-        decoder = _FrameDecoder(reuse_state=reuse_state)
-        readers = [jsonl(self.directory / name) for name in ("checksums.jsonl", "state-deltas.jsonl")]
-        animation = _AnimationDecoder() if RAW_ANIMATIONS in self.evidence_files else None
-        if animation:
-            readers.append(jsonl(self.directory / RAW_ANIMATIONS))
-        for records in zip_longest(*readers):
-            if any(record is None for record in records):
-                raise EvidenceError("checksum/delta/raw animation record count mismatch")
-            frame = decoder.accept(records[0], records[1])
-            if animation:
-                animation.accept(records[2], frame)
-                frame = replace(frame, raw_animations=animation.state if reuse_state else copy.deepcopy(animation.state))
-            yield frame
-        decoder.finish()
+        self._files["manifest.json"].verify()
+        if audit_files(self.directory, self.manifest) != self.evidence_files:
+            raise EvidenceError("closed audit evidence file set changed")
+        decoder = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=reuse_state)
+        yield from _walk_audit(decoder, self._files.__getitem__)
+        decoder.finish(final=True)
 
     def request_frames(self, request_id: str) -> FrameSelection:
         return FrameSelection(self, self._frame_indices.get(request_id, []))
@@ -660,12 +1077,22 @@ class AuditLog:
         return self._requests.get(request_id, [])
 
 
-class AuditTail:
-    """Incrementally verify a runtime's append-only audit after each completion.
+class _ConsumedEventStream:
+    """Repeatable view of the consumed live prefix; never retains its rows."""
+    def __init__(self, owner):
+        self.owner = owner
 
-    Frames are ephemeral: consume/compare state before requesting the next one.
-    Only one state and per-frame metadata are retained. No previous prefix is
-    reparsed, re-patched or re-hashed as a recording grows.
+    def __iter__(self):
+        yield from self.owner._prefix_records("events.jsonl")
+
+
+class AuditTail:
+    """Verify append-only evidence with one state and at most 8192 pending seeds.
+
+    Control/birth records and small frame headers remain indexed. Every seed's
+    raw and semantic records are verified as they arrive, then released after
+    its frame is consumed. Closing rechecks consumed byte hashes, without
+    decoding or patching the history again.
     """
     def __init__(self, directory: str | Path):
         self.directory = Path(directory)
@@ -673,73 +1100,116 @@ class AuditTail:
         if (self.manifest.get("schema") != SCHEMA or not isinstance(self.manifest.get("target"), str)
                 or self.manifest.get("loaded_signatures_match") is not True):
             raise EvidenceError("invalid live audit target manifest")
+        self._manifest_file = EventStream(self.directory / "manifest.json")
         self.evidence_files = audit_files(self.directory, self.manifest)
-        self.events, self._headers = [], []
+        self._headers, self._control_events = [], []
         self._positions = {name: 0 for name in self.evidence_files if name != "manifest.json"}
-        self._decoder = _FrameDecoder(reuse_state=True)
-        self._animation = _AnimationDecoder() if RAW_ANIMATIONS in self.evidence_files else None
-        self._next_seq, self._last_event_seq = 0, -1
+        self._hashes = {name: hashlib.sha256() for name in self._positions}
+        self._stream = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True)
+        self._decoder, self._animation, self._particle = self._stream.frames, self._stream.animation, self._stream.particle
         self._identities = {}
         self._requests, self._request_frames = {}, {}
+        self.events = _ConsumedEventStream(self)
 
-    def _new_records(self, name):
-        path = self.directory / name
-        stat = path.stat()
+    @property
+    def peak_pending_particle_calls(self):
+        return self._stream.peak_pending
+
+    def _check_file(self, name, *, required_size=None):
+        stat = (self.directory / name).stat()
         identity = (stat.st_dev, stat.st_ino)
         if name in self._identities and self._identities[name] != identity:
             raise EvidenceError("live audit file was replaced")
         self._identities[name] = identity
-        if stat.st_size < self._positions[name]:
+        if stat.st_size < (self._positions[name] if required_size is None else required_size):
             raise EvidenceError("live audit file was truncated")
-        with path.open("rb") as stream:
+        return stat
+
+    def _new_records(self, name):
+        # A completed response flushes its evidence. Read exactly this prefix;
+        # an unrelated later request cannot extend a cursor indefinitely.
+        limit = self._check_file(name).st_size
+        with (self.directory / name).open("rb") as stream:
             stream.seek(self._positions[name])
-            while line := stream.readline():
+            while stream.tell() < limit:
+                line = stream.readline(min(limit - stream.tell(), _JSONL_MAX_RECORD_BYTES + 1))
+                if len(line) > _JSONL_MAX_RECORD_BYTES:
+                    raise EvidenceError("audit JSONL record exceeds reader bound 32 MiB")
                 if not line.endswith(b"\n"):
                     raise EvidenceError("live audit contains an incomplete flushed record")
                 value = decode(line)
                 if not isinstance(value, dict):
                     raise EvidenceError("live audit record must be an object")
+                self._hashes[name].update(line)
                 self._positions[name] = stream.tell()
                 yield value
+        self._check_file(name, required_size=limit)
 
-    def read_request(self, request_id: str):
-        from itertools import zip_longest
-        # A sidecar may not silently appear/disappear partway through a run.
+    def _verify_prefix(self, name, limit, expected):
+        self._check_file(name, required_size=limit)
+        digest = hashlib.sha256()
+        with (self.directory / name).open("rb") as stream:
+            remaining = limit
+            while remaining:
+                block = stream.read(min(1 << 20, remaining))
+                if not block:
+                    raise EvidenceError("live audit file was truncated")
+                digest.update(block)
+                remaining -= len(block)
+        self._check_file(name, required_size=limit)
+        if digest.hexdigest() != expected:
+            raise EvidenceError("previously consumed live audit prefix SHA-256 changed")
+
+    def _prefix_records(self, name):
+        limit, expected = self._positions[name], self._hashes[name].hexdigest()
+        self._check_file(name, required_size=limit)
+        digest, complete = hashlib.sha256(), False
+        try:
+            with (self.directory / name).open("rb") as stream:
+                while stream.tell() < limit:
+                    line = stream.readline(min(limit - stream.tell(), _JSONL_MAX_RECORD_BYTES + 1))
+                    if len(line) > _JSONL_MAX_RECORD_BYTES:
+                        raise EvidenceError("audit JSONL record exceeds reader bound 32 MiB")
+                    if not line.endswith(b"\n"):
+                        raise EvidenceError("live audit contains an incomplete consumed record")
+                    digest.update(line)
+                    value = decode(line)
+                    if not isinstance(value, dict):
+                        raise EvidenceError("live audit record must be an object")
+                    yield value
+            complete = True
+            self._check_file(name, required_size=limit)
+            if digest.hexdigest() != expected:
+                raise EvidenceError("previously consumed live audit prefix SHA-256 changed")
+        finally:
+            if not complete:
+                self._verify_prefix(name, limit, expected)
+
+    def _retain_event(self, event):
+        self._control_events.append(event)
+        self._requests.setdefault(event["payload"].get("request_id"), []).append(event)
+
+    def read_request(self, request_id: str | None):
+        self._manifest_file.verify()
         if audit_files(self.directory, self.manifest) != self.evidence_files:
             raise EvidenceError("live audit evidence file set changed")
-        new_events, new_frames = [], []
-        for event in self._new_records("events.jsonl"):
-            if event.get("kind") == "reanimation_link_fault":
-                raise EvidenceError("native animation link fault invalidates strict evidence")
-            AuditLog._envelope(event)
-            if event["seq"] < self._last_event_seq:
-                raise EvidenceError("live audit event sequence moved backwards")
-            self._last_event_seq = event["seq"]
-            self.events.append(event)
-            new_events.append(event)
-            self._requests.setdefault(event["payload"].get("request_id"), []).append(event)
-        readers = [self._new_records(name) for name in ("checksums.jsonl", "state-deltas.jsonl")]
-        if self._animation:
-            readers.append(self._new_records(RAW_ANIMATIONS))
-        for records in zip_longest(*readers):
-            if any(record is None for record in records):
-                raise EvidenceError("live checksum/delta/raw animation record count mismatch")
-            frame = self._decoder.accept(records[0], records[1])
-            if self._animation:
-                self._animation.accept(records[2], frame)
-                frame = replace(frame, raw_animations=self._animation.state)
-            if frame.payload.get("request_id") != request_id:
-                raise EvidenceError("unexpected intervening request in live frame audit")
-            header = AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, frame.digests)
+        for frame in _walk_audit(self._stream, self._new_records, retain_event=self._retain_event,
+                                 request_id=request_id, constrain_request=True):
+            header = AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, {})
             self._headers.append(header)
             self._request_frames.setdefault(request_id, []).append(header)
-            new_frames.append(header)
             yield frame
-        self._decoder.finish()
-        primary = _event_sequences(new_events, new_frames)
-        if sorted(primary) != list(range(self._next_seq, self._next_seq + len(primary))):
-            raise EvidenceError("live audit sequence is missing or duplicated")
-        self._next_seq += len(primary)
+
+    def verify_closed(self):
+        for _ in self.read_request(None):
+            raise EvidenceError("unexpected unconsumed frames at recording close")
+        self._stream.finish(final=True)
+        _closed_events(self._stream.summary, particle=self._particle,
+                       spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
+        for name, position in self._positions.items():
+            if self._check_file(name).st_size != position:
+                raise EvidenceError("unconsumed bytes after recording close")
+            self._verify_prefix(name, position, self._hashes[name].hexdigest())
 
     def request_headers(self, request_id: str) -> list[AuditFrame]:
         return self._request_frames.get(request_id, [])
@@ -762,11 +1232,18 @@ def compare_audits(expected: AuditLog, actual: AuditLog, *,
             return {"equal": False, "reason": "boundary", "index": index}
         if request_map and request_map[a.payload["request_id"]] != b.payload["request_id"]:
             return {"equal": False, "reason": "request_order", "index": index}
+        unname_epoch = lambda value: {"tick": value["tick"], "revision": value["revision"]}
+        difference = first_difference([particle_semantics(event, map_version=unname_epoch) for event in a.particle_seeds],
+                                      [particle_semantics(event, map_version=unname_epoch) for event in b.particle_seeds])
+        if difference:
+            return {"equal": False, "reason": "particle_shake", "index": index, "difference": difference}
         difference = first_difference(a.state, b.state) if a.canonical_state != b.canonical_state else None
         if difference:
             return {"equal": False, "reason": "state", "index": index, "tick": a.version["tick"],
                     "phase": a.kind, "expected_seq": a.seq, "actual_seq": b.seq, "difference": difference}
     if len(left) != len(right):
         return {"equal": False, "reason": "frame_count", "expected": len(left), "actual": len(right)}
+    expected.verify_files()
+    actual.verify_files()
     return {"equal": True, "frames": len(left), "scope": "captured audit fields only",
             "original_engine_replay_verified": False}

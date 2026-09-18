@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from llm_vs_zombies.audit_compare import EvidenceError, first_difference
+from llm_vs_zombies.audit_compare import EvidenceError, first_difference, particle_semantics
 from llm_vs_zombies.engine_replay import Trajectory
 
 
@@ -21,7 +21,7 @@ def _spawns(trajectory):
     """Controlled initializer exits belong to the pre-update boundary's tick."""
     epoch = trajectory.initial["observation"]["version"]["epoch"]
     indexed = {}
-    for event in trajectory.audit.events:
+    for event in trajectory.audit.control_events:
         if event["kind"] != "zombie_initialized" or event.get("phase") != "controlled_boundary":
             continue
         if event["version"]["epoch"] != epoch:
@@ -67,7 +67,7 @@ def _spawn_semantics(event, post_frame):
 
 def _actions(trajectory):
     result = []
-    for event in trajectory.audit.events:
+    for event in trajectory.audit.control_events:
         if event["kind"] == "action":
             payload = copy.deepcopy(event["payload"])
             payload.pop("request_id", None)
@@ -150,6 +150,14 @@ def compare(left_path, right_path, *, purpose, ticks=100):
         for frame in pair:
             if frame.kind != expected_kind or frame.version["tick"] != expected_tick:
                 raise EvidenceError("experiment does not contain consecutive pre/post boundaries from tick zero")
+        seed_calls = []
+        for trajectory, frame in zip((left, right), pair):
+            origin = trajectory.initial["observation"]["version"]
+            def relative(value):
+                return {"tick": value["tick"], "revision": value["revision"] - (origin["revision"] if value["tick"] == 0 else 0)}
+            seed_calls.append([particle_semantics(event, map_version=relative) for event in frame.particle_seeds])
+        if not equal(*seed_calls, "particle_shake", tick=expected_tick, phase=expected_kind):
+            return report
         if a.canonical_state != b.canonical_state and not equal(a.state, b.state, "state",
                 tick=expected_tick, phase=expected_kind):
             return report
@@ -170,6 +178,8 @@ def compare(left_path, right_path, *, purpose, ticks=100):
         raise EvidenceError("wrong number of audited boundaries")
     if any(tick < 0 or tick >= ticks for collection in births for tick in collection):
         raise EvidenceError("controlled spawn lies outside sampled update boundaries")
+    left.audit.verify_files()
+    right.audit.verify_files()
     report.update(passed=True, spawn_exercised=report["spawn_events_compared"] > 0)
     return report
 

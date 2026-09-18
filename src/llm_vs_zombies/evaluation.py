@@ -430,7 +430,8 @@ def live_session(root: Path, name: str, plan: Plan, seed: int = 0):
 
 
 def _pause_probe(client, seconds: float) -> dict:
-    client.pause()
+    if client.request("status").get("state") != "paused_at_boundary":
+        raise RuntimeError("pause probe requires an already completed, paused boundary")
     before = client.request("audit_snapshot")
     observation = client.observe()
     time.sleep(seconds)
@@ -460,6 +461,17 @@ def _recovery_probe(root: Path, name: str, plan: Plan, seed: int) -> tuple[Path,
                 if count <= 0:
                     raise ConnectionError("disconnect probe failed to send full request")
                 offset += count
+            # A completed OS write is not evidence that the game thread has
+            # accepted the request. Establish that through another connection
+            # before deliberately discarding the original response.
+            deadline = time.monotonic() + plan.timeout_seconds
+            while True:
+                accepted = client.request("status", {"request_id": request_id})
+                if accepted.get("request_state") in {"pending", "completed"}:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("disconnect probe request was not accepted")
+                time.sleep(0.02)
         finally:
             stream.close()
         trace.emit("intentional_disconnect", {"request": request, "response_received": False})
@@ -473,18 +485,24 @@ def _recovery_probe(root: Path, name: str, plan: Plan, seed: int) -> tuple[Path,
                     raise TimeoutError("disconnected request did not resolve; no automatic retry was issued")
                 time.sleep(0.02)
             response = status["response"]
-            if response.get("ok") is not True or response["result"].get("executed_ticks") != 100:
-                raise RuntimeError("disconnected advancement did not complete exactly once with 100 ticks")
+            executed = response.get("result", {}).get("executed_ticks")
+            reason = response.get("result", {}).get("stop_reason")
+            if (response.get("ok") is not True or type(executed) is not int or not 0 <= executed <= 100
+                    or reason not in {"client_disconnected", "budget_exhausted"}
+                    or reason == "budget_exhausted" and executed != 100):
+                raise RuntimeError("disconnected advancement did not resolve its actual bounded execution")
             observation = resumed.observe()
-            if observation["version"]["tick"] != before["version"]["tick"] + 100:
+            if observation["version"]["tick"] != before["version"]["tick"] + executed:
                 raise RuntimeError("disconnect recovery has an unexpected tick count")
+            if resumed.request("status", {"request_id": request_id})["response"] != response:
+                raise RuntimeError("resolved disconnected request did not preserve its immutable result")
             failure = resumed.commit([{"op": "unsupported_probe", "row": 1, "col": 1}], advance_ticks=1)
             if failure["stop_reason"] != "action_failed" or failure["executed_ticks"] != 0:
                 raise RuntimeError("invalid action did not stop without advancing")
             recovery = resumed.advance(1)
             if recovery["executed_ticks"] != 1:
                 raise RuntimeError("runtime did not recover after the failed action")
-        result = {"recipe": recipe, "request_id": request_id, "resolved_status": status,
+        result = {"recipe": recipe, "request_id": request_id, "accepted_status": accepted, "resolved_status": status,
                   "after_disconnect": observation, "invalid_action": failure, "recovery": recovery}
         write_json(run / "recovery-probe.json", result)
     finish(run, "recovery_probe_completed")
@@ -585,6 +603,10 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                                 full_cycle=full_cycle_completed(initial_observation, observation, maximum_wave))
                     case["outcome"] = ("full_cycle_completed" if case["full_cycle"] else "tick_budget_exhausted"
                                        if observation["version"]["tick"] >= plan.tick_budget else "terminal_before_complete")
+                    if observation["game_ui"] == 3:
+                        late_pause = _pause_probe(client, plan.pause_seconds)
+                        write_json(run / "pause-probe-after-play.json", late_pause)
+                        add("pause_invariance", True, late_pause, run / "pause-probe-after-play.json")
                     write_json(run / "experiment-end.json", case)
                     add("full_cycle", case["full_cycle"], {"maximum_wave": maximum_wave, "initial_rounds": initial_observation.get("completed_rounds"),
                         "final_rounds": observation.get("completed_rounds")}, run / "experiment-end.json")

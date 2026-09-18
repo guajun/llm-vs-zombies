@@ -4,6 +4,7 @@
 #include "memory.hpp"
 #include "spawn_hook.hpp"
 #include "reanimation_audit.hpp"
+#include "particle_shake.hpp"
 #include <array>
 #include <fstream>
 #include <set>
@@ -16,7 +17,7 @@ constexpr uintptr_t kAppPointer = 0x6a9ec0;
 DWORD ownerThread = 0;
 bool initialized = false;
 uint64_t sequence = 0;
-std::ofstream checksums, changes, events, reanimationHandles;
+std::ofstream checksums, changes, events, reanimationHandles, particleSeeds;
 Json previous;
 ReanimationAuditor reanimationAuditor;
 Json reanimationEvidence;
@@ -42,7 +43,7 @@ bool TargetSignatures() noexcept {
     static constexpr uint8_t crtRand[] = {0xe8,0xb1,0xa9,0x00,0x00,0x8b,0x48,0x14,0x69,0xc9,0xfd,0x43,0x03,0x00,0x81,0xc1,0xc3,0x9e,0x26,0x00};
     return Match(0x5a98d0, seed) && Match(0x5a9940, next)
         && Match(0x5a9930, global) && Match(0x452650, update) && Match(0x61e087, crtRand)
-        && ValidateReanimationTarget();
+        && ValidateReanimationTarget() && ValidateParticleShakeTarget();
 }
 uintptr_t CrtStateAddress() {
     // rand/srand call the engine's statically linked _getptd (not this DLL's CRT).
@@ -91,6 +92,22 @@ void SetObservedSpawnBoundary(const Json& version) {
     const auto epoch=integer("epoch");
     if(epoch>UINT32_MAX) throw std::runtime_error("Spawn boundary epoch exceeds supported range");
     SetSpawnBoundary(integer("tick"),integer("revision"),static_cast<uint32_t>(epoch));
+}
+void DrainAndCheckParticleShake() {
+    for(auto& item:DrainParticleShakeEvents()) {
+        const auto& version=item.at("version");
+        Json envelope={{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_seed"},
+            {"phase",version.is_object()?"controlled_boundary":"initialization"},
+            {"native_phase","before_srand"},{"version",version}};
+        auto raw=envelope;raw["schema"]="lvz.particle-shake-raw.v1";raw["payload"]=std::move(item["raw"]);
+        envelope["payload"]=std::move(item["semantic"]);Write(events,envelope);Write(particleSeeds,raw);
+    }
+    const auto health=ParticleShakeStatus();
+    if(!health.value("healthy",false)) {
+        Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_fault"},
+            {"version",lastObservationVersion},{"payload",health}});
+        Flush();throw std::runtime_error("Particle shake seed validation failed; strict experiment stopped");
+    }
 }
 void WordRange(Json& fields, uintptr_t base, unsigned begin, unsigned end) {
     for (unsigned offset = begin; offset < end; offset += 4)
@@ -229,6 +246,7 @@ Json ProbeTarget() {
         {"rng_capture",ValidateTargetImage()}, {"rng_restore",ValidateTargetImage()},
         {"rng_seed",ValidateTargetImage()},
         {"spawn_hook",std::move(spawn)},
+        {"particle_shake",ParticleShakeManifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
 }
 void Initialize(const std::filesystem::path& runDir) {
@@ -238,14 +256,15 @@ void Initialize(const std::filesystem::path& runDir) {
     if(!ValidateTargetImage()) throw std::runtime_error("Unsupported PvZ engine image: deterministic adapter rejected");
     const auto directory=runDir/"audit";
     std::filesystem::create_directories(directory);
-    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl"})
+    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl"})
         if(std::filesystem::exists(directory/file) && std::filesystem::file_size(directory/file))
             throw std::runtime_error("Audit output already exists; create a fresh run");
     checksums.open(directory/"checksums.jsonl",std::ios::out|std::ios::binary);
     changes.open(directory/"state-deltas.jsonl",std::ios::out|std::ios::binary);
     events.open(directory/"events.jsonl",std::ios::out|std::ios::binary);
     reanimationHandles.open(directory/"reanimation-handles.jsonl",std::ios::out|std::ios::binary);
-    if(!checksums||!changes||!events||!reanimationHandles) throw std::runtime_error("Cannot open audit outputs");
+    particleSeeds.open(directory/"particle-shake-seeds.jsonl",std::ios::out|std::ios::binary);
+    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds) throw std::runtime_error("Cannot open audit outputs");
     ownerThread=GetCurrentThreadId(); initialized=true; sequence=0;
     previous=nullptr; previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
@@ -254,16 +273,20 @@ void Initialize(const std::filesystem::path& runDir) {
         std::string error;
         if(!InstallSpawnHook(error)) throw std::runtime_error(error);
         hookInstalled=true;
+        if(!InstallParticleShakeHook(error)) throw std::runtime_error(error);
         std::ofstream manifest(directory/"manifest.json");
         manifest<<ProbeTarget().dump(2)<<'\n';
         if(!manifest) throw std::runtime_error("Cannot write audit manifest");
     } catch(...) {
+        std::string particleError;
+        if(!RemoveParticleShakeHook(particleError))
+            throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+particleError);
         if(hookInstalled) {
             std::string removeError;
             if(!RemoveSpawnHook(removeError))
                 throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
         }
-        checksums.close();changes.close();events.close();reanimationHandles.close();initialized=false;
+        checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();initialized=false;
         throw;
     }
 }
@@ -349,7 +372,7 @@ Json CaptureState() {
     const auto app=Read<uint32_t>(kAppPointer);
     if(!app) throw std::runtime_error("Game app unavailable");
     const auto board=Read<uint32_t>(app+0x768);
-    Json state={{"schema",kSchema},{"rng",CaptureRng()},
+    Json state={{"schema",kSchema},{"rng",CaptureRng()},{"particle_shake",ParticleShakeSnapshot()},
         {"app",{{"game_mode",Read<int32_t>(app+0x7f8)},{"ui",Read<int32_t>(app+0x7fc)},
             {"mj_clock",Read<uint32_t>(app+0x838)}}}};
     uint16_t x87=0; uint32_t mxcsr=0;
@@ -380,7 +403,7 @@ Json CaptureState() {
     state["seeds"]=Seeds(board);
     auto challenge=Read<uint32_t>(board+0x160);
     state["challenge"]={{"completed_rounds",challenge?Json(Read<uint32_t>(challenge+0x6c)):Json(nullptr)}};
-    auto reanimations=reanimationAuditor.Capture(state);
+    auto reanimations=reanimationAuditor.Capture(std::move(state));
     reanimationEvidence=std::move(reanimations.raw);
     reanimationLinksValid=reanimations.valid;
     return std::move(reanimations.comparable);
@@ -390,10 +413,13 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
     // Drain before assigning a new request/step label so menu/preview spawns
     // cannot acquire the version of a command that has not run yet.
     DrainAndCheckSpawns();
+    DrainAndCheckParticleShake();
     lastObservationVersion=observation.value("version",Json::object());
-    if(kind=="pre_step"||kind=="request_started"||kind=="action")
+    if(kind=="pre_step"||kind=="request_started"||kind=="action") {
         SetObservedSpawnBoundary(lastObservationVersion);
-    else ClearSpawnBoundary();
+        SetParticleShakeBoundary(lastObservationVersion.at("tick").get<uint64_t>(),lastObservationVersion.at("revision").get<uint64_t>(),
+            lastObservationVersion.at("epoch").get<uint32_t>(),kind);
+    } else {ClearSpawnBoundary();ClearParticleShakeBoundary();}
     Json envelope={{"schema",kSchema},{"seq",sequence++},{"kind",kind},
         {"payload",payload},{"version",lastObservationVersion}};
     if(kind!="pre_step"&&kind!="post_step") {
@@ -411,7 +437,11 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
     previousReanimationEvidence=reanimationEvidence;
     if(!reanimationLinksValid) {
         auto fault=envelope;fault["kind"]="reanimation_link_fault";
-        fault["payload"]=state.at("reanimations").at("issues");Write(events,fault);
+        fault["payload"]=state.at("reanimations").at("issues");
+        // Preserve the actual rejected snapshot for diagnosis. It is explicitly
+        // a fault event, never a fabricated successful checksum/post-step.
+        fault["incomplete_boundary"]=true;fault["captured_state"]=std::move(state);
+        Write(events,fault);
         Flush();throw std::runtime_error("Live owner has invalid animation links; strict audit stopped");
     }
     auto hashes=envelope; hashes["digests"]=Digests(state); Write(checksums,hashes);
@@ -442,19 +472,22 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
     if(sequence%100==0) Flush();
 }
 void Flush() {
-    RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();
-    if(!checksums||!changes||!events||!reanimationHandles) throw std::runtime_error("Audit output flush failed");
+    RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();particleSeeds.flush();
+    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds) throw std::runtime_error("Audit output flush failed");
 }
 void Shutdown() {
     if(!initialized) return;
-    RequireThread();DrainAndCheckSpawns();
+    RequireThread();DrainAndCheckSpawns();DrainAndCheckParticleShake();
+    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_closed"},
+        {"version",lastObservationVersion},{"payload",ParticleShakeStatus()}});
     const auto finalHealth=SpawnHookStatus();
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},
         {"version",lastObservationVersion},{"payload",finalHealth}});
     std::string error;
+    if(!RemoveParticleShakeHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
     if(!RemoveSpawnHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
-    Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();
-    if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()) throw std::runtime_error("Audit output close failed");
+    Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();
+    if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()) throw std::runtime_error("Audit output close failed");
     initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
 }

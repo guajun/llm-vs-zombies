@@ -3,6 +3,9 @@
 #include <bit>
 #include <iostream>
 #include <random>
+#include <iomanip>
+#include <sstream>
+#include <fstream>
 
 using namespace lvz::determinism;
 namespace {
@@ -27,8 +30,36 @@ uint32_t Next(MtState& state) {
     return result&0x7fffffffu;
 }
 }
-int main() {
+void CheckDigests(const Json& state) {
+    auto actual=Digests(state);
+    Check(actual.at("all")==Digest(state.dump()),"Combined digest encoding changed");
+    for(auto it=state.begin();it!=state.end();++it)
+        if(it.key()!="all") Check(actual.at(it.key())==Digest(it.value().dump()),"Component digest changed");
+}
+int main(int argc,char** argv) {
     try {
+        std::mt19937 formatting(784);
+        for(int i=0;i<10000;++i) {
+            const auto value=static_cast<uint32_t>(formatting());
+            std::ostringstream reference;reference<<std::hex<<std::setfill('0')<<std::setw(8)<<value;
+            Check(Hex(value)==reference.str(),"Fixed-width hex formatting changed");
+        }
+        Check(Hex(0)=="00000000"&&Hex(UINT32_MAX)=="ffffffff","Hex endpoint mismatch");
+        Check(Digest("")=="cbf29ce484222325"&&Digest("hello")=="a430d84680aabd0b","FNV standard vectors changed");
+        CheckDigests(Json::object());
+        CheckDigests({{"quote\"\\/\n",Json::array({nullptr,true,false,-42,1.25,uint64_t(UINT64_MAX),"\xe9\x9b\xbe"})},{"all",Json::object()}});
+        for(int file=1;file<argc;++file) {
+            std::ifstream input(argv[file]);Check(bool(input),"Recorded audit input could not open");
+            std::string line;Json state;size_t records=0;
+            while(std::getline(input,line)) {
+                auto record=Json::parse(line);
+                if(record.contains("initial")) state=record.at("initial");
+                else state=state.patch(record.at("patch"));
+                CheckDigests(state);++records;
+            }
+            Check(records>0,"Recorded audit input was empty");
+            std::cout<<records<<" recorded state digests matched reference encoding\n";
+        }
         auto page=VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
         Check(page!=nullptr,"Test page allocation failed");
         *static_cast<uint32_t*>(page)=42;

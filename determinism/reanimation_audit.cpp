@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <vector>
+#include <utility>
 
 namespace lvz::determinism {
 namespace {
@@ -13,14 +14,20 @@ constexpr Role plantRoles[]={{0x94,"body"},{0x98,"head"},{0x9c,"head2"},{0xa0,"h
     {0xa4,"blink"},{0xa8,"light"},{0xac,"sleeping"}};
 constexpr Role mowerRoles[]={{0x1c,"body"}};
 constexpr Role gridRoles[]={{0x34,"body"}};
-struct Binding {std::string path,anchor;uint32_t handle;bool ownerDead;};
+struct Binding {
+    std::string path,anchor;
+    uint32_t handle;
+    bool ownerDead;
+    bool plantOwner=false;
+    bool ownerSquished=false;
+};
 uint32_t U32(const Json& value) {
     if(!value.is_number_integer() || (value.is_number_integer()&&!value.is_number_unsigned()&&value.get<int64_t>()<0)
         || value.get<uint64_t>()>UINT32_MAX) throw std::runtime_error("Expected an unsigned raw handle/field");
     return value.get<uint32_t>();
 }
 template<size_t N> void OwnerBindings(std::vector<Binding>& bindings,const Json& state,
-    const char* pool,unsigned deadOffset,const Role (&roles)[N]) {
+    const char* pool,unsigned deadOffset,const Role (&roles)[N],unsigned squishedOffset=0) {
     if(!state.contains(pool)) return;
     const auto& slots=state.at(pool).at("slots");
     for(const auto& item:slots.items()) {
@@ -31,18 +38,22 @@ template<size_t N> void OwnerBindings(std::vector<Binding>& bindings,const Json&
             throw std::runtime_error("Owner slot/generation mismatch");
         const auto& fields=entry.at("fields");
         const bool dead=U32(fields.at(Hex(deadOffset)))!=0;
+        // Plant::Squish retires all seven effects while mDead is still false.
+        // Keep that measured flag distinct from death in the raw evidence.
+        const bool squished=squishedOffset&&U32(fields.at(Hex(squishedOffset)))!=0;
         for(const auto& role:roles) {
             auto key=Hex(role.offset);
             if(!fields.contains(key)) continue;
             bindings.push_back({std::string("/")+pool+"/slots/"+item.key()+"/fields/"+key,
-                std::string(pool)+"/"+Hex(id)+"/"+role.name,U32(fields.at(key)),dead});
+                std::string(pool)+"/"+Hex(id)+"/"+role.name,U32(fields.at(key)),dead,
+                squishedOffset!=0,squished});
         }
     }
 }
 std::vector<Binding> Bindings(const Json& state) {
     std::vector<Binding> bindings;
     OwnerBindings(bindings,state,"zombies",0xec,zombieRoles);
-    OwnerBindings(bindings,state,"plants",0x141,plantRoles);
+    OwnerBindings(bindings,state,"plants",0x141,plantRoles,0x142);
     OwnerBindings(bindings,state,"mowers",0x30,mowerRoles);
     OwnerBindings(bindings,state,"grid_items",0x20,gridRoles);
     if(state.contains("board")&&state["board"].is_object()) {
@@ -62,8 +73,17 @@ bool ValidateReanimationTarget() noexcept {
     static constexpr uint8_t bytes[]={0x8b,0xc6,0xd9,0x44,0x24,0x10,0xc1,0xe0,
         0x04,0x03,0x05,0xe8,0x9e,0x6a,0x00,0xd9,0x1c,0x24,0x57,0x89,0x37,
         0xe8,0x75,0x00,0x00,0x00};
+    // Squish: mSquished(+142)=1, disappearCountdown(+4c)=500; then
+    // ESI=this; call RemoveEffects(4629f0). mDead(+141) is not set here.
+    static constexpr uint8_t squish[]={0xc6,0x85,0x42,0x01,0x00,0x00,0x01,
+        0xc7,0x45,0x4c,0xf4,0x01,0x00,0x00};
+    static constexpr uint8_t retireEffects[]={0x8b,0xf5,0xe8,0x5c,0xfd,0xff,0xff};
     return Accessible(0x471a71,sizeof(bytes))
-        &&std::memcmp(reinterpret_cast<const void*>(0x471a71),bytes,sizeof(bytes))==0;
+        &&std::memcmp(reinterpret_cast<const void*>(0x471a71),bytes,sizeof(bytes))==0
+        &&Accessible(0x462c2d,sizeof(squish))
+        &&std::memcmp(reinterpret_cast<const void*>(0x462c2d),squish,sizeof(squish))==0
+        &&Accessible(0x462c8d,sizeof(retireEffects))
+        &&std::memcmp(reinterpret_cast<const void*>(0x462c8d),retireEffects,sizeof(retireEffects))==0;
 }
 Json ReanimationCoverage() {
     return {{"schema","lvz.reanimation-links.v1"},{"complete_animation_state",false},
@@ -71,6 +91,7 @@ Json ReanimationCoverage() {
         {"raw_handle_evidence",{{"path","audit/reanimation-handles.jsonl"},
             {"encoding","initial_plus_json_patch"},{"binding",{"seq","kind","version"}},{"required",true}}},
         {"normalization","verified generation lookup plus persistent owner/role identity and alias graph"},
+        {"owner_retirement_rules",{"owner_dead","plant_squished_remove_effects"}},
         {"covered",{"type","anim_time_bits","anim_rate_bits","loop_type","dead","frame_start","frame_count",
             "frame_base_pose","loop_count","last_frame_time_bits","overlay_matrix_bits","track_blend_and_shake_scalars",
             "zombie_plant_mower_grid_board_fwoosh_links"}},
@@ -131,13 +152,13 @@ ReanimationSample ReadSample(uintptr_t address,uint32_t actualId,uint32_t defCou
 }
 
 void ReanimationAuditor::Reset() {identities_.clear();nextLifetime_.clear();}
-ReanimationAudit ReanimationAuditor::Normalize(const Json& ownerState,const ReanimationPoolSnapshot& pool) {
+ReanimationAudit ReanimationAuditor::Normalize(Json ownerState,const ReanimationPoolSnapshot& pool) {
     if(pool.used>pool.capacity || pool.capacity>65536 || pool.count!=pool.slots.size())
         throw std::runtime_error("Invalid reanimation pool snapshot");
     for(const auto& [slot,sample]:pool.slots)
         if(slot>=pool.used || !(sample.id&0xffff0000u) || (sample.id&0xffffu)!=slot)
             throw std::runtime_error("Reanimation DataArray slot/ID mismatch");
-    ReanimationAudit result;result.comparable=ownerState;result.coverage=ReanimationCoverage();
+    ReanimationAudit result;result.comparable=std::move(ownerState);result.coverage=ReanimationCoverage();
     result.raw={{"schema","lvz.reanimation-raw.v1"},{"pool",{{"capacity",pool.capacity},{"used",pool.used},
         {"count",pool.count},{"free_head",pool.freeHead},{"next_key",pool.nextKey}}},
         {"actual_slot_ids",Json::object()},{"links",Json::array()}};
@@ -149,7 +170,9 @@ ReanimationAudit ReanimationAuditor::Normalize(const Json& ownerState,const Rean
     // seeing the same raw number again still creates a new logical lifetime.
     for(auto& [id,identity]:identities_) if(!currentIds.contains(id)) identity.present=false;
     Json nodes=Json::object(),issues=Json::array();
-    for(const auto& binding:Bindings(ownerState)) {
+    // Bindings materializes before any handle field is replaced. The moved
+    // owner tree remains valid throughout normalization; no frame copy needed.
+    for(const auto& binding:Bindings(result.comparable)) {
         const auto slot=binding.handle&0xffffu;
         auto found=pool.slots.find(slot);
         const bool validHandle=binding.handle!=0 && found!=pool.slots.end() && found->second.id==binding.handle;
@@ -157,12 +180,16 @@ ReanimationAudit ReanimationAuditor::Normalize(const Json& ownerState,const Rean
         Json evidence={{"path",binding.path},{"anchor",binding.anchor},{"raw_handle",binding.handle},
             {"slot",slot},{"owner_dead",binding.ownerDead},{"lookup_matches",validHandle},
             {"actual_slot_id",found==pool.slots.end()?Json(nullptr):Json(found->second.id)}};
+        if(binding.plantOwner) evidence["owner_squished"]=binding.ownerSquished;
+        const bool ownerEffectsRetired=binding.ownerDead||binding.ownerSquished;
         if(!binding.handle) reference={{"status","null"}};
         else if(!validHandle) {
             const char* reason=slot>=pool.capacity?"out_of_range":(found==pool.slots.end()?"not_allocated":"generation_mismatch");
-            reference={{"status",binding.ownerDead?"expired":"dangling"}};
+            reference={{"status",ownerEffectsRetired?"expired":"dangling"}};
             evidence["lookup_failure"]=reason;
-            if(!binding.ownerDead) {
+            if(ownerEffectsRetired) evidence["retirement_reason"]=binding.ownerDead?
+                "owner_dead":"plant_squished_remove_effects";
+            if(!ownerEffectsRetired) {
                 // Keep the raw bad generation in the comparable state: two
                 // invalid handles must not become equal through normalization.
                 reference["raw_handle"]=binding.handle;
@@ -192,7 +219,7 @@ ReanimationAudit ReanimationAuditor::Normalize(const Json& ownerState,const Rean
         {"nodes",std::move(nodes)},{"issues",std::move(issues)}};
     return result;
 }
-ReanimationAudit ReanimationAuditor::Capture(const Json& ownerState) {
+ReanimationAudit ReanimationAuditor::Capture(Json ownerState) {
     ReadScope snapshotReads;
     if(!ValidateReanimationTarget()) throw std::runtime_error("Unsupported reanimation target image");
     const auto app=Read<uint32_t>(0x6a9ec0);
@@ -219,6 +246,6 @@ ReanimationAudit ReanimationAuditor::Capture(const Json& ownerState) {
         if(referenced.contains(id)) sample=ReadSample(address,id,defCount,defs);
         pool.slots.emplace(slot,std::move(sample));
     }
-    return Normalize(ownerState,pool);
+    return Normalize(std::move(ownerState),pool);
 }
 }

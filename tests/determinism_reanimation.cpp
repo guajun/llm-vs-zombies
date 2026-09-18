@@ -1,6 +1,7 @@
 #include "determinism/reanimation_audit.hpp"
 #include "determinism/model.hpp"
 #include <iostream>
+#include <utility>
 
 using namespace lvz::determinism;
 namespace {
@@ -12,6 +13,12 @@ template<class F> void Reject(F fn) {
 Json Owner(uint32_t body,bool dead=false,uint32_t head=0) {
     return {{"zombies",{{"slots",{{"0",{{"id_or_free_next",0x10000u},
         {"fields",{{Hex(0xec),dead?1u:0u},{Hex(0x118),body},{Hex(0x144),head}}}}}}}}}};
+}
+Json PlantOwner(uint32_t handle,bool dead=false,bool squished=false) {
+    Json fields={{Hex(0x24),8},{Hex(0x3c),0},{Hex(0x4c),squished?500:200},
+        {Hex(0x134),0},{Hex(0x141),dead?1u:0u},{Hex(0x142),squished?1u:0u},{Hex(0x143),0}};
+    for(unsigned at=0x94;at<=0xac;at+=4) fields[Hex(at)]=handle;
+    return {{"plants",{{"slots",{{"0",{{"id_or_free_next",0x10000u},{"fields",fields}}}}}}}};
 }
 ReanimationSample Sample(uint32_t id) {
     return {id,false,true,{{"type",2},{"anim_time_bits",0x3e800000u},
@@ -32,6 +39,24 @@ int main() {
     try {
         Check(!ValidateReanimationTarget(),"Non-game test executable accepted as target image");
         constexpr uint32_t a=0xd57b003bu,b=0xd577003bu;
+        // A real full frame is mostly unrelated Board/RNG/entity data. Moving
+        // a capture must retain that subtree allocation, not deep-copy it.
+        ReanimationAuditor copying,moving;
+        for(const auto handles: {std::pair{a,a},std::pair{a,0u},std::pair{b,b},std::pair{0u,0u},std::pair{a,a}}) {
+            auto frame=Owner(handles.first,false,handles.second);
+            frame["unrelated_raw_words"]=Json::array();
+            for(uint32_t i=0;i<4096;++i) frame["unrelated_raw_words"].push_back(i^0xff123400u);
+            const auto original=frame;
+            const auto expected=copying.Normalize(frame,Pool(handles.first));
+            Check(frame==original,"Value-argument normalization mutated an lvalue input");
+            const auto* storage=frame["unrelated_raw_words"].get_ptr<const Json::array_t*>();
+            const auto moved=moving.Normalize(std::move(frame),Pool(handles.first));
+            Check(moved.comparable["unrelated_raw_words"].get_ptr<const Json::array_t*>()==storage,
+                "Moved full-frame subtree was deep-copied");
+            Check(moved.comparable==expected.comparable&&moved.raw==expected.raw
+                &&moved.coverage==expected.coverage&&moved.valid==expected.valid,
+                "Moving changed semantic state, raw evidence, aliasing or lifecycle");
+        }
         ReanimationAuditor left,right;
         auto owner=Owner(a);auto untouched=owner;
         auto l=left.Normalize(owner,Pool(a)),r=right.Normalize(Owner(b),Pool(b));
@@ -63,6 +88,47 @@ int main() {
         changed.slots[b&0xffffu].semantic["dead"]=true;
         auto retiring=right.Normalize(Owner(b,true),changed);
         Check(Ref(retiring)["status"]=="retiring"&&retiring.comparable["reanimations"]["nodes"].size()==1,"Valid dead animation treated as expired");
+
+        // Original Plant::Squish clears effects before setting mDead hundreds
+        // of ticks later. Only its distinct +142 flag permits this retirement.
+        left.Reset();right.Reset();
+        auto crushed=left.Normalize(PlantOwner(a,false,true),Pool(0));
+        auto otherCrushed=right.Normalize(PlantOwner(b,false,true),Pool(0));
+        Check(crushed.valid&&otherCrushed.valid&&crushed.comparable==otherCrushed.comparable,
+            "Squished plant effects did not expire independently of raw generation");
+        Check(crushed.raw!=otherCrushed.raw,"Squished raw generation evidence was discarded");
+        Check(crushed.raw["links"].size()==7,"Plant retirement did not cover its seven effects");
+        for(const auto& link:crushed.raw["links"]) {
+            Check(link["owner_dead"]==false&&link["owner_squished"]==true,
+                "Squished plant was falsely recorded as mDead");
+            Check(link["normalized_reference"]["status"]=="expired", "Squished effect is not expired");
+            Check(link["retirement_reason"]=="plant_squished_remove_effects", "Squished retirement basis missing");
+        }
+        Check(crushed.comparable["plants"]["slots"]["0"]["fields"][Hex(0x142)]==1,
+            "Squished flag disappeared from comparable state");
+        Check(!left.Normalize(PlantOwner(a),Pool(0)).valid,"Ordinary live plant dangling references accepted");
+        Check(!left.Normalize(PlantOwner(a),Pool(b)).valid,"Live plant generation mismatch accepted");
+        auto inactivePlant=PlantOwner(a);auto& inactiveFields=inactivePlant["plants"]["slots"]["0"]["fields"];
+        inactiveFields[Hex(0x134)]=2;inactiveFields[Hex(0x143)]=1;
+        Check(!left.Normalize(inactivePlant,Pool(0)).valid,"Bungee/asleep status incorrectly retires effects");
+        auto notAPlant=Owner(a);notAPlant["zombies"]["slots"]["0"]["fields"][Hex(0x142)]=1;
+        Check(!left.Normalize(notAPlant,Pool(0)).valid,"Plant-only squish rule applied to zombie field");
+        auto stillAllocated=left.Normalize(PlantOwner(a,false,true),Pool(a));
+        Check(stillAllocated.valid&&stillAllocated.comparable["reanimations"]["nodes"].size()==1,
+            "Squished plant's still allocated animation was dropped");
+        auto notSquished=left.Normalize(PlantOwner(a),Pool(a));
+        Check(Digests(stillAllocated.comparable)!=Digests(notSquished.comparable),
+            "Squished-flag change disappeared from state checksums");
+        for(const auto& link:stillAllocated.raw["links"])
+            Check(!link.contains("retirement_reason"),"Allocated squished animation was labeled expired");
+        auto deadAndSquished=left.Normalize(PlantOwner(a,true,true),Pool(0));
+        Check(deadAndSquished.raw["links"][0]["retirement_reason"]=="owner_dead",
+            "mDead must take precedence when both retirement flags are set");
+        auto reusedSlot=left.Normalize(PlantOwner(a,false,true),Pool(b));
+        Check(reusedSlot.valid&&reusedSlot.raw["links"][0]["lookup_failure"]=="generation_mismatch",
+            "Squished expiry lost actual slot-reuse evidence");
+        inactivePlant=PlantOwner(a);inactivePlant["plants"]["slots"]["0"]["fields"].erase(Hex(0x142));
+        Reject([&]{left.Normalize(inactivePlant,Pool(a));});
 
         // Equal payloads do not make aliasing or swapping existing objects equal.
         constexpr uint32_t x=0x10001u,y=0x20002u;

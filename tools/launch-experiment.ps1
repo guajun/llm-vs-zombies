@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Name, [switch]$Stop, [switch]$NoInitialize, [double]$Timeout=90)
+param([Parameter(Mandatory=$true)][string]$Name, [switch]$Stop, [switch]$NoInitialize, [double]$Timeout=90, [uint32]$Seed=0)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $env:PYTHONPATH = Join-Path $projectRoot 'src'
@@ -11,7 +11,7 @@ if ($Stop) {
         & python -m llm_vs_zombies new-run --name $Name
         if ($LASTEXITCODE -ne 0) { throw 'Run creation failed.' }
     }
-    $launcherArgs = @('-m','llm_vs_zombies.launcher','start','--run',$experimentRun,'--timeout',"$Timeout")
+    $launcherArgs = @('-m','llm_vs_zombies.launcher','start','--run',$experimentRun,'--timeout',"$Timeout",'--seed',"$Seed")
     if ($NoInitialize) { $launcherArgs += '--no-initialize' }
     & python @launcherArgs
 }

@@ -1,12 +1,15 @@
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch as mock_patch
 
 from llm_vs_zombies.audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA, digests,
-    _FrameDecoder, _fnv, _python_fnv, canonical, compare_audits, digest, first_difference, patch)
+    _FrameDecoder, _fnv, _python_fnv, canonical, compare_audits, digest, first_difference, patch,
+    PARTICLE_SHAKE_MODE, _tokens, _cached_tokens, _POINTER_CACHE_SIZE, _POINTER_CACHE_MAX_CHARS, decode,
+    EventStream, _fnv_continue)
 
 
 ANIMATION_COVERAGE = {"schema": "lvz.reanimation-links.v1", "normalize_scope": "semantic identity",
@@ -46,7 +49,324 @@ def animation_audit(directory, handle=65538):
     return records
 
 
+def plant_animation_audit(directory, *, dead=0, squished=1, valid=False, rules=True):
+    records = animation_audit(directory)
+    manifest = json.loads((directory / "manifest.json").read_text())
+    if rules:
+        manifest["coverage"]["reanimations"]["owner_retirement_rules"] = ["owner_dead", "plant_squished_remove_effects"]
+    (directory / "manifest.json").write_text(json.dumps(manifest))
+    state = records["state-deltas.jsonl"][0]["initial"]
+    state["board"].pop("animation")
+    anchor = "plants/00010041/body"
+    reference = {"status": "live", "node": anchor + "#0"} if valid else {"status": "expired"}
+    state["plants"] = {"slots": {"65": {"id_or_free_next": 65601,
+        "fields": {"00000141": dead, "00000142": squished, "00000094": reference}}}}
+    state["reanimations"]["nodes"] = {anchor + "#0": {"state": {"type": 1}, "owners": [anchor]}} if valid else {}
+    raw = records["reanimation-handles.jsonl"][0]["initial"]
+    link = raw["links"][0]
+    link.update(path="/plants/slots/65/fields/00000094", anchor=anchor, owner_dead=bool(dead),
+                lookup_matches=valid, actual_slot_id=65538 if valid else None, normalized_reference=reference)
+    if rules:
+        link["owner_squished"] = bool(squished)
+    if valid:
+        link["logical_node"] = anchor + "#0"
+    else:
+        link.pop("logical_node")
+        link["lookup_failure"] = "not_allocated"
+        raw["pool"]["count"] = 0
+        raw["actual_slot_ids"] = {}
+        if rules:
+            link["retirement_reason"] = "owner_dead" if dead else "plant_squished_remove_effects"
+    for index in range(2):
+        actual = copy.deepcopy(state)
+        actual["board"]["tick"] = index
+        records["checksums.jsonl"][index]["digests"] = digests(actual)
+    for name, rows in records.items():
+        (directory / name).write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return records
+
+
+PARTICLE_MODE = {"mode": PARTICLE_SHAKE_MODE, "installed": True, "original_engine_bitwise_unmodified": False,
+                 "semantic_change": "test verified ID seed substitution", "raw_evidence": "particle-shake-seeds.jsonl"}
+
+
+def particle_audit(directory, pointer=0x10000140, identity=65538, *, age=5, site=0x116ba5, crossfade=0):
+    directory.mkdir()
+    (directory / "manifest.json").write_text(json.dumps({"schema": SCHEMA, "target": "synthetic",
+        "loaded_signatures_match": True, "particle_shake": PARTICLE_MODE}))
+    factor = (19 if age == 0 else age - 1) if site == 0x116b3c else age
+    payload = {"mode": PARTICLE_SHAKE_MODE, "ordinal": 0, "callsite_rva": site,
+        "particle_id": identity, "slot": 2, "generation": identity >> 16, "age": age, "duration": 20, "crossfade_duration": crossfade,
+        "factor": factor, "canonical_seed": (identity * factor) & 0xffffffff, "pool_verified": True,
+        "control_phase": "pre_step", "pool": {"used": 3, "capacity": 4, "count": 1, "free_head": 3, "next_key": 2}}
+    event = {"schema": SCHEMA, "seq": 1, "kind": "particle_shake_seed", "phase": "controlled_boundary",
+        "native_phase": "before_srand", "version": {"epoch": 1, "tick": 0, "revision": 0}, "payload": payload}
+    raw = dict(event, schema="lvz.particle-shake-raw.v1", payload=dict(payload,
+        particle_address=pointer, emitter_address=100, system_address=200, holder_address=300,
+        pool_block_address=pointer - 2 * 0xa0, original_seed=(pointer * factor) & 0xffffffff))
+    words = [site, identity, factor, payload["canonical_seed"], age, 20, crossfade, 3, 4, 3, 1, 2]
+    rolling = _python_fnv(b"".join(word.to_bytes(8, "little") for word in words))
+    records = {"events.jsonl": [event], "particle-shake-seeds.jsonl": [raw], "checksums.jsonl": [], "state-deltas.jsonl": []}
+    for index in range(2):
+        state = {"schema": SCHEMA, "board": {"tick": index}, "particle_shake": {"mode": PARTICLE_SHAKE_MODE,
+            "controlled_calls": index, "controlled_digest": rolling if index else 14695981039346656037}}
+        envelope = {"schema": SCHEMA, "seq": index * 2, "kind": "post_step" if index else "pre_step",
+            "version": {"epoch": 1, "tick": index, "revision": 0},
+            "payload": {"request_id": "a", **({"native_tick_delta": 1} if index else {})}}
+        records["checksums.jsonl"].append(dict(envelope, digests=digests(state)))
+        records["state-deltas.jsonl"].append(dict(envelope, **({"initial": state} if not index else
+            {"patch": [{"op": "replace", "path": "", "value": state}]})))
+    records["events.jsonl"] += [
+        {"schema": SCHEMA, "seq": 3, "kind": "recording_closed", "version": {"epoch": 1, "tick": 1, "revision": 0}, "payload": {}},
+        {"schema": SCHEMA, "seq": 4, "kind": "particle_shake_closed", "version": {"epoch": 1, "tick": 1, "revision": 0},
+         "payload": {"installed": True, "captured": 1, "controlled_calls": 1, "queued": 0,
+                     "wrong_thread_calls": 0, "faults": 0, "overflow": 0, "healthy": True}}]
+    for name, rows in records.items():
+        (directory / name).write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return records
+
+
 class AuditTests(unittest.TestCase):
+    def test_continued_fnv_matches_independent_reference_across_chunks_and_seeds(self):
+        data = bytes(range(256)) * 3 + b"\x00\xfflast"
+        for seed in (0, 1, 14695981039346656037, 0xffffffffffffffff):
+            expected = _python_fnv(data, seed)
+            actual = seed
+            for start in range(0, len(data), 17):
+                actual = _fnv_continue(actual, data[start:start + 17])
+            self.assertEqual(actual, expected)
+            with mock_patch("llm_vs_zombies.audit_compare._hash_continue", None):
+                self.assertEqual(_fnv_continue(seed, data), expected)
+
+    def test_explicit_hook_fault_invalidates_otherwise_complete_closed_evidence(self):
+        for kind in ("reanimation_link_fault", "spawn_hook_fault", "particle_shake_fault"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp) / "audit"
+                rows = animation_audit(directory)["events.jsonl"]
+                close = rows[0]
+                fault = dict(close, kind=kind)
+                close["seq"] += 1
+                (directory / "events.jsonl").write_text(json.dumps(fault) + "\n" + json.dumps(close) + "\n")
+                with self.assertRaisesRegex(EvidenceError, "hook fault"):
+                    AuditLog(directory, require_closed=True)
+                with self.assertRaisesRegex(EvidenceError, "hook fault"):
+                    list(AuditTail(directory).read_request("a"))
+
+    def test_event_stream_is_repeatable_but_rejects_replacement_truncation_and_same_size_edit(self):
+        for change in ("replace", "truncate", "same_size"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / "events.jsonl"
+                path.write_bytes(b'{"a":1}\n')
+                records = EventStream(path)
+                self.assertEqual(list(records), [{"a": 1}])
+                self.assertEqual(list(records), [{"a": 1}])
+                if change == "replace":
+                    new = path.with_suffix(".new")
+                    new.write_bytes(path.read_bytes())
+                    os.replace(new, path)
+                elif change == "truncate":
+                    path.write_bytes(b"")
+                else:
+                    path.write_bytes(b'{"a":2}\n')
+                    # A restored mtime cannot circumvent the byte binding.
+                    stat = path.stat()
+                    os.utime(path, ns=(stat.st_atime_ns, records.signature[3]))
+                with self.assertRaises(EvidenceError):
+                    list(records)
+
+    def test_closed_frame_reread_revalidates_all_evidence_and_large_rows_are_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "audit"
+            particle_audit(directory)
+            audit = AuditLog(directory, require_closed=True)
+            self.assertIsInstance(audit.events, EventStream)
+            self.assertEqual(sum(event["kind"] == "particle_shake_seed" for event in audit.events), 1)
+            self.assertTrue(all(event["kind"] != "particle_shake_seed" for event in audit.control_events))
+            self.assertEqual(audit.peak_pending_particle_calls, 1)
+            path = directory / "particle-shake-seeds.jsonl"
+            path.write_text(path.read_text().replace('"particle_address": 268435776', '"particle_address": 268435777'))
+            with self.assertRaises(EvidenceError):
+                list(audit.frames)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "events.jsonl"
+            path.write_bytes(b'{"large": "123456789"}\n')
+            with mock_patch("llm_vs_zombies.audit_compare._JSONL_MAX_RECORD_BYTES", 8):
+                with self.assertRaisesRegex(EvidenceError, "reader bound"):
+                    list(EventStream(path))
+
+    def test_particle_window_limit_and_live_prefix_binding_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "audit"
+            particle_audit(directory)
+            with mock_patch("llm_vs_zombies.audit_compare._PARTICLE_BOUNDARY_LIMIT", 0):
+                with self.assertRaisesRegex(EvidenceError, "reader bound"):
+                    AuditLog(directory)
+                with self.assertRaisesRegex(EvidenceError, "reader bound"):
+                    list(AuditTail(directory).read_request("a"))
+            tail = AuditTail(directory)
+            self.assertEqual(len(list(tail.read_request("a"))), 2)
+            self.assertFalse(isinstance(tail.events, list))
+            self.assertEqual(tail.peak_pending_particle_calls, 1)
+            self.assertEqual(sum(event["kind"] == "particle_shake_seed" for event in tail.events), 1)
+            self.assertTrue(all(event["kind"] != "particle_shake_seed" for event in tail._control_events))
+            tail.verify_closed()
+            path = directory / "particle-shake-seeds.jsonl"
+            data = path.read_bytes()
+            path.write_bytes(data.replace(b'"emitter_address": 100', b'"emitter_address": 101'))
+            with self.assertRaisesRegex(EvidenceError, "SHA-256"):
+                tail.verify_closed()
+
+    def test_squished_plant_expiration_is_verified_against_actual_field(self):
+        for dead, squished, valid, rules in ((0, 1, False, True), (1, 1, False, True),
+                                            (0, 1, True, True), (1, 0, False, False)):
+            with self.subTest(dead=dead, squished=squished, valid=valid, rules=rules), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp) / "audit"
+                plant_animation_audit(directory, dead=dead, squished=squished, valid=valid, rules=rules)
+                self.assertEqual(len(AuditLog(directory, require_closed=True).frames), 2)
+                self.assertEqual(len(list(AuditTail(directory).read_request("a"))), 2)
+
+    def test_squish_does_not_allow_forged_flags_live_dangling_or_expired_valid_handle(self):
+        mutations = {
+            "forged_flag": lambda records: records["reanimation-handles.jsonl"][0]["initial"]["links"][0].update(owner_squished=False),
+            "missing_flag": lambda records: records["reanimation-handles.jsonl"][0]["initial"]["links"][0].pop("owner_squished"),
+            "forged_dead": lambda records: records["reanimation-handles.jsonl"][0]["initial"]["links"][0].update(owner_dead=True),
+            "reason": lambda records: records["reanimation-handles.jsonl"][0]["initial"]["links"][0].update(retirement_reason="owner_dead"),
+            "missing_reason": lambda records: records["reanimation-handles.jsonl"][0]["initial"]["links"][0].pop("retirement_reason"),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp) / "audit"
+                records = plant_animation_audit(directory)
+                mutate(records)
+                for name, rows in records.items():
+                    (directory / name).write_text("".join(json.dumps(row) + "\n" for row in rows))
+                with self.assertRaises(EvidenceError):
+                    AuditLog(directory)
+        for dead, squished, valid, rules in ((0, 0, False, True), (0, 1, False, False)):
+            with self.subTest(squished=squished, rules=rules), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp) / "audit"
+                plant_animation_audit(directory, dead=dead, squished=squished, valid=valid, rules=rules)
+                with self.assertRaises(EvidenceError):
+                    AuditLog(directory)
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "audit"
+            records = plant_animation_audit(directory, valid=True)
+            raw = records["reanimation-handles.jsonl"][0]["initial"]["links"][0]
+            raw["normalized_reference"]["status"] = "expired"
+            raw["retirement_reason"] = "plant_squished_remove_effects"
+            path = directory / "reanimation-handles.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in records[path.name]))
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory)
+
+    def test_non_plant_cannot_claim_squished_retirement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "audit"
+            records = animation_audit(directory)
+            records["reanimation-handles.jsonl"][0]["initial"]["links"][0]["owner_squished"] = True
+            path = directory / "reanimation-handles.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in records[path.name]))
+            with self.assertRaisesRegex(EvidenceError, "plant owner"):
+                AuditLog(directory)
+
+    def test_pointer_cache_is_immutable_bounded_and_retains_no_long_or_invalid_paths(self):
+        _cached_tokens.cache_clear()
+        tokens = _tokens("/a~1b/~0/0")
+        self.assertEqual(tokens, ("a/b", "~", "0"))
+        self.assertIs(tokens, _tokens("/a~1b/~0/0"))
+        with self.assertRaises(TypeError):
+            tokens[0] = "different"
+        for value in (None, [], {}, 1, "bad", "/bad~", "/bad~2"):
+            with self.subTest(value=value), self.assertRaises(EvidenceError):
+                _tokens(value)
+        self.assertEqual(_cached_tokens.cache_info().currsize, 1)
+        long_path = "/" + "x" * _POINTER_CACHE_MAX_CHARS
+        self.assertEqual(_tokens(long_path), (long_path[1:],))
+        self.assertEqual(_cached_tokens.cache_info().currsize, 1)
+        for index in range(_POINTER_CACHE_SIZE + 7):
+            _tokens("/field/" + str(index))
+        self.assertEqual(_cached_tokens.cache_info().currsize, _POINTER_CACHE_SIZE)
+        _cached_tokens.cache_clear()
+
+    def test_cached_pointer_does_not_cache_container_or_target_validity(self):
+        _tokens("/items/1")
+        self.assertEqual(patch({"items": [0, 1]}, [{"op": "replace", "path": "/items/1", "value": 9}]), {"items": [0, 9]})
+        with self.assertRaisesRegex(EvidenceError, "out of bounds"):
+            patch({"items": [0]}, [{"op": "replace", "path": "/items/1", "value": 9}])
+        with self.assertRaises(EvidenceError):
+            patch({"items": 1}, [{"op": "replace", "path": "/items/1", "value": 9}])
+        _tokens("/x")
+        with self.assertRaisesRegex(EvidenceError, "duplicate JSON key"):
+            decode('{"patch":[{"op":"replace","path":"/x","path":"/y","value":1}]}')
+
+    def test_particle_seed_raw_pointers_may_differ_but_identity_may_not(self):
+        with tempfile.TemporaryDirectory() as temp:
+            left, right, other = [Path(temp) / name for name in ("left", "right", "other")]
+            particle_audit(left)
+            particle_audit(right, pointer=0x20000140)
+            particle_audit(other, identity=131074)
+            source = AuditLog(left, require_closed=True)
+            self.assertTrue(compare_audits(source, AuditLog(right, require_closed=True))["equal"])
+            mismatch = compare_audits(source, AuditLog(other, require_closed=True))
+            self.assertFalse(mismatch["equal"])
+            self.assertEqual(mismatch["reason"], "particle_shake")
+            tail = AuditTail(right)
+            self.assertEqual(sum(len(frame.particle_seeds) for frame in tail.read_request("a")), 1)
+            tail.verify_closed()
+
+    def test_particle_previous_seed_wrap_factor_is_verified(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "audit"
+            particle_audit(path, age=0, site=0x116b3c)
+            self.assertEqual(len(AuditLog(path, require_closed=True).frames), 2)
+
+    def test_particle_crossfade_may_preserve_age_beyond_normal_lifetime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path, invalid = Path(temp) / "audit", Path(temp) / "invalid"
+            particle_audit(path, age=25, crossfade=3)
+            self.assertEqual(len(AuditLog(path, require_closed=True).frames), 2)
+            particle_audit(invalid, age=25)
+            with self.assertRaisesRegex(EvidenceError, "crossfade"):
+                AuditLog(invalid)
+
+    def test_particle_mode_raw_evidence_health_and_semantics_fail_closed(self):
+        mutations = {
+            "missing_raw": lambda p, rows: (p / "particle-shake-seeds.jsonl").unlink(),
+            "raw_count": lambda p, rows: rows["particle-shake-seeds.jsonl"].clear(),
+            "raw_seq": lambda p, rows: rows["particle-shake-seeds.jsonl"][0].update(seq=2),
+            "original_seed": lambda p, rows: rows["particle-shake-seeds.jsonl"][0]["payload"].update(original_seed=3),
+            "ordinal": lambda p, rows: rows["particle-shake-seeds.jsonl"][0]["payload"].update(ordinal=1),
+            "close_missing": lambda p, rows: rows["events.jsonl"].pop(),
+            "overflow": lambda p, rows: rows["events.jsonl"][-1]["payload"].update(overflow=1),
+            "close_count": lambda p, rows: rows["events.jsonl"][-1]["payload"].update(captured=2),
+            "undeclared": lambda p, rows: (p / "manifest.json").write_text(json.dumps(
+                {"schema": SCHEMA, "target": "synthetic", "loaded_signatures_match": True})),
+            "declared_spawn_missing_close": lambda p, rows: (p / "manifest.json").write_text(json.dumps(
+                dict(json.loads((p / "manifest.json").read_text()), spawn_hook={"installed": True}))),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp) / "audit"
+                rows = particle_audit(directory)
+                mutate(directory, rows)
+                for name, values in rows.items():
+                    if name != "particle-shake-seeds.jsonl" or label != "missing_raw":
+                        (directory / name).write_text("".join(json.dumps(row) + "\n" for row in values))
+                with self.assertRaises(EvidenceError):
+                    AuditLog(directory, require_closed=True)
+
+    def test_particle_digest_cannot_be_replaced_by_a_forged_state_counter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "audit"
+            rows = particle_audit(directory)
+            state = rows["state-deltas.jsonl"][1]["patch"][0]["value"]
+            state["particle_shake"]["controlled_digest"] = 0
+            rows["checksums.jsonl"][1]["digests"] = digests(state)
+            for name, values in rows.items():
+                (directory / name).write_text("".join(json.dumps(row) + "\n" for row in values))
+            with self.assertRaisesRegex(EvidenceError, "count/digest"):
+                AuditLog(directory)
+
     def test_initialization_spawn_may_have_null_version_but_controlled_spawn_may_not(self):
         spawn = {"schema": "lvz.spawn.v1", "kind": "zombie_initialized", "phase": "zombie_initialize_exit",
                  "boundary": None, "ordinal": 0}

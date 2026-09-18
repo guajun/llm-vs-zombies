@@ -36,6 +36,8 @@ client.request("stop_recording", expect=client.version)
 
 目前源轨迹要求顺序请求，不接受不明结果、并发取消、丢失响应或未声明的中途变更。失败的游戏动作属于合法轨迹：保存原始动作列表、实际尝试过的每个 ordinal、每次成功/失败及停止原因。首个动作失败后的后续动作仍留在原请求中，但不会伪造其执行结果。
 
+完成正数 ticks 的推进之后，可以记录一次参数为空的 `pause` 控制探针。它必须返回 `paused_at_boundary`，观察与版本逐项等于刚完成的推进，且在任何后续变更之前记录同版本 `audit_snapshot`；该快照须逐字节等于原生末 post-step。封包保留原始 pause，请求没有 expect 的旧 v1 格式仍可读。重放先调用 status 证明当前已暂停、没有 pending 请求或故障，再真实执行 pause，并比较实际前后 status、完整状态快照及源记录。取消正在推进的 pause、缺快照、边界改变或隐藏状态变化都拒绝。报告 `pause_controls` 分别计数 recorded/executed/verified_noop；seek 到目标 tick 后尚未发生的 pause 不提前执行。
+
 ## 封装与检查
 
 ```powershell
@@ -49,7 +51,7 @@ python -m llm_vs_zombies.engine_replay inspect `
   experiments/runs/source/exports/trajectory
 ```
 
-输出目录必须是新目录。封装结果包含 `trajectory.json`、原始 SessionTrace 和原生 `audit/` 四个文件。所有证据文件以 SHA-256 绑定，轨迹身份是清单内容的 SHA-256；这是内容完整性检查，不是身份签名或第三方真实性认证。重放时重新检查文件、schema、目标、源请求/响应与原生权威事件的一致性，不只信任已经生成的动作清单。
+输出目录必须是新目录。封装结果包含 `trajectory.json`、原始 SessionTrace、原生 `audit/` 基础四个文件，以及 manifest 声明或实际存在的动画/粒子旁证。所有证据文件以 SHA-256 绑定，轨迹身份是清单内容的 SHA-256；这是内容完整性检查，不是身份签名或第三方真实性认证。重放时重新检查文件、schema、目标、源请求/响应与原生权威事件的一致性，不只信任已经生成的动作清单。
 
 若只有原生权威事件，可以使用：
 
@@ -158,7 +160,17 @@ python tools/check-boundary-equivalence.py work/capture-off-trajectory work/capt
 
 ## 审计、边界与验证
 
+真实冷重放曾在粒子 FIELD_SHAKE 的 CRT 随机状态上分叉：原版两处 `srand` 用进程内的粒子地址乘年龄相关因子，独立进程的地址不同会改变之后的随机数。`deterministic_particle_shake_v1` 是明确改变该行为的实验模式：只在 RVA `0x116b3c`、`0x116ba5` 两处把地址因子换成经 DataArray 槽位/代次验证的完整粒子 ID，原来的 CRT srand/rand 仍执行。**这不是原版逐位不变的执行模式。** manifest 必须声明 `particle_shake.mode`、`installed:true`、`original_engine_bitwise_unmodified:false` 及必需的 `particle-shake-seeds.jsonl`；未知模式、缺证据或用旧模式冒充均拒绝。
+
+每次调用的语义事件保存完整粒子 ID、槽位/代次、age/duration/crossfade_duration、调用位置、因子、新种子和分配池头。原始旁证完整保留这些字段，并额外保存粒子/发射器/系统/holder/池地址及原版地址种子，绑定同 seq/kind/version 后随轨迹复制并计算 SHA-256。读取器独立核验地址与槽位关系、旧/新种子的 uint32 乘法公式、连续 ordinal 和两条精确调用路径。旧 shake 的因子是 `age==0 ? duration-1 : age-1`，新 shake 的因子是 `age`；合法 crossfade 首帧可以保留超过 duration 的 age，此时必须有正的 crossfade_duration。
+
+逐帧还将语义事件重新计算成原生累计 FNV1a64 摘要，核对 state 的 `particle_shake.controlled_calls/controlled_digest`。摘要只输入实际种子相关标量，避免混入不同运行的 epoch 名称；边界版本和 control_phase 仍单独按重放映射精确比较。任何完整粒子 ID、年龄、调用次数/顺序或 canonical_seed 的差异都会失败，CRT RNG 字段继续完整比较。原始地址种子无需跨进程相等，但不会从证据中删除。
+
+该模式的正式封包要求关闭顺序为 `recording_closed → particle_shake_closed → spawn_hook_closed`（没有出生钩子的测试适配器可省去最后一项）。健康摘要必须 installed/healthy 为真、queued/wrong_thread_calls/faults/overflow 为零、captured 与全部事件数一致、controlled_calls 与受控事件数一致。实际重放也在 initializer 完成关闭后增量读取健康尾部，缺尾部或溢出都不发布 equal。`replay-report.json.particle_shake` 记录模式、比较调用数、原始地址未跨进程比较，以及实际关闭健康是否已验证。初始化无边界调用保留为初始化证据；受控帧开始后再丢失边界，或种子调用没有后续受审计边界，都会停止严格校验。
+
 支持动画身份归一化的记录在 `coverage.reanimations.raw_handle_evidence` 声明必需的 `audit/reanimation-handles.jsonl`。该旁证和 checksum/delta 每条 pre/post 的 schema、seq、kind、version、payload 一一对应，使用首态加 JSON Patch 保留原始句柄、槽位及代次、分配池、归属关系。封包复制该文件并绑定 SHA-256；读取器重建旁证，核对原始查找结果、全部 owner 路径、归一化引用与共享节点关系。缺失、截断、数量/边界不符、无效 patch、损坏查找或原生 link fault 都立即拒绝。实际重放的增量 `AuditTail` 执行相同验证。
+
+声明 `owner_retirement_rules:["owner_dead","plant_squished_remove_effects"]` 的新记录还覆盖原版 `Plant::Squish → RemoveEffects` 生命周期：植物压扁字段 `0x142` 已置位但死亡字段 `0x141` 未置位时，动画句柄可以合法失效。读取器从同帧实际实体字段核对 `owner_dead`、植物专属 `owner_squished`，并核对仅 expired 引用允许出现的 `retirement_reason`；死亡优先于压扁。仍有效的句柄必须保留节点，普通存活对象的悬挂句柄继续拒绝。旧 manifest 保持只允许死亡对象过期的旧规则。
 
 跨运行比较的是 manifest 声明的 **semantic identity**；原始动画句柄可因分配历史不同而不同，不做逐位等同，也不把旁证归档称为完整内存确定性。旧 manifest 和旧轨迹没有旁证仍兼容；只要旁证存在，就必须校验并纳入轨迹文件身份。声明 `animation_normalization=true` 或 `raw_handle_evidence.required=true` 却缺少旁证的记录不会降级成旧格式。
 
@@ -166,9 +178,21 @@ python tools/check-boundary-equivalence.py work/capture-off-trajectory work/capt
 
 `audit_compare.py` 支持原生 nlohmann JSON diff 产生的 add/remove/replace，检查 JSON Pointer、数组下标、缺失路径、前后序号、每帧原生 delta、摘要与 state schema。逐帧状态从首态与 patch 流式重建，不把整局的所有完整状态同时驻留内存。实际重放使用 `AuditTail` 只处理上次完成之后新增的记录，检查文件替换、截断、序号缺口和每个新增帧；不会按请求数反复重扫整局前缀。请求事件和帧元数据也按 request_id 建索引。
 
+粒子语义事件与原始旁证也逐条流式合并验证，序号连续性用单游标核验，不构造全部事件列表或排序副本。`AuditLog.events` 是可重复读取的 `EventStream`，只将控制/出生事件和小型帧头建索引；`AuditTail.events` 是已消费文件前缀的可重复视图。粒子记录在其所属边界比较后释放，最多暂存 8,192 条；单条 JSONL 的读取上限为 32 MiB。超过读取预算明确拒绝，不丢弃或抽样证据。这使内存由当前状态、单边界粒子和控制/帧索引决定，不随整局粒子总数线性增长。
+
+关闭文件的每次流式遍历都核对原始 inode/大小/时间戳和全部字节的 SHA-256。提前结束的迭代器在显式关闭时仍验证未读后缀；重放和 seek 必须完成关闭及全部源文件核验后才发布成功或交给接管回调。增量读取保留各文件已消费前缀的 SHA-256，正式关闭时再读取字节核验此前前缀未被原地改写，不重新解码和重建整局。显式原生 hook fault 无条件使证据无效，即使其余序号、关闭摘要和文件格式完整。
+
 每帧仍验证所有组件摘要和整体摘要。优化只复用未变组件的规范化编码、检查新写入 patch 的值，并使用流式状态。比较时直接比较重建出的规范化字节，避免把 FNV 摘要相等误当无碰撞的完整状态证明；只有出现差异才递归展开首个字段路径。
 
+严格 JSON Pointer 的解析结果使用最多 16,384 项的 LRU 缓存，值为不可变 tuple，且只缓存不超过 512 字符的路径。更长的合法路径仍完整解析而不驻留缓存；非字符串和非法转义继续拒绝。缓存只复用路径文本的拆分结果，不缓存当前容器、数组边界、字段存在性、owner 或代次是否有效，每帧仍重新检查这些动态条件，JSON 重复键检查也保持独立。
+
+在真实 012 录制的全部 2,000 个边界上，合入后的独立对照分别完整重建并散列规范化状态、原始动画旁证和边界 envelope。未缓存/缓存两次结果以及此前独立实验的完整流 SHA-256 完全相同；本次耗时 13.36 / 9.79 秒，缓存命中 1,420,935 次、解析 5,144 个不同路径。计时受同时运行的进程影响；相同的完整证据摘要是这次优化的等价性依据。
+
 项目自带 LLVM-MinGW 或系统 `cc/clang/gcc` 可把模块中约十行的 FNV C 函数编译成当前 **Python 进程架构**的本机辅助库，缓存在 `work/audit-hash/`。它仅加速本地字节哈希，不注入游戏、不改变算法、不增加 Python 包依赖；加载时用空串、全字节值和含 NUL 数据核对参考结果。编译器不可用时自动使用完全相同的 Python 算法，`LVZ_PYTHON_FNV=1` 可在新进程强制回退。重放报告记录 `audit_hash_backend`。本机已关闭的 007 实验前六帧抽样中，相同校验的 cProfile 时间从 0.447 秒降至 0.022 秒；这只是抽样性能证据，不是整局验收。
+
+粒子累计摘要使用同一辅助库的 FNV 延续函数，每条调用仍按规定的 12 个 uint64 小端字段更新。多种初始种子和分块输入与独立 Python 参考实现逐项相等；无法加载辅助库时继续使用相同的参考算法。该加速只减少每字节解释器循环，不省略种子公式、原始地址、调用顺序或边界检查。
+
+真实已关闭的 016 录制经新旧读取路径分别重建全部 2,000 个边界、40,946 次粒子调用，对全部状态、原始动画旁证、粒子事件及边界/摘要字段的综合 SHA-256 均为 `6f6ab456ed83938c2399315495fbf2376a619a481c49f449ed6cce42417c07bc`。独立 Python 进程的峰值工作集从旧列表路径约 194.0 MB 降至流式路径约 55.2 MB；新路径单边界最多暂存 472 条粒子，只保留 205 条控制/出生记录。新路径完整加载校验 13.88 秒，随后再次遍历并计算对照摘要，两遍总计 36.71 秒。旧对照只做一次状态重建，因此不将两者总耗时作为速度比较。这里的内存数据只针对这一实际 1,000 ticks 记录，长局仍有随帧数增长的小型索引。
 
 2026-09-19 对已关闭的真实 `eval-headless-010-s42-c0` 离线封包验证了 1,000 ticks / 2,000 帧边界和 11 条执行请求，包含约 33.9 MB 状态差分、0.65 MB 动画旁证及精确出生事件。两遍完整重建校验、复制和 SHA-256 封包共 28.62 秒，使用 native C FNV。旧格式的 `eval-headless-007-s42-c0` 同样 1,000 ticks / 2,000 帧边界、11 请求，完整封包用时 7.40 秒；其状态覆盖较小且无动画旁证，不能把两者直接作同工作量速度比较。这些计时只证明对应实际录制可完整读取归档，不证明冷重放相等或两旗实验通过。
 

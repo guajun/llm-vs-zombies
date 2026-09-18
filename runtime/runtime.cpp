@@ -126,7 +126,7 @@ public:
         return {{"session",session},{"pid",GetCurrentProcessId()},
             {"build",{{"runtime_protocol",1},{"avz_commit","c42676c269b5b482a1eb9203a5b979e9d8a2a5c7"},{"pointer_bits",32}}},
             {"game",lvz::determinism::ProbeTarget()},
-            {"capabilities",{{"observe",true},{"commit",true},{"advance",true},{"cancel",true},{"checkpoints",false},
+            {"capabilities",{{"observe",true},{"commit",true},{"advance",true},{"pause",true},{"status",true},{"cancel",true},{"checkpoints",false},
                 {"strict_determinism",false},{"step_clock_guard",true},{"exact_step_live_validated",false},{"native_demo",false},{"initialize",true},
                 {"audit_snapshot",true},{"rng_restore",true},{"rng_seed",true},{"clock_restore",true},{"stop_recording",true},
                 {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false}}}};
