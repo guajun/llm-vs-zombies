@@ -39,6 +39,22 @@ lvz::determinism::Shutdown();
 
 `CaptureClocks()/RestoreClocks(snapshot,"paused_at_boundary",error)` 对已确认的 Board GameClock、EffectCounter 和 App MjClock 提供初始化 sidecar 接口。所有字段始终参与审计，不能为了通过不同菜单等待时长的比较而删除。恢复只允许处于战斗边界；它不调整出怪倒计时、对象年龄或控制器自己的 tick，也不是任意时间点的回滚。实验应明确记录在 B(0) 统一设定的三个值，并在重放用相同初始化流程恢复它们。
 
+## 播种时机与实际初始波表
+
+实验初始化有两个播种时点：进入场景前的 `initialize.seed` 影响随后场景/轮次初始化；稳定暂停 B(0) 的 `rng_seed` 统一已知 RNG 的后续状态。**B(0) 重新播种本身不会重建已经存在的出怪类型表。** 因而配方应同时保存入场前种子、B(0)种子及实际完整初态，不能仅凭最后一次seed相同认定波表相同。
+
+实际006与025记录说明了这个区别：两者logger在GameClock3149采到相同波表，此时completed_rounds=1010、LevelEndCountdown=1；下一次已记录观察在3150进入第1011轮选卡，3151才达到ready的B(0)。006入场前seed0、B(0)重设42；025入场前与B(0)均为42。两者B(0)完整MT/CRT状态相同，但实际波表不同：
+
+| 表的测量时点 | 连续1,000项uint32小端字节的SHA-256 |
+|---|---|
+| 两次logger `wave_table`，GameClock3149 | `a9ab02ca17c42d792d6e18aaaa77b019037a8745170cbd844580211d63820e8c` |
+| 006完整B(0)审计，GameClock3151 | `6d33bbfb1f19a7d9e654cd5c4051e6274920fe77693412736ffd56f4950c752d` |
+| 025完整B(0)审计，GameClock3151 | `2cac245f75844601b4c0ad53e224e5f722716fe0625268d8ae0720af50c2b490` |
+
+`wave_table` 事件只描述其自身timestamp/segment，不能当作随后ready局的类型矩阵。当前logger没有在B(0)显式补发命名波表事件；研究应取 `capture_initial.state.board` 的 `00005564`（total_waves），再按偏移 `0x6b4 + 4*i` 读取 `total_waves * 50` 项。`audit/state-deltas.jsonl` 首个 `initial.board` 同样保留完整波表；首pre可能已执行同tick动作，应优先使用动作前的capture_initial并核对版本。波表定义的是类型槽位，不能代替逐只僵尸的实际出生行路、位置和随机属性记录。
+
+这批日志能确认波表在旧轮结束→新轮选卡→ready的初始化区间改变，没有3150完整表快照，不能精确认定某条写表指令。006与025构建不同，也不是同构建仅更改preseed的因果对照。加载瞬间的表相同不证明参考存档的波表最初来自自然生成；原始存档来源与实际ready局的表应分别陈述。本次只明确现有证据语义，不修改冻结DLL或历史记录。
+
 ## 每帧审计文件
 
 每次 `pre_step/post_step` 读取实际游戏内存，并向 run 的 `audit/` 写入：
