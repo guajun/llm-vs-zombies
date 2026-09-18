@@ -7,6 +7,8 @@ mutation is an unknown outcome, not evidence that the action did not execute.
 from __future__ import annotations
 
 import copy
+import base64
+import hashlib
 import json
 import os
 import struct
@@ -309,7 +311,19 @@ class Client:
                 except (ValueError, UnicodeError) as error:
                     self.trace.emit("invalid_response", {"request_id": request["request_id"], "hex": raw.hex()})
                     raise ProtocolError("response is not UTF-8 JSON") from error
-                self.trace.emit("response", response)
+                trace_response = response
+                if (method == "capture_frame" and isinstance(response, dict)
+                        and isinstance(response.get("result"), dict)
+                        and isinstance(response["result"].get("pixels_base64"), str)):
+                    # Video pixels flow to the encoder; repeating their Base64
+                    # in JSONL would cost gigabytes during a full experiment.
+                    # Keep exact pixel evidence and all intervention metadata.
+                    pixels = base64.b64decode(response["result"]["pixels_base64"], validate=True)
+                    metadata = {key: value for key, value in response["result"].items() if key != "pixels_base64"}
+                    metadata["pixels_evidence"] = {"sha256": hashlib.sha256(pixels).hexdigest(), "byte_length": len(pixels)}
+                    metadata["trace_metadata_only"] = True
+                    trace_response = {**response, "result": metadata}
+                self.trace.emit("response", trace_response)
                 if not isinstance(response, dict) or type(response.get("protocol")) is not int or response.get("protocol") != 1 or response.get("request_id") != request["request_id"]:
                     raise ProtocolError("response protocol or request_id mismatch")
                 if response.get("ok") is False:

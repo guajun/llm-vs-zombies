@@ -1,4 +1,6 @@
 import json
+import base64
+import hashlib
 import os
 import struct
 import tempfile
@@ -109,6 +111,19 @@ class ClientTests(unittest.TestCase):
 
     def events(self):
         return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
+
+    def test_capture_pixels_reach_encoder_without_expanding_decision_log(self):
+        pixels = bytes(range(256)) * 5625
+        encoded = base64.b64encode(pixels).decode("ascii")
+        self.transport.response = lambda request: json.dumps({"protocol": 1, "request_id": request["request_id"], "ok": True,
+            "result": {"capture_ok": True, "pixels_base64": encoded, "known_rng_unchanged": True}}).encode()
+        result = self.client.request("capture_frame", {"format": "bgr24"}, expect=observation()["version"])
+        self.assertEqual(base64.b64decode(result["pixels_base64"]), pixels)
+        recorded = [event for event in self.events() if event["kind"] == "response"][0]["data"]["result"]
+        self.assertNotIn("pixels_base64", recorded)
+        self.assertEqual(recorded["pixels_evidence"], {"sha256": hashlib.sha256(pixels).hexdigest(), "byte_length": len(pixels)})
+        self.assertTrue(recorded["known_rng_unchanged"])
+        self.assertLess(self.path.stat().st_size, 2048)
 
     def test_implicit_expect_and_actual_failed_actions_are_retained(self):
         self.client.observe()

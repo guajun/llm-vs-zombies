@@ -1,99 +1,95 @@
 # LLM vs Zombies
 
-PvZ 雾夜两仪实验项目：AvZ 负责游戏内操作和观测，logger 保存结构化记录，replay 用于离线复盘与状态对比。
+在原版 PvZ 1.0.0.1051 中做雾夜两仪实验。固定的 AvZ DLL 提供游戏线程接口，Python REPL 发送有限动作；游戏停在帧边界等待模型，执行时无需重新编译。所有实验在独立用户档和隐藏窗口中运行，不需要桌面键鼠操作。
 
-公开仓库只包含代码、文档及依赖锁定信息；游戏本体和实验记录保留在本机。克隆时使用 `git clone --recurse-submodules`，然后运行 `tools/bootstrap.ps1` 准备工具链和上游参考场景，将自己的兼容游戏副本放入 `game/original/`。
+公开仓库包含源码、教程、设计和测试；游戏本体、参考存档副本、工具链和实验数据留在本机，不随仓库分发。
 
-## 当前内容
+## 目录
 
-```text
-avz/framework/       固定提交的官方 AvZ 源码（Git 子模块）
-avz/runtime/         官方 2.9.2 运行包：头文件、静态库、注入器
-logger/avz/          C++ 缓冲记录器及带日志的动作入口
-logger/schemas/      事件协议
-game/original/      从本机 D:\pvz 复制的游戏本体
-replay/viewer/       可导出单文件 HTML 的状态复盘器
-src/llm_vs_zombies/  实验管理、校验、对比、导出 CLI（Python 标准库）
-experiments/configs/ 实验配置
-experiments/scenarios/liangyi/ 官方两仪参考存档
-experiments/runs/    每次实验独立目录，含元数据、事件、观察、决策、视频和检查点
-docs/               雾夜两仪教程与录制回放方案
-tools/              准备、编译、启动、注入及 CLI 脚本
-third_party/        已验证哈希的 LLVM-MinGW 编译工具链
-tests/              记录完整性、复盘与本机 C++ 写入测试
-```
+| 目录 | 内容 |
+|---|---|
+| `avz/framework` | 固定提交的官方 AvZ 子模块 |
+| `runtime` | 常驻命名管道、原子动作序列、精确帧预算与失败恢复 |
+| `launcher` | 挂起启动、进程内隔离、隐藏窗口及 DLL 注入 |
+| `logger/avz` | 状态、出怪类型表与操作日志 |
+| `determinism` | 目标二进制校验、已识别 RNG 状态、逐帧状态差分 |
+| `recording` | 原版绘制表面捕获，无桌面截图 |
+| `src/llm_vs_zombies` | Python 客户端、REPL、流式视频、原引擎重放与评测 |
+| `replay/viewer` | 单文件 HTML 状态复盘器 |
+| `game/original`、`game/local-engine` | 本机兼容游戏及已解包引擎，Git 忽略 |
+| `experiments/runs` | 每轮独立用户档、模块、观察、决策、视频、审计和封存清单 |
+| `docs`、`examples`、`tests` | 教程、接口、实验基准和验证 |
 
-框架固定为 `c42676c269b5b482a1eb9203a5b979e9d8a2a5c7`。游戏来源目录标识为英文 `1.0.0.1051`，实际文件哈希记录在 `dependencies.lock.json`；尚未做本机游戏运行和注入验证。
-
-## 先验证不启动游戏的流程
-
-在本目录打开 PowerShell：
+## 准备与后台运行
 
 ```powershell
-.\tools\lvz.ps1 doctor
-.\tools\lvz.ps1 demo
+git clone --recurse-submodules https://github.com/guajun/llm-vs-zombies.git
+cd llm-vs-zombies
+./tools/bootstrap.ps1
+./tools/build-avz.ps1
+./launcher/build.ps1
+# 按 docs/launcher.md 放置自己持有的兼容游戏和锁定引擎。
+./tools/launch-experiment.ps1 -Name my-run
 ```
 
-`demo` 会创建清楚标记为 synthetic 的演示实验，生成 `experiments/runs/<id>/exports/review.html`。用浏览器打开即可拖动时间线、查看植物和僵尸的位置示意及事件。演示数据不是模型打过的对局。
-
-## 录制真实对局
+启动器核对所有输入和模块哈希，创建私有用户档与注册表配置，加载参考存档并核验真实雾夜场景、26 株阵型及 10 卡顺序。`headless` 当前含义是隐藏普通游戏窗口，保留原版 Win32/DirectDraw 初始化；尚未实现脱离桌面会话的纯无窗口服务器。
 
 ```powershell
-.\tools\build-avz.ps1
-.\tools\lvz.ps1 new-run --name my-first-run
-.\tools\start-game.ps1
-.\tools\inject-recorder.ps1
+$env:PYTHONPATH = 'src'
+python -m llm_vs_zombies.repl --help
+python -m llm_vs_zombies.evaluation plan work/smoke-plan.json
+python -m llm_vs_zombies.evaluation run work/smoke-plan.json --output experiments/runs/eval-smoke
 ```
 
-1. 注入器选择本项目启动的兼容版本游戏窗口。AvZ 使用固定内存地址，勿选择其他版本游戏。
-2. 自行选卡并进入战斗。记录器不修改出怪、不自动操作策略。
-3. 当前采样间隔由 `experiments/configs/liangyi.json` 的 `state_interval_ticks` 指定；设为 1 才会每个观测帧记录状态。
-4. 在游戏内按数字 **7** 停止本次记录，关闭写入句柄；再执行下面的整理命令。下一次记录创建新实验并重新加载 DLL。
+客户端示例（PID 从本轮 `launcher.json` 读取）：
+
+```python
+from llm_vs_zombies.client import connect, plant
+from llm_vs_zombies.session import SessionTrace
+
+with SessionTrace('experiments/runs/my-run/decisions/session.jsonl') as trace:
+    with connect(pid=12345, trace=trace, timeout=90) as game:
+        observation = game.observe()
+        result = game.commit([plant(8, 1, 8)], advance_ticks=20)
+        # Python/模型可在此思考任意时长，游戏保持暂停。
+        game.request('stop_recording', expect=game.observe()['version'])
+```
+
+每条修改请求携带观察版本，结果报告实际动作成功与实际推进帧数。连接丢失后查询原请求 ID，不用新 ID 盲目重发。AvZ 的自动收集是固定环境辅助，其收集尝试另外记录为 `environment_collect`，不属于模型决策。
 
 ```powershell
-.\tools\lvz.ps1 finalize experiments/runs/my-first-run --outcome manual_stop
-.\tools\lvz.ps1 validate experiments/runs/my-first-run
-.\tools\lvz.ps1 export experiments/runs/my-first-run
+./tools/launch-experiment.ps1 -Name my-run -Stop
+./tools/lvz.ps1 finalize experiments/runs/my-run --outcome completed
+./tools/lvz.ps1 validate experiments/runs/my-run
+./tools/lvz.ps1 export experiments/runs/my-run
 ```
 
-原版用户档可能位于共享的 ProgramData，复制游戏目录不代表存档隔离。本项目保留官方参考存档，但不会替换你已有的用户档。`game1_13.dat` 的编号不能单凭文件名认定已是当前雾夜游戏模式，需实际加载并核实 `Scene()==3` 后开始正式评测。
+## 可重复性与录制边界
 
-## 实验文件与比较
+- 固定游戏、资源、存档、框架、DLL 和初始化配方；在进场前及首个受控帧播种已确认的全局 MT 与游戏线程 CRT，保存完整随机状态。单有一个 seed 不等于任意环境下全局确定性。
+- 原生审计记录每次更新前后状态哈希与 JSON 差分，涵盖主要实体池、卡槽、波表与已识别 RNG。仍有未覆盖的动画、特效、线程与时源，能力清单明确列出。
+- 原引擎 replay 从相同初态重新执行真实请求，定位首个分叉。seek 从起点重算；目前不声称支持完整进程检查点或任意时刻直接恢复。
+- 视频按游戏 tick 采样并流式送入 FFmpeg，不逐帧保存截图。原画来自引擎绘制表面；状态示意图始终标为非原版画面。JSONL 保存捕获元数据和像素 SHA256，原始像素送编码器。
+- 本机已经验证隐藏窗口初始化、1000 帧推进、真实种植/铲除，以及原画捕获前后已审计状态一致。完整两旗、多次冷启动重放与严格实验就绪仍以验收报告为准，不能由这些短程通过项推定。
 
-每次 `new-run` 保存配置副本、依赖锁定信息、参考存档副本、本项目实现源码 ZIP 和已编译 DLL 哈希。注入脚本会拒绝使用创建实验后又改变的 DLL。原始画面／模型观察、请求响应、检查点、视频都可以附入同一实验：
+## 文档与验收
 
-```powershell
-.\tools\lvz.ps1 attach experiments/runs/my-first-run path/to/response.json --category decisions
-.\tools\lvz.ps1 attach experiments/runs/my-first-run path/to/initial.dat --category checkpoints
-.\tools\lvz.ps1 compare experiments/runs/my-first-run experiments/runs/my-second-run
-```
-
-附入文件须在 `finalize` 前完成；封存后会保存这些文件的 SHA-256。导出的 HTML 可重新生成，原始记录应保持不变。`compare` 返回首个采样时刻或状态差异，不宣称验证了未记录字段、完整 RNG 或整个进程的位级一致性。
-
-## 实现边界
-
-- **已实现**：项目独立游戏副本、固定框架、原生缓冲日志、实体首次／不再观测事件、植物/僵尸/卡片状态采样、出怪表记录、显式动作包装、实验打包与哈希校验、状态对比、HTML 复盘。
-- **待接入**：LLM 调用与 IPC 控制、完整游戏 RNG 恢复、精确生成函数钩子、所有对象状态与进程检查点、在原版引擎中按输入确定性重放、按游戏时间抓帧的视频采集。
-- 实验目录支持完整收纳一次运行的材料；当前原生采样并不是完整引擎存档。手动鼠标操作和直接调用其他 AvZ 接口的动作未被自动拦截。正式模型动作应统一调用 `lvz::Plant` / `lvz::Shovel` 等记录入口。
-- 存档与采样状态不可混用；`zombie_first_observed` 不宣称精确出生时刻。销毁事件只表示离开存活过滤器，不推断死亡原因。
-- 记录器在 AvZ 回调边界采样；准确的帧前／帧后关系仍需首次游戏集成实验验证。
-
-## 资料与开发
-
-- [实验就绪实施与验收：GitHub issues](docs/implementation-board.md)
 - [雾夜两仪详细教程](docs/雾夜两仪详细教程.md)
-- [PvZ 录制与回放方案](docs/PvZ录制与回放方案.md)
-- [LLM 交互控制设计：常驻适配器与 Python REPL](docs/LLM交互控制设计.md)
+- [后台启动与隔离](docs/launcher.md)
+- [运行时协议](docs/runtime-protocol.md)
+- [Python 客户端与 REPL](docs/client-repl.md)
+- [录制与视频](docs/video.md)
+- [原版引擎重放](docs/engine-replay.md)
+- [评测与就绪门槛](docs/evaluation.md)
+- [后台实机验收记录](docs/headless-validation.md)
+- [实施 issue 与验收规则](docs/implementation-board.md)
+- [LLM 控制设计](docs/LLM交互控制设计.md)
 - [原版确定性重放器提案](docs/原版确定性重放器提案.md)
-- [logger 使用说明](logger/README.md)
-- [replay 协议与后续实现](replay/README.md)
-- [验证记录](docs/验证记录.md)
 
 ```powershell
-$env:PYTHONPATH = "$PWD/src"
+$env:PYTHONPATH = 'src'
 python -m unittest discover -s tests -v
+ctest --test-dir build/cmake --output-on-failure
 ```
 
-Python 工具无第三方运行依赖。构建原生模块需要 Python 之外的 CMake、Ninja；LLVM-MinGW 已放入本项目，重新取依赖可运行 `tools/bootstrap.ps1`。无需全局安装 AvZ 或编辑原游戏目录。
-
-AvZ 遵循 GPL-3.0，本项目源码按 GPL-3.0 发布（见 LICENSE）。游戏、第三方工具的许可各自独立；游戏副本不加入 Git，不随源码分发。
+公开 CI 只构建公开代码和运行不依赖游戏的测试；真实实验报告来自本机原版引擎。AvZ 固定为 `c42676c269b5b482a1eb9203a5b979e9d8a2a5c7`。本项目遵循 GPL-3.0；游戏及第三方依赖许可独立。

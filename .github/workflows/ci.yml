@@ -1,0 +1,87 @@
+name: Distributable code checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Standard-library tests (Windows-only transport tests explicitly skip)
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Verify pinned AvZ and install SHA256-locked LLVM-MinGW
+        shell: pwsh
+        run: |
+          $lock = Get-Content dependencies.lock.json -Raw | ConvertFrom-Json
+          $actual = (& git -C avz/framework rev-parse HEAD).Trim()
+          if ($actual -ne $lock.avz_commit) { throw 'AvZ submodule differs from lock file.' }
+          ./tools/bootstrap.ps1
+      - name: Build native code and launcher
+        shell: pwsh
+        run: |
+          ./tools/build-avz.ps1 -Jobs 2
+          ./launcher/build.ps1
+      - name: Python and native tests
+        shell: pwsh
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Python tests failed.' }
+          ctest --test-dir build/cmake --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Native tests failed.' }
+      - name: Isolation fixture (no game or personal saves)
+        shell: pwsh
+        run: |
+          $fixtureRoot = Join-Path $PWD 'work/ci-isolation-fixture'
+          New-Item -ItemType Directory -Force $fixtureRoot,(Join-Path $fixtureRoot 'appdata'),(Join-Path $fixtureRoot 'windows') | Out-Null
+          $compiler = Join-Path $PWD 'third_party/llvm-mingw-20260908-ucrt-x86_64/bin/i686-w64-mingw32-clang++.exe'
+          $fixtureExe = Join-Path $PWD 'build/launcher/isolation-fixture.exe'
+          & $compiler -std=c++20 -O2 -static launcher/isolation_fixture.cpp -luser32 -ladvapi32 -o $fixtureExe
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture build failed.' }
+          & ./build/launcher/lvz-launcher.exe launch $fixtureExe (Join-Path $PWD 'build/launcher/lvz-bootstrap.dll') $fixtureRoot $fixtureRoot (Join-Path $fixtureRoot 'receipt.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Pre-main isolation injection failed.' }
+          $resultPath = Join-Path $fixtureRoot 'fixture-result.txt'
+          $deadline = [DateTime]::UtcNow.AddSeconds(10)
+          do {
+            if ((Test-Path -LiteralPath $resultPath) -and (Get-Content -LiteralPath $resultPath -Raw) -match '(?m)^passed=1\r?$') { break }
+            if ([DateTime]::UtcNow -gt $deadline) { throw 'Isolation fixture did not pass; inspect uploaded diagnostics.' }
+            Start-Sleep -Milliseconds 50
+          } while ($true)
+      - name: Preserve test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-test-diagnostics
+          path: |
+            build/cmake/Testing/Temporary/*.log
+            work/ci-isolation-fixture/*.log
+            work/ci-isolation-fixture/*.txt
+            work/ci-isolation-fixture/*.json
+          if-no-files-found: ignore
+
+# This workflow deliberately has no game binaries, live replay, external model
+# credentials or readiness declaration. Full acceptance runs locally.
