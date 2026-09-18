@@ -94,7 +94,7 @@ int main() {
             std::array<uint8_t,0x15c> original;std::memcpy(original.data(),fixtureZombie,original.size());
             Check(InstallSpawnHookForTest(reinterpret_cast<uintptr_t>(&SpawnFixture),
                 reinterpret_cast<uintptr_t>(&SpawnFixtureEpilogue),reinterpret_cast<uintptr_t>(&fixtureMt),error),error.c_str());
-            SetSpawnBoundary(123,4,2);
+            SetSpawnBoundary(123,4,2,0x100000001ull);
             Reset(type);CallFixture();CompareRegisters(baseline);
             Check(std::memcmp(original.data(),fixtureZombie,original.size())==0,"Hook changed original object writes");
             auto events=DrainSpawnEvents();
@@ -107,11 +107,13 @@ int main() {
             Check(event["global_mt_before"]["cursor"]==100,"Entry RNG cursor lost");
             Check(event["global_mt_after"]["cursor"]==(type==2?102:101),"Exit RNG cursor lost");
             Check(event["boundary"]["tick"]==123,"Boundary metadata lost");
+            for(const auto& item:events)Check(item["engine_call_id"]==0x100000001ull,"Nested spawn lost 64-bit original call ID");
             Check(SpawnHookStatus()["healthy"]==true,"Hook health failed");
             ClearSpawnBoundary();Reset(0);CallFixture();
             auto initialization=DrainSpawnEvents();
             Check(initialization.size()==1&&initialization[0]["boundary"].is_null(),
                 "Initialization spawn retained a stale controlled boundary");
+            Check(initialization[0]["engine_call_id"].is_null(),"Initialization spawn retained original call ID");
             Check(RemoveSpawnHook(error),error.c_str());
         }
         Check(InstallSpawnHookForTest(reinterpret_cast<uintptr_t>(&SpawnFixture),

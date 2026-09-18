@@ -27,8 +27,20 @@ string(REPLACE "    __APublicAfterScriptHook::RunAll();\n\n    RunTotal();"
 string(REPLACE "void __AScriptManager::ScriptHook() {\n    RunTotal();"
   "void __AScriptManager::ScriptHook() {\n    if (!lvz::runtime::BeforeFrame()) return;\n    RunTotal();"
   script_source "${script_source}")
-string(REPLACE "    AAsm::GameTotalLoop();\n    while (__aGameControllor.isSkipTick()"
-  "    if (!lvz::runtime::BeforeEngineFrame()) return;\n    AAsm::GameTotalLoop();\n    lvz::runtime::AfterEngineFrame();\n    if (lvz::runtime::Started()) return; // The controller owns all frame budgets.\n    while (__aGameControllor.isSkipTick()"
+set(controlled_call_needle "    AAsm::GameTotalLoop();\n    while (__aGameControllor.isSkipTick()")
+string(FIND "${script_source}" "${controlled_call_needle}" controlled_call_position)
+if(controlled_call_position LESS 0)
+  message(FATAL_ERROR "Reviewed original update call site is missing")
+endif()
+string(LENGTH "${controlled_call_needle}" controlled_call_length)
+math(EXPR controlled_call_end "${controlled_call_position}+${controlled_call_length}")
+string(SUBSTRING "${script_source}" ${controlled_call_end} -1 controlled_call_tail)
+string(FIND "${controlled_call_tail}" "${controlled_call_needle}" duplicate_controlled_call)
+if(NOT duplicate_controlled_call EQUAL -1)
+  message(FATAL_ERROR "Reviewed original update call site is not unique")
+endif()
+string(REPLACE "${controlled_call_needle}"
+  "    if (!lvz::runtime::RunOneEngineFrame()) return;\n    if (lvz::runtime::Started()) return; // The controller owns all frame budgets.\n    while (__aGameControllor.isSkipTick()"
   script_source "${script_source}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/avz_script_overlay.cpp" "#include \"runtime/runtime.hpp\"\n#include \"runtime/diagnostics.hpp\"\n${script_source}")
 string(REPLACE "        __aig.hInstance = hinstDLL;"

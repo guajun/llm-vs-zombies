@@ -18,7 +18,7 @@ Json Controller::Status() const {
         {"dedup_storage_fault",storageFault_.empty()?(journal_.Fault().empty()?Json(nullptr):Json(journal_.Fault())):Json(storageFault_)},
         {"dedup",{{"entries",journal_.Entries()},{"disk_bytes",journal_.Bytes()},{"index_bytes",RequestJournal::BucketCount*sizeof(uint64_t)},{"hot_results",cache_.size()},{"sealed",journal_.Sealed()}}},
         {"version",Version()},{"pending_request_id",pending_?Json(pending_->id):Json(nullptr)},
-        {"executed_ticks",pending_?pending_->executed:0}};
+        {"executed_ticks",pending_?pending_->executed:0},{"engine_call",engineCalls_.Health()}};
 }
 void Controller::Audit(const std::string& kind,const Json& payload) {
     // Native audit captures authoritative state itself. Its envelope only needs
@@ -36,7 +36,21 @@ void Controller::Boundary() {
         // Losing the active Board outside a measured update cannot authorize
         // free-running menu/card-selection updates after the experiment ends.
         if(ready_ && (!ready || current!=board_)) terminalFrozen_=true;
-        if (pending_) Finish("scene_changed");
+        if (pending_) {
+            if(backend_.UsesEngineCallBoundary()) {
+                // Only AfterStep can certify an entered-and-returned terminal
+                // call. A boundary change observed outside that wrapper has no
+                // such evidence, even if earlier calls of this request ran.
+                Audit("engine_call_fault",{{"request_id",pending_->id},
+                    {"reason","unmeasured_boundary_transition"},
+                    {"board_identity_preserved",current==board_},{"ready_before",ready_},{"ready_after",ready},
+                    {"last_measured_native_clock",nativeTick_},{"observed_native_clock",clock},
+                    {"actual_executed_ticks",pending_->executed},{"actual_executed_engine_calls",pending_->calls}});
+                Fail("Unmeasured Board/readiness/clock transition outside the controlled engine call");
+                return;
+            }
+            Finish("scene_changed");
+        }
         if(!fault_.empty()||!storageFault_.empty()||!journal_.Fault().empty()) return;
         ++epoch_; tick_=revision_=0; cache_.clear();journal_.Epoch(epoch_);
         captureCache_.clear();captureResponses_.clear();captureMetadataBytes_=0;
@@ -44,7 +58,7 @@ void Controller::Boundary() {
     }
     initialized_=true; board_=current; ready_=ready; nativeTick_=clock;
 }
-bool Controller::ShouldStep() const { return fault_.empty() && storageFault_.empty() && journal_.Fault().empty() && !recordingClosed_ && !terminalFrozen_ && (!ready_ || pending_.has_value()); }
+bool Controller::ShouldStep() const { return !engineCalls_.Faulted() && fault_.empty() && storageFault_.empty() && journal_.Fault().empty() && !recordingClosed_ && !terminalFrozen_ && (!ready_ || pending_.has_value()); }
 void Controller::StorageFail(const std::string& message) {
     if(storageFault_.empty()) storageFault_=message;
     terminalFrozen_=true;
@@ -52,6 +66,9 @@ void Controller::StorageFail(const std::string& message) {
 }
 void Controller::Fail(const std::string& message) {
     if(fault_.empty()) fault_=message.empty()?"Native boundary audit failed":message;
+    // Original code may re-enter the hook or report an audit fault before it
+    // returns. Keep its request alive until the wrapper measures actual work.
+    if(engineCalls_.InFlight()) return;
     terminalFrozen_=true;inStep_=false;
     backend_.InvalidateFrame("controller_fault");
     if(!pending_) return;
@@ -59,58 +76,149 @@ void Controller::Fail(const std::string& message) {
     auto response=Error(p.id,"audit_failed",fault_);
     response["error"]["details"]={{"version",Version()},{"requested_ticks",p.requested},
         {"executed_ticks",p.executed},{"action_results",p.actions},{"restart_required",true}};
+    response["error"]["details"].update(CallCounts(p));
     Complete(p.key,std::move(response));
+}
+Json Controller::CallCounts(const Pending& p) const {
+    Json out={{"executed_engine_calls",p.calls},{"terminal_zero_clock_calls",p.terminalZero},
+        {"last_engine_call_id",p.lastCall?Json(p.lastCall):Json(nullptr)}};
+    if(!p.terminalKind.empty())out["terminal_kind"]=p.terminalKind;
+    return out;
+}
+bool Controller::RunEngineFrame(const std::function<void()>& originalUpdate) {
+    if(!GuardEngineEntry()) return false;
+    try {
+        CheckEngineGuard();
+        Boundary();if(!ShouldStep())return false;
+        if(!ready_) {originalUpdate();return true;} // menu/loading calls have no ID
+        if(!pending_||pending_->executed>=pending_->requested)throw std::runtime_error("No controlled call budget");
+        wrapperActive_=true;
+        BeforeStep();
+        if(engineCalls_.Faulted())throw std::runtime_error("Engine call guard fault before original entry");
+        // No audit, allocation, IPC or hook relabelling between these scalar
+        // guards and the actual original callback entry/return.
+        if(activeCall_)engineCalls_.Enter(activeCall_);
+        try {originalUpdate();}
+        catch(...) {if(activeCall_)engineCalls_.Abort(activeCall_);activeCall_=0;throw;}
+        if(activeCall_)engineCalls_.Returned(activeCall_);
+        AfterStep();wrapperActive_=false;return true;
+    } catch(const std::exception& error) {
+        if(activeCall_&&engineCalls_.Active())engineCalls_.Abort(activeCall_);
+        activeCall_=0;wrapperActive_=false;Fail(error.what());return false;
+    } catch(...) {
+        if(activeCall_&&engineCalls_.Active())engineCalls_.Abort(activeCall_);
+        activeCall_=0;wrapperActive_=false;Fail("Unknown exception interrupted original engine call");return false;
+    }
 }
 void Controller::BeforeStep() {
     if (!ready_ || !pending_) return;
     preTick_=backend_.NativeTick(); inStep_=true;
-    Audit("pre_step",{{"request_id",pending_->id},{"requested_ticks",pending_->requested},{"executed_ticks",pending_->executed}});
+    Json pre={{"request_id",pending_->id},{"requested_ticks",pending_->requested},{"executed_ticks",pending_->executed}};
+    if(backend_.UsesEngineCallBoundary()) {
+        if(!wrapperActive_)throw std::runtime_error("Controlled calls require the checked wrapper");
+        preBoard_=backend_.BoardIdentity();preUi_=backend_.GameUi();
+        if(!preBoard_||preUi_!=3)throw std::runtime_error("Controlled call requires a ready UI3 Board");
+        activeCall_=engineCalls_.Reserve();
+        callMetadata_={{"schema","lvz.engine-call.v1"},{"engine_call_id",activeCall_},
+            {"request_call_index",pending_->calls+1},{"pre_version",Version()},{"lifecycle","prepared"},
+            {"native_clock_before",preTick_},{"native_clock_after",nullptr},{"native_tick_delta",nullptr},
+            {"clock_delta_measured",false},{"engine_call_entered",false},{"engine_call_completed",false},
+            {"board_identity_preserved",nullptr},{"ready_before",true},{"game_ui_before",preUi_},
+            {"clocks_before",backend_.NativeClocks()},{"clocks_after",nullptr},
+            {"entered_calls_total",engineCalls_.EnteredCount()},{"returned_calls_total",engineCalls_.ReturnedCount()}};
+        callRaw_={{"board_address_before",preBoard_},{"board_address_after",nullptr}};
+        pre["engine_call"]=callMetadata_;pre["_engine_call_raw"]=callRaw_;
+    }
+    Audit("pre_step",pre);
 }
 void Controller::AfterStep() {
     if (!inStep_) return;
     inStep_=false;
-    const bool sameBoard=board_!=0 && backend_.BoardIdentity()==board_;
+    const auto measuredBoard=activeCall_?preBoard_:board_;
+    const bool sameBoard=measuredBoard!=0 && backend_.BoardIdentity()==measuredBoard;
     const bool terminal=!backend_.Ready() || !sameBoard;
+    const bool proven=activeCall_!=0;
+    if(proven) {
+        ++pending_->calls;pending_->lastCall=activeCall_;
+        callMetadata_["lifecycle"]="returned";callMetadata_["engine_call_entered"]=true;callMetadata_["engine_call_completed"]=true;
+        callMetadata_["board_identity_preserved"]=sameBoard;callMetadata_["ready_after"]=backend_.Ready();
+        callMetadata_["game_ui_after"]=backend_.GameUi();
+        callMetadata_["entered_calls_total"]=engineCalls_.EnteredCount();callMetadata_["returned_calls_total"]=engineCalls_.ReturnedCount();
+        callRaw_["board_address_after"]=backend_.BoardIdentity();
+    }
     // A replacement/freed Board has no comparable native clock. In particular,
     // do not subtract a new Board's clock or fabricate a post_step for it.
     if(!sameBoard) {
         backend_.InvalidateFrame("terminal_board_transition");
         terminalFrozen_=true;
-        Audit("terminal_transition",{{"request_id",pending_->id},{"native_tick_delta",nullptr},
-            {"tick_delta_verified",false},{"board_identity_preserved",false}});
+        Json transition={{"request_id",pending_->id},{"native_tick_delta",nullptr},
+            {"tick_delta_verified",false},{"board_identity_preserved",false}};
+        if(proven) {
+            callMetadata_["transition_kind"]="unmeasured_board_transition";transition["engine_call"]=callMetadata_;
+            engineCalls_.Complete(activeCall_,false,false,false,false);activeCall_=0;
+        }
+        Audit("terminal_transition",transition);
+        if(proven){Fail("Original update replaced or removed the measured Board");return;}
         Finish("scene_changed"); Boundary(); return;
     }
     const auto afterTick=backend_.NativeTick();
     const int64_t delta=static_cast<int64_t>(afterTick)-static_cast<int64_t>(preTick_);
     if (delta>0 && delta<=MaxTicks) { tick_+=delta; pending_->executed+=delta; revision_=0; }
     nativeTick_=afterTick;
+    const bool terminalZero=proven&&terminal&&delta==0&&preUi_==3&&backend_.GameUi()==4;
+    const std::string transitionKind=terminalZero?"terminal_zero_clock_update":terminal&&delta==1?"terminal_clock_step":!terminal&&delta==1?"clock_step":"invalid_clock_update";
+    if(proven) {
+        callMetadata_["native_clock_after"]=afterTick;callMetadata_["native_tick_delta"]=delta;
+        callMetadata_["clock_delta_measured"]=true;callMetadata_["clocks_after"]=backend_.NativeClocks();
+        callMetadata_["transition_kind"]=transitionKind;
+        if(terminalZero)++pending_->terminalZero;
+        if(terminal)pending_->terminalKind=transitionKind;
+        if(engineCalls_.Faulted()||!fault_.empty()) {
+            Audit("engine_call_fault",{{"request_id",pending_->id},{"engine_call",callMetadata_},{"actual_executed_ticks",pending_->executed}});
+            engineCalls_.Complete(activeCall_,false,false,false,false);activeCall_=0;
+            Fail(fault_.empty()?"Nested or invalid engine invocation rejected; outer call measured after return":fault_);return;
+        }
+    }
     Json post={{"request_id",pending_->id},{"native_tick_delta",delta},{"executed_ticks",pending_->executed}};
+    if(proven){post["engine_call"]=callMetadata_;post["_engine_call_raw"]=callRaw_;}
     if(delta==1&&!terminal&&backend_.RequiresRenderPreparation()) {
         // Do not emit an Audit event before rendering: pre_step's original
         // spawn/particle boundary must stay active through both update+draw.
         try {post["render"]=backend_.RenderFrame(Version(),false);}
         catch(const std::exception& error) {
-            Audit("render_failed",{{"request_id",pending_->id},{"actual_executed_ticks",pending_->executed},{"message",error.what()}});
+            Json failure={{"request_id",pending_->id},{"actual_executed_ticks",pending_->executed},{"message",error.what()}};
+            if(proven){failure["engine_call"]=callMetadata_;engineCalls_.Complete(activeCall_,false,false,false,false);activeCall_=0;}
+            Audit("render_failed",failure);
             Fail(std::string("Controlled render failed after native update: ")+error.what());return;
         }
     } else if(terminal||delta!=1) {
         backend_.InvalidateFrame("unverified_or_terminal_update");
-        if(terminal&&delta==1&&backend_.RequiresRenderPreparation())
+        if(terminal&&(delta==1||terminalZero)&&backend_.RequiresRenderPreparation())
             post["render"]={{"schema","lvz.controlled-render.v1"},{"mode","deterministic_draw_schedule_v1"},
                 {"phase","terminal"},{"skipped",true},{"reason","left_ready_fight"},
                 {"frame_version",Version()},{"native_clock",afterTick},{"cache_invalidated",true}};
     }
+    if(proven&&engineCalls_.Faulted()) {
+        Audit("engine_call_fault",{{"request_id",pending_->id},{"engine_call",callMetadata_},{"actual_executed_ticks",pending_->executed}});
+        engineCalls_.Complete(activeCall_,false,false,false,false);activeCall_=0;
+        Fail("Engine invocation guard fault during controlled drawing");return;
+    }
     Audit("post_step",post);
+    if(proven){engineCalls_.Complete(activeCall_,true,delta==1,terminalZero,terminal&&delta==1);activeCall_=0;}
     if(terminal) {
         terminalFrozen_=true;
-        Audit("terminal_transition",{{"request_id",pending_->id},{"native_tick_delta",delta},
-            {"tick_delta_verified",delta==1},{"board_identity_preserved",true}});
+        Json transition={{"request_id",pending_->id},{"native_tick_delta",delta},
+            {"tick_delta_verified",delta==1},{"board_identity_preserved",true}};
+        if(proven){transition["engine_call"]=callMetadata_;transition["terminal_call_verified"]=delta==1||terminalZero;
+            transition["clock_delta_measured"]=true;transition["transition_kind"]=transitionKind;}
+        Audit("terminal_transition",transition);
+        if(proven&&delta!=1&&!terminalZero){Fail("Unsupported terminal clock/UI transition");return;}
         // Keep the just-measured version in both audit and completed response.
         // Only after delivery may Boundary reset tick/revision for the new epoch.
         Finish("scene_changed"); Boundary(); return;
     }
     // An unexpected update count is an error, never silently called one step.
-    if (delta!=1) { Finish(delta==0?"no_game_tick":"step_count_mismatch"); return; }
+    if (delta!=1) {if(proven)terminalFrozen_=true; Finish(delta==0?"no_game_tick":"step_count_mismatch"); return; }
     if (pending_->untilWave && backend_.NativeWave()!=pending_->startWave) { Finish("wave_changed"); return; }
     if (pending_->executed>=pending_->requested) Finish("budget_exhausted");
 }
@@ -140,6 +248,8 @@ void Controller::Complete(const std::string& key,Json response,bool seal) {
             it->second.response=response;
         }
     }
+    if(persisted&&backend_.UsesEngineCallBoundary()&&response.value("ok",false)&&response.at("result").value("stop_reason","")=="scene_changed")
+        terminalReply_=TerminalReply{key,it->second.payload,response.dump()};
     auto callbacks=std::move(it->second.waiters);
     if(persisted) cache_.erase(it);
     for (auto& reply:callbacks) reply(response);
@@ -150,6 +260,7 @@ void Controller::Finish(const std::string& reason) {
     auto p=*pending_; inStep_=false;
     Json result={{"action_results",p.actions},{"requested_ticks",p.requested},{"executed_ticks",p.executed},
         {"stop_reason",reason},{"observation",Observe()}};
+    result.update(CallCounts(p));
     Audit("request_completed",{{"request_id",p.id},{"result",result}});
     pending_.reset();
     if(reason=="no_game_tick"||reason=="step_count_mismatch") {
@@ -191,11 +302,15 @@ void Controller::Request(const Json& req,Reply reply) {
             reply(Success(id,std::move(result))); return;
         }
         if(method=="observe") { reply(Success(id,Observe())); return; }
-        if(method=="audit_snapshot") { reply(Success(id,{{"state",backend_.AuditSnapshot()},{"version",Version()}}));return; }
+        if(method=="audit_snapshot") { reply(Success(id,{{"state",backend_.AuditSnapshot()},{"version",Version()},{"engine_call",engineCalls_.Health()}}));return; }
         if(method=="status") {
             if(params.contains("request_id")) {
                 std::string wanted=params["request_id"].get<std::string>();
                 auto it=cache_.find(wanted); auto result=Status();
+                if(terminalReply_&&terminalReply_->id==wanted) {
+                    result["request_state"]="completed";result["response"]=Json::parse(terminalReply_->response);
+                    reply(Success(id,std::move(result)));return;
+                }
                 result["request_state"]=it==cache_.end()?"unknown":(it->second.response?"completed":"pending");
                 if(it!=cache_.end()&&it->second.response) result["response"]=*it->second.response;
                 if(it==cache_.end()) if(auto old=journal_.Find(wanted)) {
@@ -210,6 +325,9 @@ void Controller::Request(const Json& req,Reply reply) {
             reply(Error(id,"unsupported_method","Method is not implemented")); return;
         }
         std::string canonical=req.dump();
+        if(terminalReply_&&terminalReply_->id==id) {
+            reply(terminalReply_->canonical==canonical?Json::parse(terminalReply_->response):Error(id,"request_id_conflict","Terminal request ID has different content"));return;
+        }
         if(auto it=cache_.find(id);it!=cache_.end()) {
             if(it->second.payload!=canonical) reply(Error(id,"request_id_conflict","Same request_id has different content in this epoch"));
             else if(it->second.response) reply(*it->second.response);
@@ -301,7 +419,9 @@ void Controller::Request(const Json& req,Reply reply) {
         if(pending_) { Complete(id,Error(id,"busy","Another advancement is pending; use a second connection to cancel")); return; }
         if(recordingClosed_) { Complete(id,Error(id,"recording_closed","This run has been finalized; begin a new process and run"));return; }
         if(method=="stop_recording") {
-            Audit("recording_closed",{{"request_id",id}});backend_.CloseRecording();recordingClosed_=true;
+            Audit("recording_closed",{{"request_id",id}});
+            if(backend_.UsesEngineCallBoundary())Audit("engine_call_closed",engineCalls_.Health());
+            backend_.CloseRecording();recordingClosed_=true;
             Complete(id,Success(id,{{"closed",true},{"observation",Observe()}}),true);return;
         }
         if(method=="prepare_render") {
@@ -374,7 +494,7 @@ void Controller::Request(const Json& req,Reply reply) {
         if(!actions.is_array()||actions.size()>MaxActions||(method=="advance"&&!actions.empty())) {
             Complete(id,Error(id,"invalid_params","Expected at most 256 actions; advance takes no actions")); return;
         }
-        pending_=Pending{id,id,count.get<int>(),0,backend_.NativeWave(),untilWave,Json::array()};
+        pending_=Pending{id,id,count.get<int>(),0,backend_.NativeWave(),untilWave,Json::array(),0,0,0,{}};
         Audit("request_started",{{"request_id",id},{"request",req}});
         for(size_t i=0;i<actions.size();++i) {
             Json outcome;

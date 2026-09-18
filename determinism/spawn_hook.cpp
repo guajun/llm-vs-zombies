@@ -42,7 +42,7 @@ struct SavedRegisters {
     uint32_t edi, esi, ebp, espBeforePushad, ebx, edx, ecx, eax, eflags;
 };
 static_assert(sizeof(SavedRegisters)==36);
-struct Boundary { uint64_t tick=0, revision=0; uint32_t segment=0; bool valid=false; };
+struct Boundary { uint64_t tick=0, revision=0; uint32_t segment=0; bool valid=false; uint64_t engineCallId=0; };
 struct EntryData {
     uintptr_t zombie=0;
     uint32_t callerRva=0, generationId=0, parentId=0;
@@ -204,8 +204,8 @@ bool RemoveSpawnHook(std::string& error) {
     MH_RemoveHook(reinterpret_cast<void*>(entryAddress));MH_RemoveHook(reinterpret_cast<void*>(exitAddress));
     lvzSpawnEntryTrampoline=lvzSpawnExitTrampoline=nullptr;installed=false;error.clear();return true;
 }
-void SetSpawnBoundary(uint64_t tick,uint64_t revision,uint32_t segment) {
-    RequireOwner();currentBoundary={tick,revision,segment,true};
+void SetSpawnBoundary(uint64_t tick,uint64_t revision,uint32_t segment,uint64_t engineCallId) {
+    RequireOwner();currentBoundary={tick,revision,segment,true,engineCallId};
 }
 void ClearSpawnBoundary() {RequireOwner();currentBoundary={};}
 Json DrainSpawnEvents() {
@@ -218,6 +218,7 @@ Json DrainSpawnEvents() {
         if(input.boundary.valid) boundary={{"tick",input.boundary.tick},{"revision",input.boundary.revision},{"segment",input.boundary.segment}};
         out.push_back({{"schema","lvz.spawn.v1"},{"kind","zombie_initialized"},
             {"phase","zombie_initialize_exit"},{"ordinal",record.ordinal},{"boundary",boundary},
+            {"engine_call_id",input.boundary.engineCallId?Json(input.boundary.engineCallId):Json(nullptr)},
             {"id",Word(record.zombie,0x158)},{"slot",Word(record.zombie,0x158)&0xffffu},
             {"generation",Word(record.zombie,0x158)>>16},{"caller_rva",input.callerRva},
             {"inputs",{{"row0",input.row},{"type",input.type},{"variant_byte",input.variant},

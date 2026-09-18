@@ -19,7 +19,8 @@ from typing import Any, Callable
 
 from .audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA as AUDIT_SCHEMA, canonical,
                             audit_files, digests, file_hash, first_difference, hash_backend, jsonl, particle_semantics,
-                            spawn_semantics, read_json, version, DRAW_SCHEDULE_MODE, draw_mode, render_semantics)
+                            spawn_semantics, read_json, version, DRAW_SCHEDULE_MODE, draw_mode, render_semantics,
+                            ENGINE_CALL_MODE, engine_call_mode, engine_call_semantics, validate_engine_origin)
 from .client import Client, OutcomeUnknown, RemoteError
 
 SCHEMA = "lvz.engine-replay.v1"
@@ -79,6 +80,8 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
     marker = {"schema": SCHEMA, "identity": copy.deepcopy(identity),
               "initialization": copy.deepcopy(initialization), "observation": observation,
               "state": snapshot["state"]}
+    if engine_call_mode(identity["game"]):
+        marker["engine_call_origin"] = copy.deepcopy(snapshot.get("engine_call"))
     _validate_initial(marker)
     client.trace.emit("replay_initial", marker)
     return marker
@@ -94,6 +97,7 @@ def _validate_identity(identity: dict) -> None:
     if game.get("schema") != AUDIT_SCHEMA or game.get("loaded_signatures_match") is not True:
         raise EvidenceError("unsupported game target identity")
     draw_mode(game)
+    engine_call_mode(game)
 
 
 def _validate_initial(initial: dict) -> None:
@@ -122,6 +126,10 @@ def _validate_initial(initial: dict) -> None:
     elif ("draw_schedule" in initial["state"]
           or initial["initialization"].get("execution_mode") == DRAW_SCHEDULE_MODE):
         raise EvidenceError("initial controlled drawing lacks an explicit engine identity")
+    if engine_call_mode(initial["identity"]["game"]):
+        validate_engine_origin(initial.get("engine_call_origin"))
+    elif "engine_call_origin" in initial:
+        raise EvidenceError("engine call origin lacks an explicit engine identity")
     digests(initial["state"])
 
 
@@ -325,9 +333,11 @@ def _terminal_event(audit: AuditLog, request_id: str, *, required: bool) -> dict
         raise EvidenceError("scene_changed requires exactly one terminal_transition")
     event = events[0]
     payload = event["payload"]
-    if (payload.get("tick_delta_verified") is not True
+    zero = (engine_call_mode(audit.manifest) and payload.get("transition_kind") == "terminal_zero_clock_update"
+            and payload.get("terminal_call_verified") is True and payload.get("clock_delta_measured") is True)
+    if (payload.get("tick_delta_verified") is not (False if zero else True)
             or payload.get("board_identity_preserved") is not True
-            or type(payload.get("native_tick_delta")) is not int or payload["native_tick_delta"] != 1):
+            or type(payload.get("native_tick_delta")) is not int or payload["native_tick_delta"] != (0 if zero else 1)):
         raise EvidenceError("terminal transition cannot prove one actual step on the original Board")
     frames = audit.request_headers(request_id)
     completions = [item for item in request_events if item["kind"] == "request_completed"]
@@ -367,6 +377,7 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
         raise EvidenceError("native audit target/coverage identity differs from hello")
     audit.validate_draw_initial(initial)
     mode = draw_mode(audit.manifest)
+    call_mode = engine_call_mode(audit.manifest)
     if _native_steps(audit) != [step for step in steps if step["request"]["method"] in STEP_METHODS]:
         raise EvidenceError("native authoritative requests/results differ from source trajectory")
     current = initial["observation"]["version"]
@@ -451,7 +462,8 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
             raise EvidenceError("source terminated for an unsupported external condition")
         terminal = result.get("stop_reason") == "scene_changed"
         _terminal_event(audit, req["request_id"], required=terminal)
-        if terminal and (step_index != len(steps) - 1 or executed == 0
+        terminal_zero = call_mode and result.get("terminal_zero_clock_calls") == 1
+        if terminal and (step_index != len(steps) - 1 or (executed == 0 and not terminal_zero)
                          or result.get("observation", {}).get("game_ui") == 3):
             raise EvidenceError("verified scene transition must end the final request after an actual step")
         if result.get("stop_reason") == "budget_exhausted" and executed != count:
@@ -463,13 +475,17 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
             raise EvidenceError("actual source version does not match execution")
         _validate_native_details(audit, req, result)
         frames = audit.request_headers(req["request_id"])
-        if len(frames) != executed * 2:
+        call_count = result.get("executed_engine_calls") if call_mode else executed
+        if type(call_count) is not int or call_count != executed + int(bool(terminal_zero)) or len(frames) != call_count * 2:
             raise EvidenceError("source lacks pre/post evidence for every executed tick")
+        progressed = 0
         for index, frame in enumerate(frames):
-            expected_version = {"epoch": current["epoch"], "tick": current["tick"] + (index + 1) // 2,
-                                "revision": current["revision"] + len(outcomes) if index == 0 else 0}
+            if frame.kind == "post_step":
+                progressed += frame.payload["native_tick_delta"]
+            expected_version = {"epoch": current["epoch"], "tick": current["tick"] + progressed,
+                                "revision": current["revision"] + len(outcomes) if progressed == 0 else 0}
             if (frame.version != expected_version
-                    or frame.payload.get("executed_ticks") != (index + 1) // 2):
+                    or frame.payload.get("executed_ticks") != progressed):
                 raise EvidenceError("source audit ticks do not follow request")
             if frame.kind == "pre_step" and frame.payload.get("requested_ticks") != count:
                 raise EvidenceError("source audit requested budget differs from request")
@@ -601,8 +617,10 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     if target_tick is not None and (type(target_tick) is not int or not 0 <= target_tick <= end_tick):
         raise ValueError("target_tick must be inside the recorded trajectory")
     last_simulation = next((step for step in reversed(trajectory.steps) if step["request"]["method"] in STEP_METHODS), None)
+    terminal_zero_end = (engine_call_mode(trajectory.audit.manifest) and last_simulation is not None
+                         and last_simulation["result"].get("terminal_zero_clock_calls") == 1)
     if (on_takeover is not None and last_simulation is not None and last_simulation["result"]["stop_reason"] == "scene_changed"
-            and (target_tick is None or target_tick == end_tick)):
+            and (target_tick is None or (target_tick == end_tick and not terminal_zero_end))):
         raise ValueError("a terminal scene transition cannot hand off a fight; seek an earlier stable boundary")
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=False)
@@ -613,6 +631,11 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
               "requests": [], "equal": False, "spawn_events_compared": 0, "spawn_exercised": False}
     report["audit_hash_backend"] = hash_backend()
     controlled_draw = draw_mode(trajectory.audit.manifest)
+    controlled_calls = engine_call_mode(trajectory.audit.manifest)
+    report["engine_calls"] = {"mode": controlled_calls or "not_declared", "returned_calls_compared": 0,
+        "clock_steps_compared": 0, "terminal_zero_calls_compared": 0, "last_source_call_id": None,
+        "last_actual_call_id": None, "final_health_verified": False, "source_health": trajectory.audit.engine_call_health,
+        "raw_board_addresses_compared": False}
     report["draw_schedule"] = {"mode": controlled_draw or "legacy_autonomous_draw_schedule",
         "original_engine_bitwise_unmodified": False if controlled_draw else None,
         "warm_receipts_compared": 0, "step_receipts_compared": 0, "terminal_skips_compared": 0,
@@ -662,6 +685,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             required = {"observe", "audit_snapshot"} | {step["request"]["method"] for step in trajectory.steps if step["request"]["method"] in STEP_METHODS}
             if controlled_draw:
                 required.update({"prepare_render", DRAW_SCHEDULE_MODE})
+            if controlled_calls:
+                required.add(ENGINE_CALL_MODE)
             if report["pause_controls"]["recorded"]:
                 # Protocol v1 implements these controller methods, but historic
                 # hello manifests omit their capability keys. Probe status and
@@ -699,16 +724,22 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             snapshot = client.request("audit_snapshot")
             require_equal(live_version, snapshot.get("version"), "initial_snapshot_boundary")
             require_equal(trajectory.initial["state"], snapshot.get("state"), "initial_state")
+            if controlled_calls:
+                validate_engine_origin(snapshot.get("engine_call"))
+                require_equal(trajectory.initial["engine_call_origin"], snapshot["engine_call"], "initial_engine_call_origin")
             report["spawn_comparison"]["initial_state_compared"] = True
             # The actual trace remains independently packageable, including a
             # later branch continuation. It starts at actual B(0), not at the
             # seek target. Preserve the parent link without forging a snapshot.
-            client.trace.emit("replay_initial", {"schema": SCHEMA, "identity": copy.deepcopy(session.identity),
+            actual_marker = {"schema": SCHEMA, "identity": copy.deepcopy(session.identity),
                 "initialization": copy.deepcopy(trajectory.initial["initialization"]),
                 "observation": copy.deepcopy(observation), "state": copy.deepcopy(snapshot["state"]),
                 "parent": {"trajectory_id": trajectory.manifest["trajectory_id"],
                            "branch_id": report["branch_id"], "target_tick": target_tick,
-                           "epoch_mapping": copy.deepcopy(report["epoch_mapping"])}})
+                           "epoch_mapping": copy.deepcopy(report["epoch_mapping"])}}
+            if controlled_calls:
+                actual_marker["engine_call_origin"] = copy.deepcopy(snapshot["engine_call"])
+            client.trace.emit("replay_initial", actual_marker)
             actual_ids = {}
             reached_version = client.version
             source_frame_stream = trajectory.audit._frames(reuse_state=True)
@@ -730,7 +761,10 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 source_before = trajectory.initial["observation"]["version"] if ordinal == 0 else _step_end_version(trajectory.steps[ordinal - 1])
                 require_equal(mapped_version(source_before), client.version, f"request[{ordinal}].before")
                 params = copy.deepcopy(req["params"])
-                partial = req["method"] in STEP_METHODS and target_tick is not None and expected["observation"]["version"]["tick"] > target_tick
+                partial = (req["method"] in STEP_METHODS and target_tick is not None
+                    and (expected["observation"]["version"]["tick"] > target_tick
+                         or (controlled_calls and expected.get("terminal_zero_clock_calls") == 1
+                             and expected["observation"]["version"]["tick"] == target_tick)))
                 if partial:
                     params["max_ticks" if req["method"] == "advance" else "advance_ticks"] = target_tick - client.version["tick"]
                 actual_id = f"replay-{report['branch_id']}-{ordinal}"
@@ -824,6 +858,9 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     count = params["max_ticks" if req["method"] == "advance" else "advance_ticks"]
                     require_equal(count, actual.get("requested_ticks"), "partial.requested_ticks")
                     require_equal(count, actual.get("executed_ticks"), "partial.executed_ticks")
+                    if controlled_calls:
+                        require_equal(count, actual.get("executed_engine_calls"), "partial.executed_engine_calls")
+                        require_equal(0, actual.get("terminal_zero_clock_calls"), "partial.terminal_zero_clock_calls")
                     require_equal("budget_exhausted", actual.get("stop_reason"), "partial.stop_reason")
                     require_equal(expected["action_results"], actual.get("action_results"), "partial.action_results")
                     require_equal({"epoch": live_version["epoch"], "tick": target_tick, "revision": 0},
@@ -832,7 +869,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     wanted = copy.deepcopy(expected)
                     wanted["observation"] = mapped_observation(wanted["observation"])
                     require_equal(wanted, actual, f"request[{ordinal}].result")
-                source_count = actual["executed_ticks"] * 2
+                source_count = actual["executed_engine_calls" if controlled_calls else "executed_ticks"] * 2
                 actual_frames = actual_audit.read_request(actual_id)
                 actual_count = 0
                 last_source_frame = None
@@ -842,6 +879,15 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     require_equal(req["request_id"], left.payload.get("request_id"), "source_frame_request")
                     require_equal(left.kind, right.kind, f"audit[{ordinal}:{index}].phase")
                     require_equal(mapped_version(left.version), right.version, f"audit[{ordinal}:{index}].version")
+                    require_equal(engine_call_semantics(left.payload.get("engine_call"), map_version=mapped_version),
+                                  engine_call_semantics(right.payload.get("engine_call")), f"audit[{ordinal}:{index}].engine_call")
+                    if controlled_calls and right.kind == "post_step":
+                        delta = right.payload["native_tick_delta"]
+                        report["engine_calls"]["returned_calls_compared"] += 1
+                        report["engine_calls"]["clock_steps_compared"] += delta
+                        report["engine_calls"]["terminal_zero_calls_compared"] += int(delta == 0)
+                        report["engine_calls"]["last_source_call_id"] = left.payload["engine_call"]["engine_call_id"]
+                        report["engine_calls"]["last_actual_call_id"] = right.payload["engine_call"]["engine_call_id"]
                     require_equal(render_semantics(left.payload.get("render"), map_version=mapped_version),
                                   render_semantics(right.payload.get("render")), f"audit[{ordinal}:{index}].render")
                     if controlled_draw and right.kind == "post_step":
@@ -884,6 +930,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     source_terminal = _terminal_event(trajectory.audit, req["request_id"], required=True)
                     wanted_payload = copy.deepcopy(source_terminal["payload"])
                     wanted_payload["request_id"] = actual_id
+                    if "engine_call" in wanted_payload:
+                        wanted_payload["engine_call"] = engine_call_semantics(wanted_payload["engine_call"], map_version=mapped_version)
                     require_equal(wanted_payload, actual_terminal["payload"], "terminal_transition.payload")
                     require_equal(mapped_version(source_terminal["version"]), actual_terminal["version"], "terminal_transition.version")
                     report["terminal_transition"] = copy.deepcopy(actual_terminal)
@@ -919,6 +967,12 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             report["takeover"] = {"parent_trajectory_id": trajectory.manifest["trajectory_id"],
                                    "parent_tick": reached_version["tick"], "parent_requests_consumed": len(report["requests"]),
                                    "actual_version": client.version, "epoch_mapping": report["epoch_mapping"]}
+            if controlled_calls:
+                report["takeover"].update(parent_engine_calls_consumed=report["engine_calls"]["returned_calls_compared"],
+                    last_source_call_id=report["engine_calls"]["last_source_call_id"],
+                    last_actual_call_id=report["engine_calls"]["last_actual_call_id"],
+                    terminal_consumed="terminal_transition" in report,
+                    partial_request_ordinal=next((request["ordinal"] for request in report["requests"] if request.get("partial")), None))
             client.trace.emit("replay_takeover" if on_takeover else "replay_completed", report["takeover"])
             # A live consumer can continue with the exact returned epoch/version.
             if on_takeover is not None:
@@ -935,6 +989,9 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             report["spawn_comparison"]["final_health_verified"] = spawn_required
             if controlled_draw:
                 report["draw_schedule"].update(final_health_verified=True, actual_health=closed_audit.draw_health,
+                    health_scope="full_branch" if on_takeover else "executed_prefix")
+            if controlled_calls:
+                report["engine_calls"].update(final_health_verified=True, actual_health=closed_audit.engine_call_health,
                     health_scope="full_branch" if on_takeover else "executed_prefix")
             if on_takeover is None:
                 require_equal(report["spawn_events_compared"], actual_audit.birth_counts["controlled"],
@@ -1091,6 +1148,7 @@ def main(argv: list[str] | None = None) -> int:
             trajectory = Trajectory.load(args.trajectory)
         print(json.dumps({"trajectory_id": trajectory.manifest["trajectory_id"], "requests": len(trajectory.steps),
                           "final_tick": _step_end_version(trajectory.steps[-1])["tick"],
+                          "engine_call_health": trajectory.audit.engine_call_health,
                           "capture_interventions": sum(step["request"]["method"] == "capture_frame" for step in trajectory.steps),
                           "audit_frames": len(trajectory.audit.frames), "original_engine_replay_verified": False}, indent=2))
         return 0

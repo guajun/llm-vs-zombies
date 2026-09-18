@@ -25,7 +25,7 @@ constexpr uintptr_t kPreviousCall=0x516b3c,kCurrentCall=0x516ba5,kSrand=0x61e07a
 constexpr size_t kCapacity=8192;
 struct Registers {uint32_t edi,esi,ebp,espBeforePushad,ebx,edx,ecx,eax,eflags;};
 static_assert(sizeof(Registers)==36);
-struct Boundary {uint64_t tick=0,revision=0;uint32_t epoch=0,phase=0;};
+struct Boundary {uint64_t tick=0,revision=0;uint32_t epoch=0,phase=0;uint64_t engineCallId=0;};
 struct Record {
     Boundary boundary{};
     uint64_t ordinal=0;
@@ -162,9 +162,9 @@ bool RemoveParticleShakeHook(std::string& error) {
     }
     installed=false;lvzParticleSrandTarget=nullptr;error.clear();return true;
 }
-void SetParticleShakeBoundary(uint64_t tick,uint64_t revision,uint32_t epoch,const std::string& phase) {
+void SetParticleShakeBoundary(uint64_t tick,uint64_t revision,uint32_t epoch,const std::string& phase,uint64_t engineCallId) {
     RequireOwner();const uint32_t tag=phase=="pre_step"?1:phase=="request_started"?2:phase=="action"?3:0;
-    if(!tag)throw std::runtime_error("Unsupported particle shake control phase");boundary={tick,revision,epoch,tag};
+    if(!tag)throw std::runtime_error("Unsupported particle shake control phase");boundary={tick,revision,epoch,tag,engineCallId};
 }
 void ClearParticleShakeBoundary() {RequireOwner();boundary={};}
 nlohmann::json DrainParticleShakeEvents() {
@@ -178,6 +178,7 @@ nlohmann::json DrainParticleShakeEvents() {
             {"crossfade_duration",item.crossfade},
             {"factor",item.factor},{"canonical_seed",item.canonical},{"pool_verified",true},{"control_phase",phase},
             {"pool",{{"used",item.pool[1]},{"capacity",item.pool[2]},{"free_head",item.pool[3]},{"count",item.pool[4]},{"next_key",item.pool[5]}}}};
+        semantic["engine_call_id"]=item.boundary.engineCallId?Json(item.boundary.engineCallId):Json(nullptr);
         Json raw=semantic;
         raw["particle_address"]=item.particle;raw["emitter_address"]=item.emitter;raw["system_address"]=item.system;
         raw["holder_address"]=item.holder;raw["pool_block_address"]=item.pool[0];raw["original_seed"]=item.original;

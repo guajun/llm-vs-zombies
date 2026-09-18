@@ -15,7 +15,7 @@ from contextlib import ExitStack, closing
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from llm_vs_zombies.audit_compare import (EvidenceError, first_difference, particle_semantics, spawn_payload_semantics,
-                                        draw_mode, render_semantics)
+                                        draw_mode, render_semantics, engine_call_mode, engine_call_semantics)
 from llm_vs_zombies.engine_replay import Trajectory
 
 
@@ -85,6 +85,14 @@ def _compare(left_path, right_path, *, purpose, ticks, stack):
     report["draw_schedule"] = {"mode": mode or "legacy_autonomous_draw_schedule",
         "warm_receipts_compared": 0, "step_receipts_compared": 0, "terminal_skips_compared": 0,
         "health": [left.audit.draw_health, right.audit.draw_health], "automatic_draw_counters_compared": False}
+    call_mode = engine_call_mode(left.audit.manifest)
+    report["engine_calls"] = {"mode": call_mode or "not_declared", "returned_calls_compared": 0,
+                              "health": [left.audit.engine_call_health, right.audit.engine_call_health]}
+    if call_mode:
+        if not equal(left.initial["engine_call_origin"], right.initial["engine_call_origin"], "initial_engine_call_origin"):
+            return report
+        if any(item.audit.engine_call_health["verified_terminal_zero_calls"] for item in (left, right)):
+            raise EvidenceError("boundary-equivalence is limited to clock steps; use engine replay for zero-clock terminals")
     def relative(trajectory, value):
         origin = trajectory.initial["observation"]["version"]
         if value["epoch"] != origin["epoch"]:
@@ -149,6 +157,18 @@ def _compare(left_path, right_path, *, purpose, ticks, stack):
         if not equal(relative(left, a.version), relative(right, b.version), "boundary_version",
                      tick=expected_tick, phase=expected_kind):
             return report
+        call_facts = []
+        for trajectory, frame in zip((left, right), pair):
+            facts = engine_call_semantics(frame.payload.get("engine_call"), map_version=lambda v: relative(trajectory, v))
+            if facts is not None:
+                # Each request-local index was checked against that recording's
+                # actual grouping. Global ID/counts and measured facts remain.
+                facts.pop("request_call_index")
+            call_facts.append(facts)
+        if not equal(*call_facts, "engine_call", tick=expected_tick, phase=expected_kind):
+            return report
+        if call_mode and expected_kind == "post_step":
+            report["engine_calls"]["returned_calls_compared"] += 1
         seed_calls = []
         for trajectory, frame in zip((left, right), pair):
             seed_calls.append([particle_semantics(event, map_version=lambda v: relative(trajectory, v)) for event in frame.particle_seeds])

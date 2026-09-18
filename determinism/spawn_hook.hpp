@@ -8,7 +8,7 @@ namespace lvz::determinism {
 // Installs two hooks: ZombieInitialize entry and its shared normal epilogue.
 bool InstallSpawnHook(std::string& error);
 bool RemoveSpawnHook(std::string& error);
-void SetSpawnBoundary(uint64_t tick, uint64_t revision, uint32_t segment);
+void SetSpawnBoundary(uint64_t tick, uint64_t revision, uint32_t segment, uint64_t engineCallId=0);
 void ClearSpawnBoundary();
 // Drain after the simulation step, before another step. No serialization or
 // allocation occurs inside the hooked initializer itself.

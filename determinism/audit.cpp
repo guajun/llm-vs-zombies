@@ -6,6 +6,7 @@
 #include "spawn_hook.hpp"
 #include "reanimation_audit.hpp"
 #include "particle_shake.hpp"
+#include "runtime/engine_call.hpp"
 #include <array>
 #include <fstream>
 #include <set>
@@ -18,7 +19,7 @@ constexpr uintptr_t kAppPointer = 0x6a9ec0;
 DWORD ownerThread = 0;
 bool initialized = false;
 uint64_t sequence = 0;
-std::ofstream checksums, changes, events, reanimationHandles, particleSeeds;
+std::ofstream checksums, changes, events, reanimationHandles, particleSeeds, engineCallRaw;
 Json previous;
 ReanimationAuditor reanimationAuditor;
 Json reanimationEvidence;
@@ -81,7 +82,7 @@ void DrainAndCheckSpawns() {
         throw std::runtime_error("ZombieInitialize capture incomplete; strict experiment stopped");
     }
 }
-void SetObservedSpawnBoundary(const Json& version) {
+void SetObservedSpawnBoundary(const Json& version,uint64_t engineCallId) {
     if(!version.is_object() || !version.contains("tick") || !version.contains("revision")
         || !version.contains("epoch")) throw std::runtime_error("Missing controlled spawn boundary version");
     auto integer=[&](const char* key) {
@@ -92,7 +93,7 @@ void SetObservedSpawnBoundary(const Json& version) {
     };
     const auto epoch=integer("epoch");
     if(epoch>UINT32_MAX) throw std::runtime_error("Spawn boundary epoch exceeds supported range");
-    SetSpawnBoundary(integer("tick"),integer("revision"),static_cast<uint32_t>(epoch));
+    SetSpawnBoundary(integer("tick"),integer("revision"),static_cast<uint32_t>(epoch),engineCallId);
 }
 void DrainAndCheckParticleShake() {
     for(auto& item:DrainParticleShakeEvents()) {
@@ -248,6 +249,7 @@ Json ProbeTarget() {
         {"rng_seed",ValidateTargetImage()},
         {"spawn_hook",std::move(spawn)},
         {"particle_shake",ParticleShakeManifest()},{"draw_schedule",lvz::recording::DrawGateManifest()},
+        {"engine_call_boundary",lvz::runtime::EngineCallManifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
 }
 void Initialize(const std::filesystem::path& runDir) {
@@ -257,7 +259,7 @@ void Initialize(const std::filesystem::path& runDir) {
     if(!ValidateTargetImage()) throw std::runtime_error("Unsupported PvZ engine image: deterministic adapter rejected");
     const auto directory=runDir/"audit";
     std::filesystem::create_directories(directory);
-    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl"})
+    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl","engine-call-raw.jsonl"})
         if(std::filesystem::exists(directory/file) && std::filesystem::file_size(directory/file))
             throw std::runtime_error("Audit output already exists; create a fresh run");
     checksums.open(directory/"checksums.jsonl",std::ios::out|std::ios::binary);
@@ -265,7 +267,8 @@ void Initialize(const std::filesystem::path& runDir) {
     events.open(directory/"events.jsonl",std::ios::out|std::ios::binary);
     reanimationHandles.open(directory/"reanimation-handles.jsonl",std::ios::out|std::ios::binary);
     particleSeeds.open(directory/"particle-shake-seeds.jsonl",std::ios::out|std::ios::binary);
-    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds) throw std::runtime_error("Cannot open audit outputs");
+    engineCallRaw.open(directory/"engine-call-raw.jsonl",std::ios::out|std::ios::binary);
+    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds||!engineCallRaw) throw std::runtime_error("Cannot open audit outputs");
     ownerThread=GetCurrentThreadId(); initialized=true; sequence=0;
     previous=nullptr; previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
@@ -417,13 +420,21 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
     DrainAndCheckSpawns();
     DrainAndCheckParticleShake();
     lastObservationVersion=observation.value("version",Json::object());
+    const uint64_t engineCallId=kind=="pre_step"?payload.at("engine_call").at("engine_call_id").get<uint64_t>():0;
     if(kind=="pre_step"||kind=="request_started"||kind=="action") {
-        SetObservedSpawnBoundary(lastObservationVersion);
+        SetObservedSpawnBoundary(lastObservationVersion,engineCallId);
         SetParticleShakeBoundary(lastObservationVersion.at("tick").get<uint64_t>(),lastObservationVersion.at("revision").get<uint64_t>(),
-            lastObservationVersion.at("epoch").get<uint32_t>(),kind);
+            lastObservationVersion.at("epoch").get<uint32_t>(),kind,engineCallId);
     } else {ClearSpawnBoundary();ClearParticleShakeBoundary();}
     Json envelope={{"schema",kSchema},{"seq",sequence++},{"kind",kind},
         {"payload",payload},{"version",lastObservationVersion}};
+    if(kind=="pre_step"||kind=="post_step") {
+        const auto id=payload.at("engine_call").at("engine_call_id");
+        Write(engineCallRaw,{{"schema","lvz.engine-call-raw.v1"},{"seq",envelope.at("seq")},
+            {"kind",kind},{"version",lastObservationVersion},{"engine_call_id",id},
+            {"payload",payload.at("_engine_call_raw")}});
+        envelope["payload"].erase("_engine_call_raw");
+    }
     if(kind!="pre_step"&&kind!="post_step") {
         Write(events,envelope);
         // prepare_render has no request_completed event: its successful RPC
@@ -477,8 +488,8 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
     if(sequence%100==0) Flush();
 }
 void Flush() {
-    RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();particleSeeds.flush();
-    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds) throw std::runtime_error("Audit output flush failed");
+    RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();particleSeeds.flush();engineCallRaw.flush();
+    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds||!engineCallRaw) throw std::runtime_error("Audit output flush failed");
 }
 void Shutdown() {
     if(!initialized) return;
@@ -493,8 +504,8 @@ void Shutdown() {
     std::string error;
     if(!RemoveParticleShakeHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
     if(!RemoveSpawnHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
-    Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();
-    if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()) throw std::runtime_error("Audit output close failed");
+    Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();
+    if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()) throw std::runtime_error("Audit output close failed");
     initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
 }

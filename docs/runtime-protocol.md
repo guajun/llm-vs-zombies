@@ -89,3 +89,93 @@ Before admitting the first mutation, the journal physically allocates a separate
 The journal is scoped to a running process/session. Completed records are synchronously written to the OS file cache, and final seal uses `FlushFileBuffers`; this does **not** implement restart after a process crash or promise survival of an unsealed power loss. An interrupted run retains its lock and failure evidence. Both files are included in the ordinary archive inventory and SHA-256 seal; deterministic replay continues to use the authoritative native audit and session trace. Journal storage and status counters do not enter game-state digests.
 
 The binary format begins with a 64-byte `LVZREQ01` header. Each little-endian 64-byte record header contains `next`, `request`, `epoch`, `bodyHash`, `idHash` (five uint64 values), `kind`, `idBytes`, `bodyBytes`, `reserved` (four uint32 values), and a uint64 header checksum. It is followed by UTF-8 ID bytes and the canonical request or response body. Kind 1 reserves an ID, kind 3 reserves a closing ID, and kind 2 points to its reservation and stores its response. Offset bit 63 selects the reserve file. Record integrity uses FNV-1a-64; archive authenticity/integrity uses the enclosing SHA-256 inventory. No existing recording is automatically reopened or resumed.
+# Controlled original-call boundaries (issue #11)
+
+New recordings explicitly negotiate `game.engine_call_boundary.mode` and
+`capabilities.controlled_engine_call_v1`. The mode is
+`controlled_engine_call_v1`; it requires `deterministic_draw_schedule_v1`.
+The pinned AvZ overlay routes the original `0x452650` update through one checked
+wrapper. A completed engine call means that this invocation entered and
+returned. It does not claim that all internal Board subsystems advanced.
+Initialization, warm drawing, RPCs and action-only requests consume no call IDs.
+The uint64 call IDs increase across controller epochs in the same process.
+
+`pre_step.payload.engine_call` has schema `lvz.engine-call.v1` and:
+
+- `engine_call_id`, `request_call_index` (1-based), and `pre_version`;
+- `lifecycle: "prepared"`, `engine_call_entered: false`,
+  `engine_call_completed: false`;
+- `native_clock_before`, `native_clock_after: null`, `native_tick_delta: null`,
+  `clock_delta_measured: false`, `board_identity_preserved: null`;
+- `ready_before: true`, `game_ui_before: 3`, `clocks_before` (full native
+  game/effect/MJ clock snapshot), `clocks_after: null`;
+- `entered_calls_total` and `returned_calls_total` before this invocation.
+
+The matching post keeps the same ID, request index, pre-version and before
+facts. It reports lifecycle `returned`, both invocation booleans true, actual
+after clocks, ready/UI values, measured delta, Board identity predicate, updated
+global counts and `transition_kind`. No Audit event changes hook labels between
+pre, original update, and the fixed ordinary draw. Spawn and particle semantic
+payloads add `engine_call_id`; their raw evidence contains the same value.
+Initialization/warm/action/request-start payloads carry null. This identity is
+excluded from the existing canonical particle scalar digest and verified
+separately.
+
+The required `audit/engine-call-raw.jsonl` stores one record per pre/post:
+schema `lvz.engine-call-raw.v1`, matching `seq`, `kind`, `version`, top-level
+`engine_call_id`, and payload `{board_address_before, board_address_after}`.
+Pre after-address is null; a verified post has the same nonzero before/after
+address. These addresses are evidence within a process, not cross-process
+semantic state. The internal transport key `_engine_call_raw` is stripped from
+the authoritative semantic events/checksums/deltas and logger records.
+
+Ordinary same-Board ready updates require GameClock delta1 (`clock_step`).
+Same-Board terminal delta1 retains `terminal_clock_step` and one measured tick.
+The new zero-clock admission is narrowly UI3→UI4, same nonnull Board pointer,
+delta0 and a proven completed call with remaining request budget. It records
+`terminal_zero_clock_update`, a complete post state and RNG at the unchanged
+controller tick/revision, followed by `terminal_transition` and a single
+`request_completed` with `stop_reason: "scene_changed"`. The transition reports
+`clock_delta_measured: true`, `tick_delta_verified: false`,
+`terminal_call_verified: true`. A pointer match is not an invented allocator
+generation. Other zero-clock UI pairs remain unsupported.
+
+Both admitted terminal cases use the explicit skipped render receipt (phase
+`terminal`, reason `left_ready_fight`, cache invalidated); no draw count or image
+is fabricated. Further updates/actions stay frozen. Ordinary delta0, negative or
+multiple ticks, changed/null Boards, unmatched calls and invocation faults are
+diagnostic failures. Old recordings, including 025, do not gain this contract
+retroactively.
+If Board/readiness/clock changes outside a measured call while a request is
+pending, the runtime records `engine_call_fault` and returns an error retaining
+actual prior work; it cannot certify a successful terminal call from that change.
+
+Every completed advance/commit result adds `executed_engine_calls`,
+`terminal_zero_clock_calls` and `last_engine_call_id` (null when that request
+returned zero calls). Terminal completions also include `terminal_kind`.
+`executed_ticks` remains measured GameClock progress: E ticks plus one zero-clock
+terminal means E+1 calls. Exact retries/status recover the original journaled
+result and never invoke the engine. Error details following entered/returned
+work retain the actual counts. A nested callback is rejected before scheduling,
+IPC or another update; its fault is deferred until the outer call returns and
+its clocks have been measured. Pre-audit failure does not count an entry, and an
+exception without normal return counts an aborted call rather than a return.
+The run's single successful terminal completion additionally keeps its exact
+canonical request and serialized reply in one bounded recovery slot (each at
+most the journal's 4 MiB body limit). Thus terminal retries/status still work
+after the terminal epoch change and after sealing; conflicting content is
+rejected and no journal write occurs. Other IDs retain their epoch scope.
+
+`audit_snapshot.engine_call` provides actual tracker health outside the game
+state/digest. A fresh initial marker requires all counters zero and no active
+call. The close tail is `recording_closed`, `engine_call_closed`,
+`draw_schedule_closed`, `particle_shake_closed`, `spawn_hook_closed`.
+Engine-call health reports `reserved_calls`, `entered_calls`, `returned_calls`,
+`written_post_boundaries`, `verified_clock_steps`,
+`verified_terminal_zero_calls`, `terminal_clock_steps`, `active_call_id`,
+`faults`, `reentrant_calls`, `wrong_thread_calls`, `aborted_calls`, and `healthy`.
+A healthy strict run requires reserved=entered=returned=written posts,
+returned=clock steps+terminal-zero calls, terminal-zero count at most1, no active
+call and zero faults. Full boundary count is 2×returned calls; draw step count
+is verified clock steps minus terminal clock steps. Wall-clock timing is not a
+substitute for any counter.

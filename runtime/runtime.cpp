@@ -59,6 +59,9 @@ public:
     }
     std::uintptr_t BoardIdentity() const override { return reinterpret_cast<std::uintptr_t>(AGetMainObject()); }
     int NativeTick() const override { return AGetMainObject()?AGetMainObject()->GameClock():0; }
+    bool UsesEngineCallBoundary() const override { return true; }
+    int GameUi() const override { return AGetPvzBase()->GameUi(); }
+    Json NativeClocks() const override { return lvz::determinism::CaptureClocks(); }
     int NativeWave() override { return AGetMainObject()?AGetMainObject()->Wave():0; }
     Json Observe() override {
         Json out={{"game_ui",AGetPvzBase()->GameUi()},{"game_clock",NativeTick()},
@@ -136,7 +139,7 @@ public:
                 {"strict_determinism",false},{"step_clock_guard",true},{"exact_step_live_validated",false},{"native_demo",false},{"initialize",true},
                 {"audit_snapshot",true},{"rng_restore",true},{"rng_seed",true},{"clock_restore",true},{"stop_recording",true},
                 {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false},
-                {"prepare_render",true},{"deterministic_draw_schedule_v1",true}}}};
+                {"prepare_render",true},{"deterministic_draw_schedule_v1",true},{"controlled_engine_call_v1",true}}}};
     }
     bool RequiresRenderPreparation()const override {return true;}
     bool RenderPrepared()const override {return renderPrepared_;}
@@ -247,7 +250,8 @@ public:
         return {{"ok",true},{"state","initializing"},{"completion","configuration_applied; poll observation.initialization for fight readiness"}};
     }
     void Audit(const std::string& kind,const Json& payload,const Json& observation) override {
-        lvz::RecordRuntime(kind,payload.dump());
+        if(payload.contains("_engine_call_raw")) {auto semantic=payload;semantic.erase("_engine_call_raw");lvz::RecordRuntime(kind,semantic.dump());}
+        else lvz::RecordRuntime(kind,payload.dump());
         lvz::determinism::Audit(kind,payload,observation);
     }
 };
@@ -281,8 +285,11 @@ void Shutdown() {
 }
 bool BeforeFrameImpl() {
     if(!controller) return true;
+    // A nested ScriptHook must stop before RunTotal, Boundary or IPC can
+    // mutate/complete the outer call. The outer wrapper reports this fault.
+    if(!controller->GuardEngineEntry())return false;
     CheckThread();
-    if(!CheckPumpGate(*controller,[]{lvz::recording::CheckDrawGate();},[]{server->Drain(*controller);}))return false;
+    if(!CheckPumpGate(*controller,[]{controller->CheckEngineGuard();lvz::recording::CheckDrawGate();},[]{server->Drain(*controller);}))return false;
     if(initializationState=="initializing") FinishContinueDialog();
     bool fight=backend.Ready();
     if(wasFight&&!fight) {
@@ -307,17 +314,11 @@ bool BeforeFrame() {
     try { return BeforeFrameImpl(); }
     catch(const std::exception& error) { if(controller) controller->Fail(error.what());return false; }
 }
-bool BeforeEngineFrame() {
-    if(!controller) return true;
+bool RunOneEngineFrame() {
+    if(!controller) {AAsm::GameTotalLoop();return true;}
     try {
-        CheckThread();controller->Boundary();
-        if(!controller->ShouldStep()) return false;
-        controller->BeforeStep();return true;
+        CheckThread();return controller->RunEngineFrame([] {AAsm::GameTotalLoop();});
     } catch(const std::exception& error) { controller->Fail(error.what());return false; }
-}
-void AfterEngineFrame() {
-    if(controller) try { CheckThread();controller->AfterStep(); }
-    catch(const std::exception& error) { controller->Fail(error.what()); }
 }
 void RecordEnvironmentCollect(uint32_t itemId,int type,int x,int y) {
     if(!controller) return;

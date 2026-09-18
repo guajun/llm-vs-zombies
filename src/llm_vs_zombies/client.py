@@ -238,7 +238,7 @@ def _version(value: Mapping[str, Any]) -> dict[str, int]:
         raise ProtocolError(f"invalid observation version: {error}") from error
 
 
-def _completed_step(method: str, result: dict[str, Any]) -> None:
+def _completed_step(method: str, result: dict[str, Any], *, engine_calls: bool = False) -> None:
     if method not in {"commit", "advance"}:
         return
     try:
@@ -250,6 +250,21 @@ def _completed_step(method: str, result: dict[str, Any]) -> None:
             raise ValueError("missing completed observation")
         if method == "commit" and not isinstance(result["action_results"], list):
             raise ValueError("missing action results")
+        if engine_calls:
+            calls = _integer(result["executed_engine_calls"], "executed_engine_calls")
+            zero = _integer(result["terminal_zero_clock_calls"], "terminal_zero_clock_calls")
+            last = result["last_engine_call_id"]
+            if zero not in (0, 1) or calls != executed + zero or calls > requested:
+                raise ValueError("engine call counts differ from measured progress")
+            if (calls == 0 and last is not None) or (calls > 0 and (type(last) is not int or not 1 <= last <= 0xffffffffffffffff)):
+                raise ValueError("missing or invented last engine call ID")
+            terminal_kind = result.get("terminal_kind")
+            if zero and (executed >= requested or result["stop_reason"] != "scene_changed" or terminal_kind != "terminal_zero_clock_update"):
+                raise ValueError("zero-clock call is not a completed terminal with remaining budget")
+            if result["stop_reason"] == "scene_changed" and not zero and (calls == 0 or terminal_kind != "terminal_clock_step"):
+                raise ValueError("terminal response lacks its measured call kind")
+            if result["stop_reason"] != "scene_changed" and terminal_kind is not None:
+                raise ValueError("nonterminal response claims a terminal call")
     except (KeyError, ValueError) as error:
         raise ProtocolError(f"incomplete {method} response: {error}") from error
 
@@ -337,7 +352,7 @@ class Client:
                 if response.get("ok") is not True or not isinstance(response.get("result"), dict):
                     raise ProtocolError("invalid success response")
                 result = response["result"]
-                _completed_step(method, result)
+                _completed_step(method, result, engine_calls=(self.hello_result or {}).get("game", {}).get("engine_call_boundary", {}).get("mode") == "controlled_engine_call_v1")
                 if controlled_capture:
                     if result.get("forced_render") is not False:
                         raise ProtocolError("controlled capture must not render")

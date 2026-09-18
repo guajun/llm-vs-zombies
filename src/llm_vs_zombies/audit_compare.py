@@ -28,6 +28,8 @@ RAW_ANIMATIONS = "reanimation-handles.jsonl"
 PARTICLE_SHAKE_RAW = "particle-shake-seeds.jsonl"
 PARTICLE_SHAKE_MODE = "deterministic_particle_shake_v1"
 DRAW_SCHEDULE_MODE = "deterministic_draw_schedule_v1"
+ENGINE_CALL_MODE = "controlled_engine_call_v1"
+ENGINE_CALL_RAW = "engine-call-raw.jsonl"
 AUDIT_FILES = ("manifest.json", "events.jsonl", "checksums.jsonl", "state-deltas.jsonl")
 _POINTER_CACHE_SIZE = 16384
 _POINTER_CACHE_MAX_CHARS = 512
@@ -265,6 +267,31 @@ def draw_mode(manifest):
     return DRAW_SCHEDULE_MODE
 
 
+def engine_call_mode(manifest):
+    spec = manifest.get("engine_call_boundary")
+    if spec is None:
+        return None
+    required = {"mode": ENGINE_CALL_MODE, "entry_rva": 0x52650,
+        "invocation_evidence": "checked_wrapper_enter_and_return", "call_id_scope": "process_controlled_calls_only",
+        "counter_bits": 64, "initialization_calls_counted": False, "ordinary_clock_delta": 1,
+        "terminal_zero_clock_update": True, "zero_terminal_ui_pairs": [[3, 4]],
+        "board_identity_basis": "non-null App.Board pointer preserved across the checked call",
+        "internal_board_tick_count_verified": False, "raw_evidence": ENGINE_CALL_RAW}
+    if (not isinstance(spec, dict) or any(first_difference(value, spec.get(key)) for key, value in required.items())
+            or type(spec.get("live_verified")) is not bool or draw_mode(manifest) != DRAW_SCHEDULE_MODE):
+        raise EvidenceError("unsupported controlled engine call contract")
+    return ENGINE_CALL_MODE
+
+
+def validate_engine_origin(value):
+    expected = {"mode": ENGINE_CALL_MODE, "active_call_id": None, "healthy": True}
+    expected.update(dict.fromkeys(("reserved_calls", "entered_calls", "returned_calls", "written_post_boundaries",
+        "verified_clock_steps", "verified_terminal_zero_calls", "terminal_clock_steps", "faults", "reentrant_calls",
+        "wrong_thread_calls", "aborted_calls"), 0))
+    if not isinstance(value, dict) or any(key not in value or first_difference(item, value[key]) for key, item in expected.items()):
+        raise EvidenceError("initial engine call origin is not an actual healthy fresh tracker")
+
+
 def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     """Resolve supported evidence files without trusting a manifest path."""
     draw_mode(manifest)
@@ -301,6 +328,13 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
         result += (PARTICLE_SHAKE_RAW,)
     elif particle_file:
         raise EvidenceError("raw particle shake evidence lacks an explicit engine mode")
+    call_file = (directory / ENGINE_CALL_RAW).is_file()
+    if engine_call_mode(manifest):
+        if not call_file:
+            raise EvidenceError("required raw engine call evidence is missing")
+        result += (ENGINE_CALL_RAW,)
+    elif call_file:
+        raise EvidenceError("raw engine call evidence lacks an explicit engine mode")
     return result
 
 
@@ -482,6 +516,7 @@ class AuditFrame:
     raw_animations: dict | None = None
     particle_seeds: tuple[dict, ...] = ()
     spawn_events: tuple[dict, ...] = ()
+    raw_engine_call: dict | None = None
 
 
 def spawn_payload_semantics(event, frame):
@@ -523,15 +558,29 @@ def spawn_semantics(event, frame, *, map_version=lambda value: value):
     AuditLog._envelope(event)
     if event.get("phase") != "controlled_boundary":
         raise EvidenceError("unassigned initialization history has no replay boundary")
-    return {"version": map_version(event["version"]), "phase": event["phase"],
+    result = {"version": map_version(event["version"]), "phase": event["phase"],
             "native_phase": event["native_phase"], "payload": spawn_payload_semantics(event, frame)}
+    if "engine_call_id" in event:
+        result["engine_call_id"] = event["engine_call_id"]
+    return result
 
 
 def particle_semantics(event, *, map_version=lambda value: value):
     """Exclude raw addresses/global ordinal, retaining actual call order."""
-    return {"version": map_version(event["version"]), "phase": event["phase"],
+    result = {"version": map_version(event["version"]), "phase": event["phase"],
             "native_phase": event["native_phase"],
             "payload": {key: value for key, value in event["payload"].items() if key != "ordinal"}}
+    if "engine_call_id" in event:
+        result["engine_call_id"] = event["engine_call_id"]
+    return result
+
+
+def engine_call_semantics(metadata, *, map_version=lambda value: value):
+    if metadata is None:
+        return None
+    result = copy.deepcopy(metadata)
+    result["pre_version"] = map_version(result["pre_version"])
+    return result
 
 
 def render_semantics(receipt, *, map_version=lambda value: value):
@@ -564,6 +613,7 @@ class _DrawEvidence:
     """One warm operation, one checked receipt per post, bounded terminal tail."""
     def __init__(self, manifest):
         self.target = manifest["target"]
+        self.engine_calls = engine_call_mode(manifest)
         self.preparing = self.warm = self.terminal = self.health = None
         self.warm_frames = self.step_frames = self.posts = self.terminal_skips = 0
         self.terminal_completed = False
@@ -614,7 +664,7 @@ class _DrawEvidence:
         if self.preparing is not None and self.warm is None and kind != "render_prepared":
             if kind not in {"zombie_initialized", "particle_shake_seed"} or event.get("phase") != "initialization":
                 raise EvidenceError("warm drawing contains an unexpected controlled mutation")
-        if self.terminal_completed and kind not in {"recording_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if self.terminal_completed and kind not in {"recording_closed", "engine_call_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("simulation event follows terminal completion")
         if kind == "render_preparing":
             if (self.preparing is not None or self.warm is not None or self.seen_frame
@@ -641,8 +691,9 @@ class _DrawEvidence:
             if (self.terminal is None or self.terminal.get("transition_seen")
                     or event["version"] != self.terminal["version"]
                     or payload.get("request_id") != self.terminal["request_id"]
-                    or payload.get("tick_delta_verified") is not True or payload.get("board_identity_preserved") is not True
-                    or type(payload.get("native_tick_delta")) is not int or payload["native_tick_delta"] != 1):
+                    or payload.get("tick_delta_verified") is not (self.terminal["delta"] == 1)
+                    or payload.get("board_identity_preserved") is not True
+                    or type(payload.get("native_tick_delta")) is not int or payload["native_tick_delta"] != self.terminal["delta"]):
                 raise EvidenceError("terminal draw skip lacks a verified same-Board transition")
             self.terminal["transition_seen"] = True
         elif self.terminal is not None and kind == "request_completed":
@@ -696,7 +747,10 @@ class _DrawEvidence:
             raise EvidenceError("terminal draw skip and audited fight UI disagree")
         self.state(frame.state, receipt)
         if terminal:
-            self.terminal = {"version": frame.version, "request_id": frame.payload["request_id"], "seq": frame.seq}
+            delta = frame.payload["native_tick_delta"]
+            if delta != 1 and not (self.engine_calls and delta == 0):
+                raise EvidenceError("terminal draw skip has no supported measured call")
+            self.terminal = {"version": frame.version, "request_id": frame.payload["request_id"], "seq": frame.seq, "delta": delta}
 
     def initial(self, initial):
         if self.warm is None or initial["observation"]["version"] != self.warm["frame_version"]:
@@ -738,6 +792,154 @@ class _DrawEvidence:
                 or any(type(health.get(key)) is not int or health[key] < 0 for key in ("automatic_allowed", "automatic_denied"))):
             raise EvidenceError("draw schedule close health/count is incomplete or unhealthy")
         self.health = copy.deepcopy(health)
+
+
+class _EngineCallEvidence:
+    """Checked wrapper lifecycle and raw pointers, retaining one pending call."""
+    def __init__(self):
+        self.pre = self.terminal = self.health = None
+        self.board_address = None
+        self.request_id = None
+        self.request_calls = self.request_ticks = self.request_zero = 0
+        self.calls = self.ticks = self.zero = self.terminal_ticks = 0
+        self.terminal_completed = False
+
+    def event(self, event, raw=None):
+        kind, payload = event["kind"], event["payload"]
+        footer = {"recording_closed", "engine_call_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}
+        if self.terminal_completed and kind not in footer:
+            raise EvidenceError("engine event follows terminal completion")
+        if kind in {"particle_shake_seed", "zombie_initialized"}:
+            expected = self.pre["metadata"]["engine_call_id"] if self.pre else None
+            if "engine_call_id" not in payload or first_difference(payload["engine_call_id"], expected):
+                raise EvidenceError("hook engine call identity is missing or assigned to another call")
+            if self.pre and (event.get("phase") != "controlled_boundary" or event.get("version") != self.pre["version"]):
+                raise EvidenceError("hook call lost the active pre-update version")
+            if kind == "particle_shake_seed" and (not isinstance(raw, dict) or "engine_call_id" not in raw.get("payload", {}) or first_difference(raw["payload"]["engine_call_id"], expected)):
+                raise EvidenceError("raw particle call identity differs from its semantic evidence")
+        if kind == "request_started":
+            if (self.pre or self.request_id is not None or self.terminal
+                    or not isinstance(payload.get("request_id"), str) or not payload["request_id"]):
+                raise EvidenceError("engine call request overlaps or follows a terminal")
+            self.request_id = payload["request_id"]
+            self.request_calls = self.request_ticks = self.request_zero = 0
+        elif kind == "action" and self.pre:
+            raise EvidenceError("action interleaved with an active engine call")
+        elif kind == "terminal_transition":
+            terminal = self.terminal
+            if (terminal is None or terminal.get("transition_seen") or self.pre
+                    or event["version"] != terminal["version"] or payload.get("request_id") != self.request_id
+                    or first_difference(payload.get("engine_call"), terminal["metadata"])
+                    or payload.get("terminal_call_verified") is not True or payload.get("clock_delta_measured") is not True
+                    or payload.get("board_identity_preserved") is not True
+                    or type(payload.get("native_tick_delta")) is not int or payload["native_tick_delta"] != terminal["delta"]
+                    or payload.get("tick_delta_verified") is not (terminal["delta"] == 1)
+                    or payload.get("transition_kind") != terminal["metadata"]["transition_kind"]):
+                raise EvidenceError("terminal transition lacks its exact returned engine call")
+            terminal["transition_seen"] = True
+        elif kind == "request_completed":
+            result = payload.get("result", {})
+            expected = {"executed_ticks": self.request_ticks, "executed_engine_calls": self.request_calls,
+                "terminal_zero_clock_calls": self.request_zero, "last_engine_call_id": self.calls if self.request_calls else None}
+            if (self.pre or self.request_id is None or payload.get("request_id") != self.request_id
+                    or any(key not in result or first_difference(value, result[key]) for key, value in expected.items())):
+                raise EvidenceError("completed request counters differ from actual returned call pairs")
+            if self.terminal:
+                if (not self.terminal.get("transition_seen") or self.terminal_completed
+                        or result.get("stop_reason") != "scene_changed"
+                        or result.get("terminal_kind") != self.terminal["metadata"]["transition_kind"]
+                        or event["version"] != self.terminal["version"]
+                        or result.get("observation", {}).get("version") != event["version"]):
+                    raise EvidenceError("terminal call lacks its exact completed result")
+                self.terminal_completed = True
+            elif result.get("stop_reason") == "scene_changed" or "terminal_kind" in result:
+                raise EvidenceError("scene_changed result has no returned terminal call")
+            self.request_id = None
+        if self.terminal and not self.terminal_completed and kind not in {"terminal_transition", "request_completed"}:
+            auxiliary = (kind == "zombie_first_boundary_observed" and not self.terminal.get("transition_seen")
+                and event["version"] == self.terminal["version"] and payload.get("exact_spawn") is False)
+            if not auxiliary:
+                raise EvidenceError("unexpected event before terminal call completion")
+
+    def frame(self, frame, raw):
+        metadata = frame.payload.get("engine_call")
+        if (not isinstance(metadata, dict) or metadata.get("schema") != "lvz.engine-call.v1"
+                or type(metadata.get("engine_call_id")) is not int or not 1 <= metadata["engine_call_id"] <= 0xffffffffffffffff
+                or self.terminal or self.request_id is None or frame.payload.get("request_id") != self.request_id):
+            raise EvidenceError("missing, misplaced, or invalid engine call metadata")
+        if (not isinstance(raw, dict) or raw.get("schema") != "lvz.engine-call-raw.v1"
+                or any(key not in raw or first_difference(raw[key], value) for key, value in {"seq": frame.seq, "kind": frame.kind,
+                    "version": frame.version, "engine_call_id": metadata["engine_call_id"]}.items())
+                or not isinstance(raw.get("payload"), dict) or set(raw["payload"]) != {"board_address_before", "board_address_after"}):
+            raise EvidenceError("raw engine call boundary/ID mismatch")
+        address, after_address = raw["payload"]["board_address_before"], raw["payload"]["board_address_after"]
+        if type(address) is not int or not 1 <= address <= 0xffffffff:
+            raise EvidenceError("raw engine call Board address is not non-null uint32")
+        clocks = _state_clocks(frame.state)
+        ui = frame.state.get("app", {}).get("ui")
+        if any(type(clocks[key]) is not int or not 0 <= clocks[key] <= 0xffffffff for key in ("game_clock", "effect_clock", "mj_clock")):
+            raise EvidenceError("engine call lacks captured uint32 clocks")
+        if frame.kind == "pre_step":
+            expected = {"engine_call_id": self.calls + 1, "request_call_index": self.request_calls + 1,
+                "pre_version": frame.version, "lifecycle": "prepared", "native_clock_before": clocks["game_clock"],
+                "native_clock_after": None, "native_tick_delta": None, "clock_delta_measured": False,
+                "engine_call_entered": False, "engine_call_completed": False, "board_identity_preserved": None,
+                "ready_before": True, "game_ui_before": 3, "clocks_before": clocks, "clocks_after": None,
+                "entered_calls_total": self.calls, "returned_calls_total": self.calls}
+            budget = frame.payload.get("requested_ticks")
+            if (self.pre or ui != 3 or after_address is not None or type(budget) is not int or budget <= self.request_ticks
+                    or (self.board_address is not None and address != self.board_address)
+                    or frame.payload.get("executed_ticks") != self.request_ticks
+                    or any(key not in metadata or first_difference(value, metadata[key]) for key, value in expected.items())):
+                raise EvidenceError("engine call preparation, budget, or counter evidence is inconsistent")
+            self.board_address = address
+            self.pre = {"metadata": copy.deepcopy(metadata), "version": copy.deepcopy(frame.version),
+                        "address": address, "budget": budget}
+            return
+        if self.pre is None:
+            raise EvidenceError("returned engine call has no prepared pair")
+        before = self.pre["metadata"]
+        delta = clocks["game_clock"] - before["native_clock_before"]
+        terminal = ui != 3
+        zero = delta == 0 and ui == 4
+        if delta != 1 and not zero:
+            raise EvidenceError("unsupported zero/negative/multiple engine clock update")
+        transition = "terminal_zero_clock_update" if zero else "terminal_clock_step" if terminal else "clock_step"
+        expected = dict(before, lifecycle="returned", native_clock_after=clocks["game_clock"], native_tick_delta=delta,
+            clock_delta_measured=True, engine_call_entered=True, engine_call_completed=True, board_identity_preserved=True,
+            ready_after=not terminal, game_ui_after=ui, clocks_after=clocks, transition_kind=transition,
+            entered_calls_total=self.calls + 1, returned_calls_total=self.calls + 1)
+        if (any(key not in metadata or first_difference(value, metadata[key]) for key, value in expected.items())
+                or address != self.pre["address"] or type(after_address) is not int or after_address != address
+                or type(frame.payload.get("native_tick_delta")) is not int or frame.payload["native_tick_delta"] != delta
+                or frame.payload.get("executed_ticks") != self.request_ticks + delta):
+            raise EvidenceError("returned engine call facts differ from its pre/post/raw state")
+        self.calls += 1
+        self.ticks += delta
+        self.zero += int(zero)
+        self.terminal_ticks += int(terminal and delta == 1)
+        self.request_calls += 1
+        self.request_ticks += delta
+        self.request_zero += int(zero)
+        self.pre = None
+        if terminal:
+            self.terminal = {"metadata": copy.deepcopy(metadata), "version": copy.deepcopy(frame.version), "delta": delta}
+
+    def finish(self):
+        if self.pre or (self.terminal and not self.terminal_completed):
+            raise EvidenceError("engine call has an unfinished returned/terminal boundary")
+
+    def close(self, event, draw):
+        value = event["payload"]
+        expected = {"mode": ENGINE_CALL_MODE, "reserved_calls": self.calls, "entered_calls": self.calls,
+            "returned_calls": self.calls, "written_post_boundaries": self.calls, "verified_clock_steps": self.ticks,
+            "verified_terminal_zero_calls": self.zero, "terminal_clock_steps": self.terminal_ticks,
+            "active_call_id": None, "faults": 0, "reentrant_calls": 0, "wrong_thread_calls": 0, "aborted_calls": 0, "healthy": True}
+        if (self.request_id is not None or self.zero + self.terminal_ticks > 1
+                or any(key not in value or first_difference(item, value[key]) for key, item in expected.items())
+                or draw is None or draw.step_frames != self.ticks - self.terminal_ticks):
+            raise EvidenceError("engine call close health does not account for every returned call and draw")
+        self.health = copy.deepcopy(value)
 
 
 class _ParticleEvidence:
@@ -806,7 +1008,7 @@ class _ParticleEvidence:
 
 class _EventSummary:
     def __init__(self):
-        self.tail = deque(maxlen=4)
+        self.tail = deque(maxlen=5)
         self.birth_count = 0
         self.controlled_birth_count = 0
         self.initialization_birth_count = 0
@@ -820,9 +1022,9 @@ class _EventSummary:
             raise EvidenceError("native animation link fault invalidates strict evidence")
         if event["seq"] < self.last_seq:
             raise EvidenceError("audit event sequence moved backwards")
-        if self.recording_closed and event["kind"] not in {"draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if self.recording_closed and event["kind"] not in {"engine_call_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("native event after recording close")
-        if not self.recording_closed and event["kind"] in {"draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if not self.recording_closed and event["kind"] in {"engine_call_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("native hook close precedes recording close")
         self.last_seq = event["seq"]
         if event["kind"] == "zombie_initialized":
@@ -838,7 +1040,7 @@ class _EventSummary:
         self.count += 1
 
 
-def _closed_events(summary, *, particle=None, draw=None, spawn_required=False):
+def _closed_events(summary, *, particle=None, draw=None, calls=None, spawn_required=False):
     """Validate the declared close sequence and all hook health summaries."""
     final = list(summary.tail)
     if spawn_required and (not final or final[-1]["kind"] != "spawn_hook_closed"):
@@ -870,6 +1072,15 @@ def _closed_events(summary, *, particle=None, draw=None, spawn_required=False):
         final = final[:-1]
     elif any(event["kind"] == "draw_schedule_closed" for event in final):
         raise EvidenceError("draw close has no declared engine mode")
+    if calls is not None:
+        if not final or final[-1]["kind"] != "engine_call_closed":
+            raise EvidenceError("required engine call close health is missing")
+        calls.close(final[-1], draw)
+        if len(final) < 2 or final[-1]["version"] != final[-2]["version"]:
+            raise EvidenceError("engine call close differs from recording close")
+        final = final[:-1]
+    elif any(event["kind"] == "engine_call_closed" for event in final):
+        raise EvidenceError("engine call close lacks an explicit mode")
     if not final or final[-1]["kind"] != "recording_closed":
         raise EvidenceError("native recording lacks a completed recording_closed boundary")
 
@@ -1030,11 +1241,12 @@ class _AnimationDecoder:
 
 
 class _FrameDecoder:
-    def __init__(self, *, reuse_state=False):
+    def __init__(self, *, reuse_state=False, engine_calls=False):
         self.state = None
         self.previous = None
         self.cache = {}
         self.reuse_state = reuse_state
+        self.engine_calls = engine_calls
 
     def accept(self, hashes, delta):
         AuditLog._envelope(hashes)
@@ -1087,7 +1299,8 @@ class _FrameDecoder:
             if previous is None or previous.kind != "pre_step":
                 raise EvidenceError("missing pre_step")
             before, after = previous.version, frame.version
-            if (after["epoch"] != before["epoch"] or after["tick"] != before["tick"] + 1
+            zero_candidate = self.engine_calls and frame.payload.get("native_tick_delta") == 0 and after == before
+            if not zero_candidate and (after["epoch"] != before["epoch"] or after["tick"] != before["tick"] + 1
                     or after["revision"] != 0 or frame.payload.get("native_tick_delta") != 1
                     or frame.payload.get("request_id") != previous.payload.get("request_id")):
                 raise EvidenceError("invalid actual one-tick audit boundary")
@@ -1102,7 +1315,8 @@ class _FrameDecoder:
 class _AuditStreamDecoder:
     """Single merge cursor: one state, one frame of seeds, and small counters."""
     def __init__(self, manifest, files, *, reuse_state):
-        self.frames = _FrameDecoder(reuse_state=reuse_state)
+        self.calls = _EngineCallEvidence() if engine_call_mode(manifest) else None
+        self.frames = _FrameDecoder(reuse_state=reuse_state, engine_calls=self.calls is not None)
         self.animation = _AnimationDecoder(manifest) if RAW_ANIMATIONS in files else None
         self.particle = _ParticleEvidence() if PARTICLE_SHAKE_RAW in files else None
         self.draw = _DrawEvidence(manifest) if draw_mode(manifest) else None
@@ -1118,6 +1332,10 @@ class _AuditStreamDecoder:
 
     def event(self, event, raw):
         self.summary.accept(event)
+        if self.calls:
+            self.calls.event(event, raw)
+        elif event["kind"] == "engine_call_closed" or "engine_call" in event["payload"] or "engine_call_id" in event["payload"]:
+            raise EvidenceError("engine call metadata lacks its declared mode")
         if self.draw:
             self.draw.event(event)
         elif event["kind"] in {"render_preparing", "render_prepared", "draw_schedule_closed"}:
@@ -1158,6 +1376,11 @@ class _AuditStreamDecoder:
         if self.summary.recording_closed:
             raise EvidenceError("native frame after recording close")
         frame = self.frames.accept(records[0], records[1])
+        if self.calls:
+            self.calls.frame(frame, records[-1])
+            frame = replace(frame, raw_engine_call=records[-1])
+        elif "engine_call" in frame.payload:
+            raise EvidenceError("engine call frame lacks its declared mode")
         if self.draw:
             self.draw.frame(frame)
         elif "draw_schedule" in frame.state or "render" in frame.payload:
@@ -1196,6 +1419,8 @@ class _AuditStreamDecoder:
 
     def finish(self, *, final=False):
         self.frames.finish()
+        if self.calls:
+            self.calls.finish()
         if self.draw:
             self.draw.finish()
         if final and self.pending:
@@ -1211,6 +1436,8 @@ def _walk_audit(decoder, read, *, retain_event=None, request_id=None, constrain_
     names = ["checksums.jsonl", "state-deltas.jsonl"]
     if decoder.animation:
         names.append(RAW_ANIMATIONS)
+    if decoder.calls:
+        names.append(ENGINE_CALL_RAW)
     frame_readers = [iter(read(name)) for name in names]
     rows = zip_longest(*frame_readers)
     raw = iter(read(PARTICLE_SHAKE_RAW)) if decoder.particle else iter(())
@@ -1230,18 +1457,27 @@ def _walk_audit(decoder, read, *, retain_event=None, request_id=None, constrain_
         return records
 
     try:
+        pending_terminal = None
         event, records = next_event(), next_frame()
         while event is not None or records is not None:
             if records is not None and (event is None or records[0]["seq"] <= event["seq"]):
+                if pending_terminal is not None:
+                    raise EvidenceError("new frame precedes zero terminal verification")
                 frame = decoder.frame(records)
                 if constrain_request and frame.payload.get("request_id") != request_id:
                     raise EvidenceError("unexpected intervening request in live frame audit")
-                yield frame
+                if decoder.calls and frame.kind == "post_step" and frame.payload["native_tick_delta"] == 0:
+                    pending_terminal = frame
+                else:
+                    yield frame
                 records = next_frame()
             else:
                 decoder.event(event, next(raw, None) if event["kind"] == "particle_shake_seed" else None)
                 if retain_event is not None and event["kind"] != "particle_shake_seed":
                     retain_event(event)
+                if pending_terminal is not None and decoder.calls.terminal_completed:
+                    yield pending_terminal
+                    pending_terminal = None
                 event = next_event()
         if next(raw, None) is not None:
             raise EvidenceError("particle shake semantic/raw record count mismatch")
@@ -1317,11 +1553,11 @@ class AuditLog:
             self._request_frames.setdefault(rid, []).append(header)
             self._frame_indices.setdefault(rid, []).append(index)
         decoder.finish(final=True)
-        self._particle, self._summary, self._draw = decoder.particle, decoder.summary, decoder.draw
+        self._particle, self._summary, self._draw, self._calls = decoder.particle, decoder.summary, decoder.draw, decoder.calls
         self.peak_pending_particle_calls = decoder.peak_pending
         self.frames = FrameSelection(self)
         if require_closed:
-            _closed_events(self._summary, particle=self._particle, draw=self._draw,
+            _closed_events(self._summary, particle=self._particle, draw=self._draw, calls=self._calls,
                            spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
 
     def _retain_event(self, event):
@@ -1353,6 +1589,10 @@ class AuditLog:
         return copy.deepcopy(self._draw.health) if self._draw else None
 
     @property
+    def engine_call_health(self):
+        return copy.deepcopy(self._calls.health) if self._calls else None
+
+    @property
     def control_events(self):
         """Verified control/birth index, excluding high-volume particle calls."""
         self.events.verify()
@@ -1364,7 +1604,7 @@ class AuditLog:
             raise EvidenceError("invalid native audit schema/sequence")
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
-        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault"}:
+        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault"}:
             raise EvidenceError("native hook fault invalidates strict evidence")
         if record["kind"] == "particle_shake_seed":
             if record.get("native_phase") != "before_srand" or record.get("phase") not in {"controlled_boundary", "initialization"}:
@@ -1439,6 +1679,7 @@ class AuditTail:
         self._stream = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True)
         self._decoder, self._animation, self._particle = self._stream.frames, self._stream.animation, self._stream.particle
         self._draw = self._stream.draw
+        self._calls = self._stream.calls
         self._identities = {}
         self._requests, self._request_frames = {}, {}
         self.events = _ConsumedEventStream(self)
@@ -1463,6 +1704,10 @@ class AuditTail:
     @property
     def draw_health(self):
         return copy.deepcopy(self._draw.health) if self._draw else None
+
+    @property
+    def engine_call_health(self):
+        return copy.deepcopy(self._calls.health) if self._calls else None
 
     def _check_file(self, name, *, required_size=None):
         stat = (self.directory / name).stat()
@@ -1553,7 +1798,7 @@ class AuditTail:
         for _ in self.read_request(None):
             raise EvidenceError("unexpected unconsumed frames at recording close")
         self._stream.finish(final=True)
-        _closed_events(self._stream.summary, particle=self._particle, draw=self._draw,
+        _closed_events(self._stream.summary, particle=self._particle, draw=self._draw, calls=self._calls,
                        spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
         for name, position in self._positions.items():
             if self._check_file(name).st_size != position:
@@ -1590,6 +1835,10 @@ def compare_audits(expected: AuditLog, actual: AuditLog, *,
                                       render_semantics(b.payload.get("render"), map_version=unname_epoch))
         if difference:
             return {"equal": False, "reason": "render", "index": index, "difference": difference}
+        difference = first_difference(engine_call_semantics(a.payload.get("engine_call"), map_version=unname_epoch),
+                                      engine_call_semantics(b.payload.get("engine_call"), map_version=unname_epoch))
+        if difference:
+            return {"equal": False, "reason": "engine_call", "index": index, "difference": difference}
         difference = first_difference([particle_semantics(event, map_version=unname_epoch) for event in a.particle_seeds],
                                       [particle_semantics(event, map_version=unname_epoch) for event in b.particle_seeds])
         if difference:

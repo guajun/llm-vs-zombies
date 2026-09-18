@@ -1,6 +1,7 @@
 #pragma once
 #include <nlohmann/json.hpp>
 #include "request_journal.hpp"
+#include "engine_call.hpp"
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -17,6 +18,9 @@ struct Backend {
     virtual std::uintptr_t BoardIdentity() const = 0;
     virtual int NativeTick() const = 0;
     virtual int NativeWave() { return Observe().value("wave",0); }
+    virtual bool UsesEngineCallBoundary() const { return false; }
+    virtual int GameUi() const { return Ready()?3:0; }
+    virtual Json NativeClocks() const { return {{"game_clock",NativeTick()}}; }
     virtual Json Observe() = 0;
     virtual Json Execute(const Json& action) = 0;
     virtual Json Hello() = 0;
@@ -48,6 +52,11 @@ public:
     bool ShouldStep() const;
     void BeforeStep();
     void AfterStep();
+    // The production wrapper and fixtures share this actual callback boundary.
+    bool RunEngineFrame(const std::function<void()>& originalUpdate);
+    bool GuardEngineEntry() { return engineCalls_.GuardEntry(); }
+    void CheckEngineGuard() const { if(engineCalls_.Faulted())throw std::runtime_error("Engine invocation guard fault"); }
+    Json EngineCallHealth() const { return engineCalls_.Health(); }
     void Stop(const std::string& reason);
     void Disconnect(const std::string& requestId);
     void Fail(const std::string& message);
@@ -60,7 +69,8 @@ public:
 private:
     struct Entry { std::string payload; std::optional<Json> response; std::vector<Reply> waiters; uint64_t token=0; };
     struct CaptureEntry { std::string payload; std::optional<Json> response; };
-    struct Pending { std::string key; std::string id; int requested=0; int executed=0; int startWave=0; bool untilWave=false; Json actions=Json::array(); };
+    struct Pending { std::string key; std::string id; int requested=0; int executed=0; int startWave=0; bool untilWave=false; Json actions=Json::array();
+        uint64_t calls=0,terminalZero=0,lastCall=0;std::string terminalKind; };
     Backend& backend_;
     RequestJournal journal_;
     uint64_t epoch_=1, tick_=0, revision_=0;
@@ -76,6 +86,17 @@ private:
     std::map<std::string, CaptureEntry> captureCache_;
     std::deque<std::string> captureResponses_;
     std::optional<Pending> pending_;
+    // Only one terminal transition can occur in a frozen run. Keep its exact
+    // serialized reply recoverable after Boundary advances the epoch.
+    struct TerminalReply {std::string id,canonical,response;};
+    std::optional<TerminalReply> terminalReply_;
+    EngineCallTracker engineCalls_;
+    uint64_t activeCall_=0;
+    bool wrapperActive_=false;
+    int preUi_=0;
+    uintptr_t preBoard_=0;
+    Json callMetadata_,callRaw_;
+    Json CallCounts(const Pending& pending) const;
     void Complete(const std::string& key, Json response, bool seal=false);
     void StorageFail(const std::string& message);
     void Finish(const std::string& reason);

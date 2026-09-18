@@ -102,7 +102,7 @@ manifest/hello 的完整 `draw_schedule` 规范进入轨迹 identity。初态必
 
 每个普通 `post_step.payload.render` 必须含且仅代表一次 step 绘制：精确 frame_version、native clock、前后完整 clock、RNG 摘要、像素格式及累计计数。读取器把这些值与当前全状态、warm 和全部先前 receipt 核对；重放还逐项比较 receipt，只映射 epoch 和初始化 revision。绘制期间发生的出生和粒子调用仍属于同一 pre→post 更新边界，照常逐条比较，不能因 controller tick 已增加而改绑到下一帧。未声明模式却出现新 receipt、缺失、重复、错序或计数不符均拒绝。
 
-同 Board 的已验证 +1 终局可以有明确的 `phase:terminal, skipped:true, reason:left_ready_fight, cache_invalidated:true` receipt。此时 audited UI 已离开战斗，step_frames 不增加；同请求随后必须有唯一 verified terminal_transition 和 scene_changed completion。对应 post 生成的只读 first-boundary birth 注释可以出现在两者之间，真正的出生初始化、粒子调用或新动作不可以。普通战斗不能借此跳过绘制，零 GameClock 增量的终局仍拒绝。
+同 Board 的已验证 +1 终局可以有明确的 `phase:terminal, skipped:true, reason:left_ready_fight, cache_invalidated:true` receipt。此时 audited UI 已离开战斗，step_frames 不增加；同请求随后必须有唯一 verified terminal_transition 和 scene_changed completion。对应 post 生成的只读 first-boundary birth 注释可以出现在两者之间，真正的出生初始化、粒子调用或新动作不可以。普通战斗不能借此跳过绘制。零 GameClock 增量仅在下述独立调用协议完整成立时支持；只有 draw_schedule 的旧模式仍拒绝。
 
 源和实际记录都必须以健康的 `draw_schedule_closed` 封口，验证 controlled_calls = warm_frames + step_frames 及零 fault/wrong_thread。`automatic_allowed/automatic_denied` 是墙钟调度诊断，完整保存但不要求跨进程相等。报告 `draw_schedule` 分别给出 warm/step/terminal-skip 的实际比较次数、源/实际健康摘要及比较范围；seek 只比较实际重算前缀，分支回调后的健康摘要明确标作 full_branch。
 
@@ -152,6 +152,22 @@ replayer 比较末帧状态及转场字段，然后刷新观察以获取 Control
 
 支持终局审计不等于自动判定已完成两旗。实验运行器仍需证明场景、实际观察到第 20 波及完成轮数增长，并执行多次冷启动和暂停扰动验收。
 
+## 已返回调用与零时钟终局
+
+`engine_call_boundary.mode:controlled_engine_call_v1` 显式区分实际返回的一次原版外层更新和 GameClock 推进。它要求同时启用固定绘制模式；普通步骤继续严格 +1。仅同一非空 Board、实际 UI3→4、时钟确实测得不变、checked wrapper 进入并返回一次、调用前仍有预算的最终更新可以是 `terminal_zero_clock_update`。UI3→2 的零增量、仍在战斗的零增量、Board 释放/替换、负增量或多增量仍拒绝。该模式是调用控制流证据，不等同于每个内部 Board 子系统都走了一次正常 tick。
+
+`audit_snapshot.engine_call` 的真实初始 tracker 保存到 `initial.engine_call_origin`，与原游戏 state/digest 分开；严格冷启动要求所有调用计数为0且健康、没有活动调用。每个 pre/post 的 `payload.engine_call` 保存连续 uint64 调用 ID、请求内 call index、原 pre_version、prepared/returned 生命周期、实际 UI/ready/clock、进入/返回总数。pre 是调用前的准备事实，不能当作已经进入；post 必须证明对应调用确实返回。初始化、warm、动作、截图、status 和同 ID 重试不占用调用序号。
+
+`engine-call-raw.jsonl` 是新模式的必需旁证，每个 pre/post 一条，绑定 seq/kind/version/engine_call_id，原样保留 Board 的 before/after 地址。读取器核对同运行的非空指针一致关系，正常轨迹中的同一 Board 地址不得在调用间悄然改变；不同冷进程的地址数值不比较。旁证与其他 audit 文件一起复制并绑定 SHA-256，缺失、少行、多行、错 ID、错版本、替换或截断均拒绝。粒子/出生的 `payload.engine_call_id` 在 update 和 draw 期间必须指向同一个 pre；初始化、warm 和动作阶段必须为 null。原始粒子旁证保存同样的 call ID，原有 RNG、初始属性、动画与事件顺序检查保持不变。
+
+设请求实际推进 E 个 GameClock ticks，并以 Z 次零增量终局结束（Z 为0或1），则调用数 C=E+Z，原生 pre/post 数为2C。真实响应保留 `executed_ticks:E`，另给 `executed_engine_calls:C`、`terminal_zero_clock_calls:Z`、`last_engine_call_id`（C0时为null）。E0终局的动作仍已实际执行，post 保持动作后的同 tick/revision；不能将它补成 +1，也不能跳过最后两个真实状态。零终局 post 必须等同调用 terminal_transition 和 scene_changed completion 核验后才交给流式比较者；未确认的候选不会先发布为有效帧。
+
+封口顺序为 `recording_closed → engine_call_closed → draw_schedule_closed → particle_shake_closed → spawn_hook_closed`（只出现实际协商的钩子尾部）。调用健康必须证明 reserved=entered=returned=written_post，returned=verified_clock_steps+verified_terminal_zero_calls，无活动/中断/重入/错误线程/故障。固定绘制次数满足 step_frames=verified_clock_steps-terminal_clock_steps：两种终局都明确跳过绘制、失效缓存，而不虚构画面或增加 draw ordinal。报告 `engine_calls` 保存比较调用数、真实 ticks、零终局数、最后源/实际 ID 和双方健康摘要。
+
+按 tick seek 始终停在**第一次** B(t)。若单个请求包含 E 个普通 tick 和最后一个零时钟终局，seek 恰好等于该请求的末 tick 仍把实际预算截成 E，从而不执行多出来的终局调用；E0 时整个请求及其同 tick 动作都不执行。完整 replay 不传 target，才消费该末调用。接管报告保存已消费调用数、末 ID、部分请求位置与 terminal_consumed；正常 +1 终局后的接管仍拒绝，零时钟终局之前的首次 B(t) 可接管。分支关闭后继续完整核验整个实际分支，不能用已经匹配的前缀掩盖后续坏证据。
+
+旧025没有这些原生调用身份和返回计数，继续作为 terminal_unverified 失败诊断归档，不追造 ID 或修改原 manifest。新模式必须重新录制并冷重放真实终局后才有实机证据。复现 game loss 也不满足两旗成功门槛。`check-boundary-equivalence.py` 的 batch/schedule/render 仍限定普通时钟步区间；请求内 call index 各自核对后允许因分组不同而不同，其余调用事实与全局顺序仍比较。含零时钟终局的比较应使用完整 engine replay。
+
 ## 单步/批量与录像干预的独立验收
 
 `tools/check-boundary-equivalence.py` 只读取两份已封包的真实记录，不启动游戏。两组都应从独立冷启动开始，用同一 DLL、游戏/资源/存档散列、seed、初始化配方与 clock anchor；先验证初态相同，再执行确定的测试输入。组间的运行时间、请求 ID 和推进预算无需相同。
@@ -186,7 +202,7 @@ python tools/check-boundary-equivalence.py work/capture-off-trajectory work/capt
 
 逐帧还将语义事件重新计算成原生累计 FNV1a64 摘要，核对 state 的 `particle_shake.controlled_calls/controlled_digest`。摘要只输入实际种子相关标量，避免混入不同运行的 epoch 名称；边界版本和 control_phase 仍单独按重放映射精确比较。任何完整粒子 ID、年龄、调用次数/顺序或 canonical_seed 的差异都会失败，CRT RNG 字段继续完整比较。原始地址种子无需跨进程相等，但不会从证据中删除。
 
-该模式的正式封包要求关闭顺序为 `recording_closed → particle_shake_closed → spawn_hook_closed`（没有出生钩子的测试适配器可省去最后一项）。健康摘要必须 installed/healthy 为真、queued/wrong_thread_calls/faults/overflow 为零、captured 与全部事件数一致、controlled_calls 与受控事件数一致。实际重放也在 initializer 完成关闭后增量读取健康尾部，缺尾部或溢出都不发布 equal。`replay-report.json.particle_shake` 记录模式、比较调用数、原始地址未跨进程比较，以及实际关闭健康是否已验证。初始化无边界调用保留为初始化证据；受控帧开始后再丢失边界，或种子调用没有后续受审计边界，都会停止严格校验。
+该模式的正式封包要求按协商能力关闭：基础顺序为 `recording_closed → particle_shake_closed → spawn_hook_closed`，新模式在 recording_closed 后依次插入 engine_call_closed、draw_schedule_closed。没有对应钩子的测试适配器可省去其尾部。健康摘要必须 installed/healthy 为真、queued/wrong_thread_calls/faults/overflow 为零、captured 与全部事件数一致、controlled_calls 与受控事件数一致。实际重放也在 initializer 完成关闭后增量读取健康尾部，缺尾部或溢出都不发布 equal。`replay-report.json.particle_shake` 记录模式、比较调用数、原始地址未跨进程比较，以及实际关闭健康是否已验证。初始化无边界调用保留为初始化证据；受控帧开始后再丢失边界，或种子调用没有后续受审计边界，都会停止严格校验。
 
 支持动画身份归一化的记录在 `coverage.reanimations.raw_handle_evidence` 声明必需的 `audit/reanimation-handles.jsonl`。该旁证和 checksum/delta 每条 pre/post 的 schema、seq、kind、version、payload 一一对应，使用首态加 JSON Patch 保留原始句柄、槽位及代次、分配池、归属关系。封包复制该文件并绑定 SHA-256；读取器重建旁证，核对原始查找结果、全部 owner 路径、归一化引用与共享节点关系。缺失、截断、数量/边界不符、无效 patch、损坏查找或原生 link fault 都立即拒绝。实际重放的增量 `AuditTail` 执行相同验证。
 
@@ -233,6 +249,7 @@ python -m llm_vs_zombies.engine_replay demo work/replay-demo
 python -m unittest discover -s tests -p test_engine_replay.py -v
 python -m unittest discover -s tests -p test_audit_compare.py -v
 python -m unittest discover -s tests -p test_draw_schedule.py -v
+python -m unittest discover -s tests -p test_engine_calls.py -v
 ```
 
 demo 明确使用 synthetic counter，创建两个独立计数器实例并经过真实 Client/SessionTrace/封装/重放路径。它不启动游戏。测试覆盖失败动作的原顺序、同帧 revision、epoch 映射、从头 seek、父分支身份、首个隐藏字段差异、实际响应差异、资产篡改、源记录缺失和已验证/未验证的终局。捕获测试还覆盖强制绘制影响隐藏状态、明确失败与未知结果、轻量/旧版像素证据、保护字段变化，以及图像不同但状态和元数据一致的合法重放。原版冷启动、两旗与扰动证据由独立实机验收提供。

@@ -62,12 +62,13 @@ int main() {using namespace lvz::determinism;try {
     std::string error;Check(!ValidateParticleShakeTarget(),"fixture unexpectedly identified as PvZ");
     Check(!InstallParticleShakeHookForTest(0,0,0,0,error),"invalid target accepted");
     Setup();CallFixture();std::array<uint8_t,560> baseline{};std::memcpy(baseline.data(),fixtureResult,baseline.size());
-    Install();SetParticleShakeBoundary(10,2,3,"pre_step");Setup();SetLastError(1234);CallFixture();
+    Install();SetParticleShakeBoundary(10,2,3,"pre_step",0x100000001ull);Setup();SetLastError(1234);CallFixture();
     Check(GetLastError()==1234,"hook leaked Win32 LastError");
     for(size_t n=0;n<36;++n)if(n<12||n>=16)Check(fixtureResult[n]==baseline[n],"hook changed GPR/flags");
     for(size_t n=48;n<560;++n)Check(fixtureResult[n]==baseline[n],"hook changed x87/XMM state");
     Check(fixtureSrandCalls==2&&fixtureCrt==0x3e90000,"original srand did not receive canonical seed");
     auto events=DrainParticleShakeEvents();Check(events.size()==2,"missing seed events");
+    for(const auto& event:events)Check(event["semantic"]["engine_call_id"]==0x100000001ull&&event["raw"]["engine_call_id"]==0x100000001ull,"Particle/raw lost 64-bit call association");
     Check(events[0]["semantic"]["factor"]==0&&events[1]["semantic"]["factor"]==1,"age factor incorrect");
     Check(events[1]["raw"]["original_seed"]==Ptr(particleFixture),"raw seed evidence lost");
     const auto canonical=fixtureCrt;
@@ -81,6 +82,8 @@ int main() {using namespace lvz::determinism;try {
     Setup(particleFixture,5);Put(particleFixture,0x38,2);CallFixture();events=DrainParticleShakeEvents();
     Check(events.size()==2&&events[1]["semantic"]["crossfade_duration"]==2,"legitimate first crossfade frame rejected");
     Check(ParticleShakeSnapshot()["controlled_calls"]==10,"controlled count incorrect");
+    ClearParticleShakeBoundary();Setup();CallFixture();events=DrainParticleShakeEvents();
+    Check(events[0]["semantic"]["engine_call_id"].is_null()&&events[0]["raw"]["engine_call_id"].is_null(),"Initialization particle inherited prior call ID");
     Remove();Setup();CallFixture();Check(fixtureCrt==Ptr(particleFixture),"uninstall failed to restore original seed behavior");
 
     Install();Setup();Put(particleFixture,0x9c,0x3e90001);CallFixture();
