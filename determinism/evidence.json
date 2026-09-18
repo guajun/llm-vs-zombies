@@ -1,0 +1,81 @@
+{
+  "schema": "lvz.binary-evidence.v1",
+  "target": "pvz-1.0.0.1051-en",
+  "extracted_executable_sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322",
+  "wrapper_sha256": "9397ca2dc3a4560eba5f87aef40fd800786ba0312716729ccbdbda185abee27d",
+  "loaded_image_base": "00400000",
+  "private_dump_sha256": "7e9fbd514e3512b856ec3890231eeb4fce8708d7ec3f4d34df693f75ca8d5a63",
+  "method": "ReadProcessMemory read-only loaded image; LLVM objdump 23; original source references listed in docs/determinism.md; runtime behavior not yet verified",
+  "symbols": [
+    {
+      "name": "mt_seed",
+      "va": "0x5a98d0",
+      "rva": "0x1a98d0",
+      "length": 32,
+      "bytes": "85c97505b9051100008908c780c00900000100000053eb088da4240000000090"
+    },
+    {
+      "name": "mt_next",
+      "va": "0x5a9940",
+      "rva": "0x1a9940",
+      "length": 32,
+      "bytes": "81bac0090000700200000f8cae00000033c0568b4c8204330c8283c00181e1ff"
+    },
+    {
+      "name": "mt_global_wrapper",
+      "va": "0x5a9930",
+      "rva": "0x1a9930",
+      "length": 10,
+      "bytes": "ba10a97500e906000000"
+    },
+    {
+      "name": "game_total_loop",
+      "va": "0x452650",
+      "rva": "0x52650",
+      "length": 24,
+      "bytes": "558bec83e4f8535556578bf980bfce04000000bd01000000"
+    },
+    {
+      "name": "crt_rand",
+      "va": "0x61e087",
+      "rva": "0x21e087",
+      "length": 34,
+      "bytes": "e8b1a900008b481469c9fd43030081c1c39e26008948148bc1c1e81025ff7f0000c3"
+    },
+    {
+      "name": "crt_srand",
+      "va": "0x61e07a",
+      "rva": "0x21e07a",
+      "length": 13,
+      "bytes": "e8bea900008b4c2404894814c3"
+    },
+    {
+      "name": "crt_getptd",
+      "va": "0x628a3d",
+      "rva": "0x228a3d",
+      "length": 24,
+      "bytes": "56e883ffffff8bf085f675086a10e8b250ffff598bc65ec3"
+    },
+    {
+      "name": "zombie_initialize",
+      "va": "0x522580",
+      "rva": "0x122580",
+      "length": 32,
+      "bytes": "558bec83e4f883ec1453568bf08b4518578b7d0889476cb82800000089771ce8"
+    }
+  ],
+  "rng_layout": {
+    "global_mt_va": "0x75a910",
+    "words": 624,
+    "word_bytes": 4,
+    "cursor_offset": "0x9c0",
+    "crt_state": "game _getptd()+0x14; calling-thread only"
+  },
+  "mt_seed_instance_calls": [
+    "0x40a7ea",
+    "0x4256b7",
+    "0x426a42",
+    "0x484173"
+  ],
+  "runtime_validation": "pending"
+}

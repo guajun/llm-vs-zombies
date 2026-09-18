@@ -47,6 +47,12 @@
       "path": "experiments/scenarios/liangyi/game1_13.dat",
       "sha256": "cda0984b9398d244fd47124cf5e5a4ed292f8a45bb00203e887bb165074fe0a1",
       "size": 333612
+    },
+    {
+      "path": "game/local-engine/PlantsVsZombies.exe",
+      "sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322",
+      "size": 3007800
     }
-  ]
+  ],
+  "local_engine_source": "Locally extracted executable from the locked original game wrapper; private local prerequisite, never distributed."
 }

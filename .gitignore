@@ -5,6 +5,7 @@ build/
 work/
 third_party/
 game/original/
+game/local-engine/
 avz/runtime/
 experiments/runs/*/
 !experiments/runs/.gitkeep

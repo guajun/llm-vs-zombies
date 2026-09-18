@@ -8,7 +8,7 @@
 
 ```powershell
 python -m pip install -e .
-python -m llm_vs_zombies.repl --pid 1234 --trace runs/trial-ready/client-session.jsonl
+python -m llm_vs_zombies.repl --pid 1234 --trace experiments/runs/trial-ready/decisions/client-session.jsonl
 ```
 
 `1234` 必须替换为已加载本项目运行时 DLL 的游戏 PID。客户端不会自行启动游戏、注入 DLL 或选关。也可以传 `--endpoint '\\.\pipe\llm-vs-zombies-1234'`。只接受本机、本项目前缀的命名管道。
@@ -45,8 +45,8 @@ threat = leftmost_zombie(game.observe())
 两份可运行示例：
 
 ```powershell
-python -m llm_vs_zombies.repl --pid 1234 --trace runs/trial-ready/step-session.jsonl --script examples/observe_and_step.py
-python examples/persistent_strategy.py --pid 1234 --trace runs/trial-ready/strategy-session.jsonl
+python -m llm_vs_zombies.repl --pid 1234 --trace experiments/runs/trial-ready/decisions/step-session.jsonl --script examples/observe_and_step.py
+python examples/persistent_strategy.py --pid 1234 --trace experiments/runs/trial-ready/decisions/strategy-session.jsonl
 ```
 
 `--script` 会把整个源文件作为一个代码单元记录，执行失败返回进程退出码 1。普通 Python 模块示例使用 `SessionTrace` 与 `connect()`，但若绕过 `RecordedConsole` 直接执行代码，其源文件不会自动成为 trace 的代码单元；需要完整代码审计时使用 REPL/`--script`。
