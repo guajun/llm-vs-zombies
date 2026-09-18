@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +27,7 @@ SCHEMA = "lvz.audit.v1"
 RAW_ANIMATIONS = "reanimation-handles.jsonl"
 PARTICLE_SHAKE_RAW = "particle-shake-seeds.jsonl"
 PARTICLE_SHAKE_MODE = "deterministic_particle_shake_v1"
+DRAW_SCHEDULE_MODE = "deterministic_draw_schedule_v1"
 AUDIT_FILES = ("manifest.json", "events.jsonl", "checksums.jsonl", "state-deltas.jsonl")
 _POINTER_CACHE_SIZE = 16384
 _POINTER_CACHE_MAX_CHARS = 512
@@ -248,8 +250,24 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def draw_mode(manifest):
+    spec = manifest.get("draw_schedule")
+    if spec is None:
+        return None
+    required = {"mode": DRAW_SCHEDULE_MODE, "installed": True,
+                "original_engine_bitwise_unmodified": False, "target_entry_rva": 0x138eb0,
+                "autonomous_fight_draws": False, "capture": "cached_bgr24_only", "rng_restore_after_draw": False,
+                "schedule": "one warm draw before B0; one original draw after each verified update before post_step"}
+    if (not isinstance(spec, dict) or any(type(spec.get(key)) is not type(value) or spec[key] != value
+                                          for key, value in required.items())
+            or type(spec.get("live_verified")) is not bool):
+        raise EvidenceError("unsupported or undeclared controlled draw semantics")
+    return DRAW_SCHEDULE_MODE
+
+
 def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     """Resolve supported evidence files without trusting a manifest path."""
+    draw_mode(manifest)
     coverage = manifest.get("coverage", {})
     if not isinstance(coverage, dict):
         raise EvidenceError("invalid native audit coverage")
@@ -516,6 +534,212 @@ def particle_semantics(event, *, map_version=lambda value: value):
             "payload": {key: value for key, value in event["payload"].items() if key != "ordinal"}}
 
 
+def render_semantics(receipt, *, map_version=lambda value: value):
+    if receipt is None:
+        return None
+    result = copy.deepcopy(receipt)
+    result["frame_version"] = map_version(result["frame_version"])
+    return result
+
+
+def _state_clocks(state):
+    try:
+        return {"schema": SCHEMA, "target": state["rng"]["target"],
+                "game_clock": state["board"]["00005568"], "effect_clock": state["board"]["0000556c"],
+                "mj_clock": state["app"]["mj_clock"]}
+    except (KeyError, TypeError) as error:
+        raise EvidenceError("controlled draw state lacks audited clocks") from error
+
+
+def _seeded_rng(seed):
+    words = [seed or 4357]
+    for index in range(1, 624):
+        previous = words[-1]
+        words.append((1812433253 * (previous ^ (previous >> 30)) + index) & 0xffffffff)
+    return {"global_mt": {"algorithm": "sexy_mt19937_31", "words": words, "cursor": 624},
+            "game_thread_crt": {"algorithm": "msvc_lcg_15", "state": seed}}
+
+
+class _DrawEvidence:
+    """One warm operation, one checked receipt per post, bounded terminal tail."""
+    def __init__(self, manifest):
+        self.target = manifest["target"]
+        self.preparing = self.warm = self.terminal = self.health = None
+        self.warm_frames = self.step_frames = self.posts = self.terminal_skips = 0
+        self.terminal_completed = False
+        self.seen_frame = False
+
+    def counts(self):
+        return {"mode": DRAW_SCHEDULE_MODE, "warm_frames": self.warm_frames, "step_frames": self.step_frames}
+
+    def _receipt(self, receipt, boundary, phase):
+        if (not isinstance(receipt, dict) or receipt.get("schema") != "lvz.controlled-render.v1"
+                or receipt.get("mode") != DRAW_SCHEDULE_MODE or receipt.get("phase") != phase
+                or version(receipt.get("frame_version")) != boundary
+                or type(receipt.get("native_clock")) is not int or receipt["native_clock"] < 0):
+            raise EvidenceError("controlled draw receipt identity/phase/version is invalid")
+        if phase == "terminal":
+            expected = {"schema", "mode", "phase", "frame_version", "native_clock", "skipped", "reason", "cache_invalidated"}
+            if (set(receipt) != expected or receipt.get("skipped") is not True
+                    or receipt.get("reason") != "left_ready_fight" or receipt.get("cache_invalidated") is not True):
+                raise EvidenceError("terminal draw skip is not explicit or invents draw evidence")
+            return
+        if (any(key in receipt for key in ("skipped", "reason", "cache_invalidated"))
+                or type(receipt.get("width")) is not int or receipt["width"] != 800
+                or type(receipt.get("height")) is not int or receipt["height"] != 600
+                or receipt.get("pixel_format") != "bgr24" or receipt.get("rng_restored") is not False
+                or type(receipt.get("rng_unchanged")) is not bool):
+            raise EvidenceError("controlled draw receipt format/guard is invalid")
+        clocks = receipt.get("clocks_before")
+        if (not isinstance(clocks, dict) or set(clocks) != {"schema", "target", "game_clock", "effect_clock", "mj_clock"}
+                or clocks["schema"] != SCHEMA or clocks["target"] != self.target
+                or any(type(clocks[key]) is not int or clocks[key] < 0 for key in ("game_clock", "effect_clock", "mj_clock"))
+                or clocks != receipt.get("clocks_after") or clocks["game_clock"] != receipt["native_clock"]):
+            raise EvidenceError("controlled draw changed or omitted clock evidence")
+        for name in ("rng_before", "rng_after"):
+            hashes = receipt.get(name)
+            if (not isinstance(hashes, dict) or set(hashes) != {"all", "global_mt", "game_thread_crt"}
+                    or any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{16}", value) is None for value in hashes.values())):
+                raise EvidenceError("controlled draw lacks complete RNG digests")
+        if receipt["rng_unchanged"] != (receipt["rng_before"] == receipt["rng_after"]):
+            raise EvidenceError("controlled draw RNG guard disagrees with digests")
+        if first_difference(receipt.get("counts"), self.counts()):
+            raise EvidenceError("controlled draw receipt count is missing, duplicated, or reordered")
+
+    def event(self, event):
+        kind, payload = event["kind"], event["payload"]
+        auxiliary = (self.terminal is not None and kind == "zombie_first_boundary_observed"
+                     and not self.terminal.get("transition_seen") and event["seq"] >= self.terminal["seq"]
+                     and event["version"] == self.terminal["version"] and payload.get("exact_spawn") is False)
+        if self.preparing is not None and self.warm is None and kind != "render_prepared":
+            if kind not in {"zombie_initialized", "particle_shake_seed"} or event.get("phase") != "initialization":
+                raise EvidenceError("warm drawing contains an unexpected controlled mutation")
+        if self.terminal_completed and kind not in {"recording_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+            raise EvidenceError("simulation event follows terminal completion")
+        if kind == "render_preparing":
+            if (self.preparing is not None or self.warm is not None or self.seen_frame
+                    or event["version"]["tick"] != 0 or not isinstance(payload.get("request_id"), str)):
+                raise EvidenceError("warm drawing must occur exactly once before the first audited step")
+            self.preparing = event
+        elif kind == "render_prepared":
+            if (self.preparing is None or self.warm is not None or self.seen_frame
+                    or event["version"] != self.preparing["version"]
+                    or payload.get("request_id") != self.preparing["payload"]["request_id"]):
+                raise EvidenceError("warm drawing receipt has no matching preparation")
+            self.warm_frames = 1
+            receipt = payload.get("render")
+            self._receipt(receipt, event["version"], "warm")
+            seed = receipt.get("seed_readback", {}).get("seed")
+            if type(seed) is not int or not 0 <= seed <= 0xffffffff:
+                raise EvidenceError("warm drawing lacks an explicit uint32 seed")
+            expected = {"seed": seed, "global_mt_words": 624, "global_mt_cursor": 624,
+                        "game_thread_crt": seed, "verified_before_draw": True}
+            if first_difference(expected, receipt["seed_readback"]) or receipt["rng_before"] != digests(_seeded_rng(seed)):
+                raise EvidenceError("warm drawing seed readback does not match the captured RNG digests")
+            self.warm = receipt
+        elif kind == "terminal_transition":
+            if (self.terminal is None or self.terminal.get("transition_seen")
+                    or event["version"] != self.terminal["version"]
+                    or payload.get("request_id") != self.terminal["request_id"]
+                    or payload.get("tick_delta_verified") is not True or payload.get("board_identity_preserved") is not True
+                    or type(payload.get("native_tick_delta")) is not int or payload["native_tick_delta"] != 1):
+                raise EvidenceError("terminal draw skip lacks a verified same-Board transition")
+            self.terminal["transition_seen"] = True
+        elif self.terminal is not None and kind == "request_completed":
+            result = payload.get("result", {})
+            observation = result.get("observation", {})
+            if (self.terminal_completed or not self.terminal.get("transition_seen")
+                    or payload.get("request_id") != self.terminal["request_id"]
+                    or event["version"] != self.terminal["version"] or observation.get("version") != event["version"]
+                    or result.get("stop_reason") != "scene_changed" or observation.get("game_ui") == 3):
+                raise EvidenceError("terminal draw skip lacks its final scene_changed completion")
+            self.terminal_completed = True
+        elif self.terminal is not None and kind in {"request_started", "action", "render_preparing", "render_prepared"}:
+            raise EvidenceError("simulation mutation follows terminal draw skip")
+        if (self.terminal is not None and not self.terminal_completed
+                and kind not in {"terminal_transition", "request_completed"} and not auxiliary):
+            raise EvidenceError("terminal draw skip has an intervening event")
+
+    def state(self, state, receipt=None):
+        if first_difference(state.get("draw_schedule"), self.counts()):
+            raise EvidenceError("audited draw count differs from checked receipts")
+        if receipt is not None:
+            clocks = _state_clocks(state)
+            if receipt["native_clock"] != clocks["game_clock"]:
+                raise EvidenceError("draw receipt native clock differs from audited state")
+            if receipt["phase"] != "terminal":
+                if receipt["clocks_after"] != clocks or receipt["rng_after"] != digests(state["rng"]["instances"]):
+                    raise EvidenceError("draw receipt clocks/RNG differ from actual post state")
+
+    def frame(self, frame):
+        if self.warm is None or self.terminal is not None:
+            raise EvidenceError("audited update lacks warm preparation or follows terminal draw skip")
+        self.seen_frame = True
+        if frame.version["epoch"] != self.warm["frame_version"]["epoch"]:
+            raise EvidenceError("controlled drawing crosses an unprepared epoch")
+        if frame.kind == "pre_step":
+            if "render" in frame.payload or frame.version["tick"] != self.posts:
+                raise EvidenceError("draw receipt is misplaced or update ordinal differs")
+            self.state(frame.state)
+            return
+        receipt = frame.payload.get("render")
+        if not isinstance(receipt, dict):
+            raise EvidenceError("verified post_step requires exactly one controlled draw receipt")
+        terminal = receipt.get("phase") == "terminal"
+        self.posts += 1
+        if terminal:
+            self.terminal_skips += 1
+        else:
+            self.step_frames += 1
+        self._receipt(receipt, frame.version, "terminal" if terminal else "step")
+        if (frame.state.get("app", {}).get("ui") != 3) != terminal:
+            raise EvidenceError("terminal draw skip and audited fight UI disagree")
+        self.state(frame.state, receipt)
+        if terminal:
+            self.terminal = {"version": frame.version, "request_id": frame.payload["request_id"], "seq": frame.seq}
+
+    def initial(self, initial):
+        if self.warm is None or initial["observation"]["version"] != self.warm["frame_version"]:
+            raise EvidenceError("initial marker is not the prepared warm boundary")
+        if initial["observation"].get("render_prepared") is not True:
+            raise EvidenceError("initial observation does not confirm render preparation")
+        # Validate B0 independently of counters advanced by later frames.
+        expected = {"mode": DRAW_SCHEDULE_MODE, "warm_frames": 1, "step_frames": 0}
+        if first_difference(initial["state"].get("draw_schedule"), expected):
+            raise EvidenceError("initial draw state is not warm1/step0")
+        if (self.warm["clocks_after"] != _state_clocks(initial["state"])
+                or self.warm["rng_after"] != digests(initial["state"]["rng"]["instances"])):
+            raise EvidenceError("initial marker differs from the actual postwarm clocks/RNG")
+        if "initialization" in initial:
+            recipe = initial["initialization"]
+            seed = self.warm["seed_readback"]["seed"]
+            preparation = {"warm_frames": 1, "step_frames": 0, "verified_before_draw": True,
+                "seeded_rng_sha256": hashlib.sha256(canonical(_seeded_rng(seed))).hexdigest(),
+                "postwarm_rng_sha256": hashlib.sha256(canonical(initial["state"]["rng"]["instances"])).hexdigest()}
+            if (type(recipe.get("seed")) is not int or recipe["seed"] != seed
+                    or recipe.get("clock_anchor") != self.warm["clocks_before"]
+                    or recipe.get("postwarm_clock") != self.warm["clocks_after"]
+                    or first_difference(recipe.get("render_preparation"), preparation)):
+                raise EvidenceError("initialization recipe differs from actual warm seed/clock/RNG evidence")
+
+    def finish(self):
+        if self.preparing is not None and self.warm is None:
+            raise EvidenceError("warm drawing never completed")
+        if self.terminal is not None and not self.terminal_completed:
+            raise EvidenceError("terminal draw skip is missing its transition/completion")
+
+    def close(self, event):
+        health = event["payload"]
+        required = {"mode": DRAW_SCHEDULE_MODE, "installed": True, "latched": True, "sealed": True,
+                    "active": False, "healthy": True, "faults": 0, "wrong_thread_calls": 0,
+                    "controlled_calls": self.warm_frames + self.step_frames,
+                    "warm_frames": self.warm_frames, "step_frames": self.step_frames}
+        if (self.warm is None or any(type(health.get(key)) is not type(value) or health[key] != value for key, value in required.items())
+                or any(type(health.get(key)) is not int or health[key] < 0 for key in ("automatic_allowed", "automatic_denied"))):
+            raise EvidenceError("draw schedule close health/count is incomplete or unhealthy")
+        self.health = copy.deepcopy(health)
+
+
 class _ParticleEvidence:
     def __init__(self):
         self.captured = 0
@@ -582,7 +806,7 @@ class _ParticleEvidence:
 
 class _EventSummary:
     def __init__(self):
-        self.tail = deque(maxlen=3)
+        self.tail = deque(maxlen=4)
         self.birth_count = 0
         self.controlled_birth_count = 0
         self.initialization_birth_count = 0
@@ -596,9 +820,9 @@ class _EventSummary:
             raise EvidenceError("native animation link fault invalidates strict evidence")
         if event["seq"] < self.last_seq:
             raise EvidenceError("audit event sequence moved backwards")
-        if self.recording_closed and event["kind"] not in {"particle_shake_closed", "spawn_hook_closed"}:
+        if self.recording_closed and event["kind"] not in {"draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("native event after recording close")
-        if not self.recording_closed and event["kind"] in {"particle_shake_closed", "spawn_hook_closed"}:
+        if not self.recording_closed and event["kind"] in {"draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("native hook close precedes recording close")
         self.last_seq = event["seq"]
         if event["kind"] == "zombie_initialized":
@@ -614,7 +838,7 @@ class _EventSummary:
         self.count += 1
 
 
-def _closed_events(summary, *, particle=None, spawn_required=False):
+def _closed_events(summary, *, particle=None, draw=None, spawn_required=False):
     """Validate the declared close sequence and all hook health summaries."""
     final = list(summary.tail)
     if spawn_required and (not final or final[-1]["kind"] != "spawn_hook_closed"):
@@ -637,6 +861,15 @@ def _closed_events(summary, *, particle=None, spawn_required=False):
         final = final[:-1]
     elif any(event["kind"] == "particle_shake_closed" for event in final):
         raise EvidenceError("particle shake close has no declared engine mode")
+    if draw is not None:
+        if not final or final[-1]["kind"] != "draw_schedule_closed":
+            raise EvidenceError("required draw schedule close health is missing")
+        draw.close(final[-1])
+        if len(final) < 2 or final[-1]["version"] != final[-2]["version"]:
+            raise EvidenceError("draw schedule close boundary differs from recording close")
+        final = final[:-1]
+    elif any(event["kind"] == "draw_schedule_closed" for event in final):
+        raise EvidenceError("draw close has no declared engine mode")
     if not final or final[-1]["kind"] != "recording_closed":
         raise EvidenceError("native recording lacks a completed recording_closed boundary")
 
@@ -872,6 +1105,7 @@ class _AuditStreamDecoder:
         self.frames = _FrameDecoder(reuse_state=reuse_state)
         self.animation = _AnimationDecoder(manifest) if RAW_ANIMATIONS in files else None
         self.particle = _ParticleEvidence() if PARTICLE_SHAKE_RAW in files else None
+        self.draw = _DrawEvidence(manifest) if draw_mode(manifest) else None
         self.summary = _EventSummary()
         self.pending = []
         self.pending_spawns = []
@@ -884,6 +1118,10 @@ class _AuditStreamDecoder:
 
     def event(self, event, raw):
         self.summary.accept(event)
+        if self.draw:
+            self.draw.event(event)
+        elif event["kind"] in {"render_preparing", "render_prepared", "draw_schedule_closed"}:
+            raise EvidenceError("controlled draw event lacks an explicit engine mode")
         shared = (event["kind"] == "zombie_first_boundary_observed" and self.last_frame is not None
                   and event["seq"] == self.last_frame.seq)
         if shared:
@@ -920,6 +1158,10 @@ class _AuditStreamDecoder:
         if self.summary.recording_closed:
             raise EvidenceError("native frame after recording close")
         frame = self.frames.accept(records[0], records[1])
+        if self.draw:
+            self.draw.frame(frame)
+        elif "draw_schedule" in frame.state or "render" in frame.payload:
+            raise EvidenceError("controlled draw state/receipt requires an explicit engine mode")
         if frame.seq != self.next_seq:
             raise EvidenceError("native audit sequence is missing or duplicated")
         self.next_seq += 1
@@ -954,6 +1196,8 @@ class _AuditStreamDecoder:
 
     def finish(self, *, final=False):
         self.frames.finish()
+        if self.draw:
+            self.draw.finish()
         if final and self.pending:
             raise EvidenceError("particle shake calls have no following audited boundary")
         if final and self.pending_spawns:
@@ -1073,11 +1317,11 @@ class AuditLog:
             self._request_frames.setdefault(rid, []).append(header)
             self._frame_indices.setdefault(rid, []).append(index)
         decoder.finish(final=True)
-        self._particle, self._summary = decoder.particle, decoder.summary
+        self._particle, self._summary, self._draw = decoder.particle, decoder.summary, decoder.draw
         self.peak_pending_particle_calls = decoder.peak_pending
         self.frames = FrameSelection(self)
         if require_closed:
-            _closed_events(self._summary, particle=self._particle,
+            _closed_events(self._summary, particle=self._particle, draw=self._draw,
                            spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
 
     def _retain_event(self, event):
@@ -1096,6 +1340,18 @@ class AuditLog:
         return {"controlled": self._summary.controlled_birth_count,
                 "initialization": self._summary.initialization_birth_count}
 
+    def validate_draw_initial(self, initial):
+        if self._draw:
+            self._draw.initial(initial)
+
+    @property
+    def warm_render(self):
+        return copy.deepcopy(self._draw.warm) if self._draw else None
+
+    @property
+    def draw_health(self):
+        return copy.deepcopy(self._draw.health) if self._draw else None
+
     @property
     def control_events(self):
         """Verified control/birth index, excluding high-volume particle calls."""
@@ -1108,7 +1364,7 @@ class AuditLog:
             raise EvidenceError("invalid native audit schema/sequence")
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
-        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault"}:
+        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault"}:
             raise EvidenceError("native hook fault invalidates strict evidence")
         if record["kind"] == "particle_shake_seed":
             if record.get("native_phase") != "before_srand" or record.get("phase") not in {"controlled_boundary", "initialization"}:
@@ -1182,6 +1438,7 @@ class AuditTail:
         self._hashes = {name: hashlib.sha256() for name in self._positions}
         self._stream = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True)
         self._decoder, self._animation, self._particle = self._stream.frames, self._stream.animation, self._stream.particle
+        self._draw = self._stream.draw
         self._identities = {}
         self._requests, self._request_frames = {}, {}
         self.events = _ConsumedEventStream(self)
@@ -1194,6 +1451,18 @@ class AuditTail:
     def birth_counts(self):
         return {"controlled": self._stream.summary.controlled_birth_count,
                 "initialization": self._stream.summary.initialization_birth_count}
+
+    def validate_draw_initial(self, initial):
+        if self._draw:
+            self._draw.initial(initial)
+
+    @property
+    def warm_render(self):
+        return copy.deepcopy(self._draw.warm) if self._draw else None
+
+    @property
+    def draw_health(self):
+        return copy.deepcopy(self._draw.health) if self._draw else None
 
     def _check_file(self, name, *, required_size=None):
         stat = (self.directory / name).stat()
@@ -1284,7 +1553,7 @@ class AuditTail:
         for _ in self.read_request(None):
             raise EvidenceError("unexpected unconsumed frames at recording close")
         self._stream.finish(final=True)
-        _closed_events(self._stream.summary, particle=self._particle,
+        _closed_events(self._stream.summary, particle=self._particle, draw=self._draw,
                        spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
         for name, position in self._positions.items():
             if self._check_file(name).st_size != position:
@@ -1302,6 +1571,11 @@ def compare_audits(expected: AuditLog, actual: AuditLog, *,
                    request_map: dict[str, str] | None = None) -> dict:
     if expected.manifest != actual.manifest:
         return {"equal": False, "reason": "audit_manifest", "difference": first_difference(expected.manifest, actual.manifest)}
+    unname_epoch = lambda value: {"tick": value["tick"], "revision": value["revision"]}
+    difference = first_difference(render_semantics(expected.warm_render, map_version=unname_epoch),
+                                  render_semantics(actual.warm_render, map_version=unname_epoch))
+    if difference:
+        return {"equal": False, "reason": "warm_render", "difference": difference}
     left, right = expected.frames, actual.frames
     if request_map is not None:
         left = FrameSelection(expected, [i for i, (_, rid) in enumerate(expected._frame_headers) if rid in request_map])
@@ -1312,7 +1586,10 @@ def compare_audits(expected: AuditLog, actual: AuditLog, *,
             return {"equal": False, "reason": "boundary", "index": index}
         if request_map and request_map[a.payload["request_id"]] != b.payload["request_id"]:
             return {"equal": False, "reason": "request_order", "index": index}
-        unname_epoch = lambda value: {"tick": value["tick"], "revision": value["revision"]}
+        difference = first_difference(render_semantics(a.payload.get("render"), map_version=unname_epoch),
+                                      render_semantics(b.payload.get("render"), map_version=unname_epoch))
+        if difference:
+            return {"equal": False, "reason": "render", "index": index, "difference": difference}
         difference = first_difference([particle_semantics(event, map_version=unname_epoch) for event in a.particle_seeds],
                                       [particle_semantics(event, map_version=unname_epoch) for event in b.particle_seeds])
         if difference:

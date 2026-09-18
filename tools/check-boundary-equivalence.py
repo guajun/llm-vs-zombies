@@ -11,9 +11,11 @@ import json
 from itertools import zip_longest
 from pathlib import Path
 import sys
+from contextlib import ExitStack, closing
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from llm_vs_zombies.audit_compare import EvidenceError, first_difference, particle_semantics, spawn_payload_semantics
+from llm_vs_zombies.audit_compare import (EvidenceError, first_difference, particle_semantics, spawn_payload_semantics,
+                                        draw_mode, render_semantics)
 from llm_vs_zombies.engine_replay import Trajectory
 
 
@@ -48,8 +50,13 @@ def _actions(trajectory):
 
 
 def compare(left_path, right_path, *, purpose, ticks=100):
-    if purpose not in {"render", "batch"} or type(ticks) is not int or ticks <= 0:
-        raise ValueError("purpose must be render/batch and ticks must be positive")
+    with ExitStack() as stack:
+        return _compare(left_path, right_path, purpose=purpose, ticks=ticks, stack=stack)
+
+
+def _compare(left_path, right_path, *, purpose, ticks, stack):
+    if purpose not in {"render", "batch", "schedule"} or type(ticks) is not int or ticks <= 0:
+        raise ValueError("purpose must be render/batch/schedule and ticks must be positive")
     left, right = Trajectory.load(left_path), Trajectory.load(right_path)
     report = {"schema": "lvz.boundary-equivalence.v1", "purpose": purpose, "ticks": ticks,
               "left": left.manifest["trajectory_id"], "right": right.manifest["trajectory_id"],
@@ -74,6 +81,19 @@ def compare(left_path, right_path, *, purpose, ticks=100):
     if type(seed) is not int or not 0 <= seed <= 0xffffffff:
         raise EvidenceError("experiment initialization must identify its uint32 seed")
     report["seed"] = seed
+    mode = draw_mode(left.audit.manifest)
+    report["draw_schedule"] = {"mode": mode or "legacy_autonomous_draw_schedule",
+        "warm_receipts_compared": 0, "step_receipts_compared": 0, "terminal_skips_compared": 0,
+        "health": [left.audit.draw_health, right.audit.draw_health], "automatic_draw_counters_compared": False}
+    def relative(trajectory, value):
+        origin = trajectory.initial["observation"]["version"]
+        if value["epoch"] != origin["epoch"]:
+            raise EvidenceError("drawing or hook evidence crosses the compared epoch")
+        return {"tick": value["tick"], "revision": value["revision"] - (origin["revision"] if value["tick"] == 0 else 0)}
+    if not equal(render_semantics(left.audit.warm_render, map_version=lambda v: relative(left, v)),
+                 render_semantics(right.audit.warm_render, map_version=lambda v: relative(right, v)), "initial_warm_render"):
+        return report
+    report["draw_schedule"]["warm_receipts_compared"] = int(bool(mode))
     observations = [copy.deepcopy(item.initial["observation"]) for item in (left, right)]
     for observation in observations:
         if observation["version"]["tick"] != 0:
@@ -94,6 +114,12 @@ def compare(left_path, right_path, *, purpose, ticks=100):
                 or [step["result"]["executed_ticks"] for step in commands[1]] != [ticks]
                 or any(captures) or _actions(left) or _actions(right)):
             raise EvidenceError("batch experiment requires N single advances vs one N-tick advance, without captures/actions")
+    elif purpose == "schedule":
+        budgets = [[step["request"]["params"]["max_ticks" if step["request"]["method"] == "advance" else "advance_ticks"]
+                    for step in steps] for steps in commands]
+        if any(captures) or budgets[0] == budgets[1] or not any(value > 1 for values in budgets for value in values):
+            raise EvidenceError("schedule experiment requires different request budgets including a multi-tick request, without capture")
+        report["request_budgets"] = budgets
     else:
         if captures[0] or not captures[1]:
             raise EvidenceError("render experiment requires left capture-off and right capture-on")
@@ -101,9 +127,9 @@ def compare(left_path, right_path, *, purpose, ticks=100):
             response = step["capture_response"]
             result = response.get("result", {})
             if (response.get("ok") is not True or result.get("capture_ok") is not True
-                    or result.get("forced_render") is not True or result.get("known_rng_unchanged") is not True
+                    or result.get("forced_render") is not (False if mode else True) or result.get("known_rng_unchanged") is not True
                     or result.get("game_clock_before") != result.get("game_clock_after")):
-                raise EvidenceError("render experiment lacks successful state-guarded forced rendering")
+                raise EvidenceError("render experiment lacks successful state-guarded capture for its declared mode")
     # An end-of-run capture without a following audited step cannot prove absence
     # of animation changes. Require every intervention to precede a sampled step.
     if any(step["request"]["expect"]["tick"] >= ticks for steps in captures for step in steps):
@@ -111,7 +137,7 @@ def compare(left_path, right_path, *, purpose, ticks=100):
     births = [_spawns(item) for item in (left, right)]
     if not equal(sorted(births[0]), sorted(births[1]), "spawn_ticks"):
         return report
-    streams = [trajectory.audit._frames(reuse_state=True) for trajectory in (left, right)]
+    streams = [stack.enter_context(closing(trajectory.audit._frames(reuse_state=True))) for trajectory in (left, right)]
     for index, pair in enumerate(zip_longest(*streams)):
         a, b = pair
         if a is None or b is None:
@@ -120,14 +146,21 @@ def compare(left_path, right_path, *, purpose, ticks=100):
         for frame in pair:
             if frame.kind != expected_kind or frame.version["tick"] != expected_tick:
                 raise EvidenceError("experiment does not contain consecutive pre/post boundaries from tick zero")
+        if not equal(relative(left, a.version), relative(right, b.version), "boundary_version",
+                     tick=expected_tick, phase=expected_kind):
+            return report
         seed_calls = []
         for trajectory, frame in zip((left, right), pair):
-            origin = trajectory.initial["observation"]["version"]
-            def relative(value):
-                return {"tick": value["tick"], "revision": value["revision"] - (origin["revision"] if value["tick"] == 0 else 0)}
-            seed_calls.append([particle_semantics(event, map_version=relative) for event in frame.particle_seeds])
+            seed_calls.append([particle_semantics(event, map_version=lambda v: relative(trajectory, v)) for event in frame.particle_seeds])
         if not equal(*seed_calls, "particle_shake", tick=expected_tick, phase=expected_kind):
             return report
+        if not equal(render_semantics(a.payload.get("render"), map_version=lambda v: relative(left, v)),
+                     render_semantics(b.payload.get("render"), map_version=lambda v: relative(right, v)),
+                     "render_receipt", tick=expected_tick, phase=expected_kind):
+            return report
+        if mode and expected_kind == "post_step":
+            key = "terminal_skips_compared" if a.payload["render"]["phase"] == "terminal" else "step_receipts_compared"
+            report["draw_schedule"][key] += 1
         if a.canonical_state != b.canonical_state and not equal(a.state, b.state, "state",
                 tick=expected_tick, phase=expected_kind):
             return report
@@ -144,6 +177,7 @@ def compare(left_path, right_path, *, purpose, ticks=100):
                              "spawn", tick=source_tick, controlled_ordinal=ordinal):
                     return report
                 report["spawn_events_compared"] += 1
+                report["spawn_exercised"] = True
     if report["frames_compared"] != ticks * 2:
         raise EvidenceError("wrong number of audited boundaries")
     if any(tick < 0 or tick >= ticks for collection in births for tick in collection):
@@ -158,7 +192,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("left", type=Path)
     parser.add_argument("right", type=Path)
-    parser.add_argument("--purpose", required=True, choices=("render", "batch"))
+    parser.add_argument("--purpose", required=True, choices=("render", "batch", "schedule"))
     parser.add_argument("--ticks", type=int, default=100)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

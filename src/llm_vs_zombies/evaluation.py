@@ -23,6 +23,7 @@ import uuid
 from typing import Any
 
 from .records import finish, read_json, sha256, write_json
+from .initialization import apply_recipe, clock_anchor
 
 SCHEMA = "lvz.evaluation.v1"
 PLAN_SCHEMA = "lvz.evaluation-plan.v1"
@@ -114,41 +115,6 @@ def full_cycle_completed(initial: dict, final: dict, maximum_wave: int) -> bool:
     before, after = initial.get("completed_rounds"), final.get("completed_rounds")
     return (type(before) is int and type(after) is int and after > before
             and maximum_wave >= 20 and final.get("scene") == 3)
-
-
-def clock_anchor(snapshot: dict) -> dict:
-    state = snapshot["state"]
-    return {"schema": state["schema"], "target": state["rng"]["target"],
-            "game_clock": state["board"]["00005568"], "effect_clock": state["board"]["0000556c"],
-            "mj_clock": state["app"]["mj_clock"]}
-
-
-def apply_recipe(client, seed: int, anchor: dict | None = None) -> dict:
-    capabilities = client.hello()["capabilities"]
-    if capabilities.get("rng_seed") is not True:
-        raise RuntimeError("runtime has no implemented rng_seed capability; planned seed is not evidence")
-    observation = client.observe()
-    if observation["version"]["tick"] != 0:
-        raise RuntimeError("initialization must precede the first simulated tick")
-    client.request("rng_seed", {"seed": seed}, expect=observation["version"])
-    if anchor is not None:
-        if capabilities.get("clock_restore") is not True:
-            raise RuntimeError("runtime lacks clock_restore needed by the recorded initialization recipe")
-        client.request("clock_restore", {"snapshot": anchor}, expect=client.version)
-    snapshot = client.request("audit_snapshot")
-    # Verify the actual seeded words and cursor, including original seed-zero
-    # handling. This is the two captured RNG instances, not all randomness.
-    rng = snapshot["state"]["rng"]["instances"]
-    words = [seed or 4357]
-    for index in range(1, 624):
-        previous = words[-1]
-        words.append((1812433253 * (previous ^ (previous >> 30)) + index) & 0xFFFFFFFF)
-    if (rng["global_mt"].get("words") != words or rng["global_mt"].get("cursor") != 624
-            or rng["game_thread_crt"].get("state") != seed):
-        raise RuntimeError("RNG readback differs from the requested seed")
-    return {"game_mode": 13, "seed": seed, "seed_phase": "before_enter_game_and_paused_after_scenario_load",
-            "seed_scope": "global Sexy MT + game-thread CRT; initialization also seeds before scene creation; generated initial state is compared",
-            "clock_anchor": clock_anchor(snapshot)}
 
 
 def profile_fingerprint() -> dict:
@@ -401,12 +367,14 @@ def live_session(root: Path, name: str, plan: Plan, seed: int = 0):
         monitor = LaunchWindowMonitor()
         try:
             with monitor:
-                state = start(root, run, timeout=plan.timeout_seconds, seed=seed)
+                state = start(root, run, timeout=plan.timeout_seconds, seed=seed, defer_preparation=True)
         finally:
             windows = monitor.result(state["pid"] if state is not None else None)
             write_json(run / "evaluation-windows.json", windows)
         state["evaluation_windows"] = windows
         client = connect(pid=state["pid"], trace=trace, timeout=plan.timeout_seconds)
+        client._initialization_run = run
+        client._initialization_scenario_verified = state.get("scenario_verified") is True
         yield run, state, client, trace
     finally:
         cleanup = {}

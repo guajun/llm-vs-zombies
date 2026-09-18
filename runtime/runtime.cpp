@@ -1,9 +1,12 @@
 #include "runtime.hpp"
 #include "pipe_server.hpp"
+#include "pump_guard.hpp"
 #include "recorder.hpp"
 #include "determinism/audit.hpp"
 #include "determinism/memory.hpp"
 #include "recording/native_capture.hpp"
+#include "recording/frame_cache.hpp"
+#include "determinism/model.hpp"
 #include <avz.h>
 #include <wincrypt.h>
 #include <cmath>
@@ -45,6 +48,9 @@ bool FinishTitle() {
     return AGetPvzBase()->GameUi()==1;
 }
 class GameBackend final : public Backend {
+    lvz::recording::FrameCache frameCache_;
+    bool renderPrepared_=false,seededAtBoundary_=false;
+    uint32_t boundarySeed_=0;
 public:
     bool Ready() const override {
         // AvZ MemoryInit rejects this same transient false fight on save load.
@@ -129,23 +135,63 @@ public:
             {"capabilities",{{"observe",true},{"commit",true},{"advance",true},{"pause",true},{"status",true},{"cancel",true},{"checkpoints",false},
                 {"strict_determinism",false},{"step_clock_guard",true},{"exact_step_live_validated",false},{"native_demo",false},{"initialize",true},
                 {"audit_snapshot",true},{"rng_restore",true},{"rng_seed",true},{"clock_restore",true},{"stop_recording",true},
-                {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false}}}};
+                {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false},
+                {"prepare_render",true},{"deterministic_draw_schedule_v1",true}}}};
+    }
+    bool RequiresRenderPreparation()const override {return true;}
+    bool RenderPrepared()const override {return renderPrepared_;}
+    void InvalidateFrame(const std::string& reason)override {frameCache_.Invalidate(reason);}
+    void ResetRenderPreparation()override {renderPrepared_=seededAtBoundary_=false;frameCache_.Invalidate("epoch_changed");}
+    Json RenderFrame(const Json& version,bool warm)override {
+        lvz::recording::CheckDrawGate();
+        if(!Ready()||warm==renderPrepared_)throw std::runtime_error("Controlled drawing preparation/order mismatch");
+        const auto beforeRng=lvz::determinism::CaptureRng();
+        if(warm) {
+            if(!seededAtBoundary_)throw std::runtime_error("rng_seed at the paused fight boundary must precede warm drawing");
+            const auto& instances=beforeRng.at("instances");
+            const auto& mt=instances.at("global_mt");
+            uint32_t word=boundarySeed_?boundarySeed_:4357u;
+            if(mt.at("cursor")!=624||mt.at("words").size()!=624||instances.at("game_thread_crt").at("state")!=boundarySeed_)
+                throw std::runtime_error("Warm draw RNG readback does not match explicit seed");
+            for(size_t index=0;index<624;++index) {
+                if(mt.at("words")[index]!=word)throw std::runtime_error("Warm draw MT word readback differs from explicit seed");
+                word=1812433253u*(word^(word>>30))+uint32_t(index+1);
+            }
+        }
+        const auto beforeClocks=lvz::determinism::CaptureClocks();
+        const auto board=BoardIdentity();
+        frameCache_.Invalidate("render_in_progress");
+        auto frame=lvz::recording::CaptureOriginalFrame(ownerThread);
+        if(!frame.ok)throw std::runtime_error(frame.error);
+        const auto afterClocks=lvz::determinism::CaptureClocks();
+        if(beforeClocks!=afterClocks||board!=BoardIdentity()||!Ready())
+            throw std::runtime_error("Controlled draw changed clocks or active Board");
+        const auto afterRng=lvz::determinism::CaptureRng();
+        Json receipt={{"schema","lvz.controlled-render.v1"},{"mode",lvz::recording::DrawMode},
+            {"phase",warm?"warm":"step"},{"frame_version",version},
+            {"native_clock",NativeTick()},{"width",frame.width},{"height",frame.height},{"pixel_format","bgr24"},
+            {"clocks_before",beforeClocks},{"clocks_after",afterClocks},
+            {"rng_before",lvz::determinism::Digests(beforeRng.at("instances"))},
+            {"rng_after",lvz::determinism::Digests(afterRng.at("instances"))},
+            {"rng_unchanged",beforeRng==afterRng},{"rng_restored",false}};
+        if(warm)receipt["seed_readback"]={{"seed",boundarySeed_},{"global_mt_words",624},{"global_mt_cursor",624},{"game_thread_crt",boundarySeed_},{"verified_before_draw",true}};
+        frameCache_.Store(version,board,NativeTick(),std::move(frame));
+        lvz::recording::RecordDrawnFrame(warm);renderPrepared_=true;
+        receipt["counts"]=lvz::recording::DrawScheduleSnapshot();return receipt;
     }
     Json CaptureFrame(const Json& params) override {
         if(params.value("format",std::string("bgr24"))!="bgr24")
             return {{"capture_ok",false},{"reason","only bgr24 capture format is implemented"},{"forced_render",false}};
-        const auto frame=lvz::recording::CaptureOriginalFrame(ownerThread);
+        lvz::recording::CheckDrawGate();
+        const auto* cached=frameCache_.Find(params.at("frame_version"),BoardIdentity(),NativeTick());
+        if(!cached)return {{"capture_ok",false},{"reason",frameCache_.Reason()},{"forced_render",false}};
+        const auto& frame=*cached;
         Json result={{"capture_ok",frame.ok},{"source","original_game_frame"},{"method",frame.method},
             {"origin",frame.origin},{"pixel_format","bgr24"},{"width",frame.width},{"height",frame.height},
-            {"row_stride",frame.rowStride},{"forced_render",frame.forcedRender},{"used_3d",frame.used3D}};
-        // Pre-render rejection does not imply that game state changed. Once an
-        // engine draw is attempted, include even failed/incomplete guards so the
-        // controller invalidates a possibly changed boundary instead of retrying.
-        if(frame.forcedRender) {
-            result["known_rng_unchanged"]=frame.knownRngUnchanged;
-            result["game_clock_before"]=frame.gameClockBefore;
-            result["game_clock_after"]=frame.gameClockAfter;
-        }
+            {"row_stride",frame.rowStride},{"forced_render",false},{"used_3d",frame.used3D},
+            {"mode",lvz::recording::DrawMode},{"frame_version",frameCache_.Version()},
+            {"known_rng_unchanged",true},{"game_clock_before",NativeTick()},{"game_clock_after",NativeTick()}};
+        result["method"]="cached_controlled_engine_frame";
         if(!frame.ok) {result["reason"]=frame.error;return result;}
         constexpr DWORD flags=CRYPT_STRING_BASE64|CRYPT_STRING_NOCRLF;
         DWORD count=0;
@@ -166,13 +212,14 @@ public:
     }
     Json SeedRng(uint32_t seed) override {
         std::string error;bool ok=lvz::determinism::SeedRng(seed,"paused_at_boundary",error);
+        if(ok&&Ready()) {seededAtBoundary_=true;boundarySeed_=seed;}
         return {{"ok",ok},{"error",error}};
     }
     Json RestoreClocks(const Json& snapshot) override {
         std::string error;bool ok=lvz::determinism::RestoreClocks(snapshot,"paused_at_boundary",error);
         return {{"ok",ok},{"error",error}};
     }
-    void CloseRecording() override { lvz::determinism::Shutdown();lvz::CloseRecording(); }
+    void CloseRecording() override { lvz::recording::SealDrawGate();lvz::determinism::Shutdown();lvz::CloseRecording(); }
     Json Initialize(const Json& params) override {
         auto reject=[](const char* reason){return Json{{"ok",false},{"error",reason}};};
         int ui=AGetPvzBase()->GameUi();
@@ -205,6 +252,7 @@ public:
     }
 };
 GameBackend backend;
+bool DrawReady() {return backend.Ready();}
 std::unique_ptr<Controller> controller;
 // Intentionally process-lifetime storage: the module is pinned after startup.
 // Explicit Shutdown joins workers on the game thread, never under loader lock.
@@ -217,6 +265,8 @@ void Start(const std::filesystem::path& directory) {
     HMODULE pinned=nullptr;
     if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
         reinterpret_cast<LPCWSTR>(&Start),&pinned)) throw std::runtime_error("Cannot pin resident runtime");
+    std::string drawError;
+    if(!lvz::recording::InstallDrawGate(ownerThread,&DrawReady,drawError))throw std::runtime_error(drawError);
     lvz::determinism::Initialize(directory);
     JournalOptions journal;journal.path=directory/"decisions/runtime-requests.bin";
     controller=std::make_unique<Controller>(backend,std::move(journal));controller->Boundary();
@@ -227,11 +277,12 @@ void Shutdown() {
     if(!controller) return;
     CheckThread();controller->Stop("runtime_shutdown");
     server->Stop();delete server;server=nullptr;
-    lvz::determinism::Shutdown();controller.reset();
+    lvz::recording::SealDrawGate();lvz::determinism::Shutdown();controller.reset();
 }
 bool BeforeFrameImpl() {
     if(!controller) return true;
     CheckThread();
+    if(!CheckPumpGate(*controller,[]{lvz::recording::CheckDrawGate();},[]{server->Drain(*controller);}))return false;
     if(initializationState=="initializing") FinishContinueDialog();
     bool fight=backend.Ready();
     if(wasFight&&!fight) {

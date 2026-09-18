@@ -154,13 +154,17 @@ def stop(run: Path) -> dict:
     return result
 
 
-def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90.0, seed: int = 0) -> dict:
+def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90.0, seed: int = 0,
+          defer_preparation: bool = False) -> dict:
     from .client import connect
     from .session import SessionTrace
     if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
         raise ValueError("seed must be uint32")
+    if type(defer_preparation) is not bool:
+        raise ValueError("defer_preparation must be boolean")
     state = prepare(root, run)
     state["initialization_seed"] = seed
+    state["preparation_deferred"] = defer_preparation
     sandbox = Path(state["sandbox"])
     try:
         receipt = _native(state, "launch", state["engine"], state["bootstrap"], state["sandbox"],
@@ -194,14 +198,20 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
                     time.sleep(0.1)
                 verify_scenario(observation)
                 state["scenario_verified"] = True
+                if not defer_preparation:
+                    from .initialization import apply_recipe
+                    state["initialization_recipe"] = apply_recipe(client, seed, run=run, scenario_verified=True)
+                    observation = client.observation
+                    state["hello"] = client.hello_result
+                else:
+                    # This is scenario evidence only; apply_recipe will bind B0
+                    # and initial.json after the caller's one-time warm draw.
+                    write_json(run / "observations/scenario-ready.json", observation)
             state["status"] = "ready" if initialize else "connected"
             state["initial_observation"] = observation
+            state["render_prepared"] = observation.get("render_prepared", False)
             write_json(run / "launcher.json", state)
             write_json(run / "observations/initial.json", observation)
-            if initialize:
-                from .records import record_initial_state
-                record_initial_state(run, observation_path=run / "observations/initial.json",
-                                     hello=state["hello"], scenario_verified=state["scenario_verified"])
         return state
     except BaseException as error:
         receipt_path = sandbox / "native-receipt.json"
@@ -242,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-initialize", action="store_true")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--defer-preparation", action="store_true",
+                        help="Leave seeded/warm boundary preparation to the evaluation or replay recipe")
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "stop":
@@ -249,7 +261,8 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "prepare":
             result = prepare(arguments.root, arguments.run)
         else:
-            result = start(arguments.root, arguments.run, initialize=not arguments.no_initialize, timeout=arguments.timeout, seed=arguments.seed)
+            result = start(arguments.root, arguments.run, initialize=not arguments.no_initialize,
+                           timeout=arguments.timeout, seed=arguments.seed, defer_preparation=arguments.defer_preparation)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as error:

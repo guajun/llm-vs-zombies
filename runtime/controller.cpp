@@ -10,7 +10,8 @@ Json Success(const std::string& id,Json result) {
     return {{"protocol",1},{"request_id",id},{"ok",true},{"result",std::move(result)}};
 }
 Json Controller::Version() const { return {{"epoch",epoch_},{"tick",tick_},{"revision",revision_}}; }
-Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Version(); return value; }
+Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Version();
+    if(backend_.RequiresRenderPreparation())value["render_prepared"]=backend_.RenderPrepared();return value; }
 Json Controller::Status() const {
     return {{"state",!fault_.empty()?"audit_failed":(!storageFault_.empty()||!journal_.Fault().empty()?"dedup_storage_failed":(pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight"))))},
         {"fault",fault_.empty()?Json(nullptr):Json(fault_)},
@@ -39,6 +40,7 @@ void Controller::Boundary() {
         if(!fault_.empty()||!storageFault_.empty()||!journal_.Fault().empty()) return;
         ++epoch_; tick_=revision_=0; cache_.clear();journal_.Epoch(epoch_);
         captureCache_.clear();captureResponses_.clear();captureMetadataBytes_=0;
+        backend_.ResetRenderPreparation();
     }
     initialized_=true; board_=current; ready_=ready; nativeTick_=clock;
 }
@@ -51,6 +53,7 @@ void Controller::StorageFail(const std::string& message) {
 void Controller::Fail(const std::string& message) {
     if(fault_.empty()) fault_=message.empty()?"Native boundary audit failed":message;
     terminalFrozen_=true;inStep_=false;
+    backend_.InvalidateFrame("controller_fault");
     if(!pending_) return;
     auto p=std::move(*pending_);pending_.reset();
     auto response=Error(p.id,"audit_failed",fault_);
@@ -71,6 +74,7 @@ void Controller::AfterStep() {
     // A replacement/freed Board has no comparable native clock. In particular,
     // do not subtract a new Board's clock or fabricate a post_step for it.
     if(!sameBoard) {
+        backend_.InvalidateFrame("terminal_board_transition");
         terminalFrozen_=true;
         Audit("terminal_transition",{{"request_id",pending_->id},{"native_tick_delta",nullptr},
             {"tick_delta_verified",false},{"board_identity_preserved",false}});
@@ -80,7 +84,23 @@ void Controller::AfterStep() {
     const int64_t delta=static_cast<int64_t>(afterTick)-static_cast<int64_t>(preTick_);
     if (delta>0 && delta<=MaxTicks) { tick_+=delta; pending_->executed+=delta; revision_=0; }
     nativeTick_=afterTick;
-    Audit("post_step",{{"request_id",pending_->id},{"native_tick_delta",delta},{"executed_ticks",pending_->executed}});
+    Json post={{"request_id",pending_->id},{"native_tick_delta",delta},{"executed_ticks",pending_->executed}};
+    if(delta==1&&!terminal&&backend_.RequiresRenderPreparation()) {
+        // Do not emit an Audit event before rendering: pre_step's original
+        // spawn/particle boundary must stay active through both update+draw.
+        try {post["render"]=backend_.RenderFrame(Version(),false);}
+        catch(const std::exception& error) {
+            Audit("render_failed",{{"request_id",pending_->id},{"actual_executed_ticks",pending_->executed},{"message",error.what()}});
+            Fail(std::string("Controlled render failed after native update: ")+error.what());return;
+        }
+    } else if(terminal||delta!=1) {
+        backend_.InvalidateFrame("unverified_or_terminal_update");
+        if(terminal&&delta==1&&backend_.RequiresRenderPreparation())
+            post["render"]={{"schema","lvz.controlled-render.v1"},{"mode","deterministic_draw_schedule_v1"},
+                {"phase","terminal"},{"skipped",true},{"reason","left_ready_fight"},
+                {"frame_version",Version()},{"native_clock",afterTick},{"cache_invalidated",true}};
+    }
+    Audit("post_step",post);
     if(terminal) {
         terminalFrozen_=true;
         Audit("terminal_transition",{{"request_id",pending_->id},{"native_tick_delta",delta},
@@ -186,7 +206,7 @@ void Controller::Request(const Json& req,Reply reply) {
             } else reply(Success(id,Status()));
             return;
         }
-        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording") {
+        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render") {
             reply(Error(id,"unsupported_method","Method is not implemented")); return;
         }
         std::string canonical=req.dump();
@@ -233,7 +253,8 @@ void Controller::Request(const Json& req,Reply reply) {
             try {
                 const auto beforeClock=backend_.NativeTick();
                 const auto beforeBoard=backend_.BoardIdentity();
-                auto result=backend_.CaptureFrame(params);
+                auto captureParams=params;captureParams["frame_version"]=Version();
+                auto result=backend_.CaptureFrame(captureParams);
                 if(!result.is_object()||!result.contains("capture_ok")||!result["capture_ok"].is_boolean())
                     throw std::runtime_error("Capture backend must return a boolean capture_ok");
                 const bool rngChanged=result.contains("known_rng_unchanged")&&result["known_rng_unchanged"]==false;
@@ -260,7 +281,7 @@ void Controller::Request(const Json& req,Reply reply) {
             // audit or the action dedup budget. Expired IDs remain tombstones.
             reply(std::move(response));return;
         }
-        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||req.contains("expect")) {
+        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||req.contains("expect")) {
             if(!req.contains("expect") || req["expect"]!=Version()) {
                 reply(Error(id,"stale_observation","expect must exactly match epoch, tick and revision")); return;
             }
@@ -282,6 +303,22 @@ void Controller::Request(const Json& req,Reply reply) {
         if(method=="stop_recording") {
             Audit("recording_closed",{{"request_id",id}});backend_.CloseRecording();recordingClosed_=true;
             Complete(id,Success(id,{{"closed",true},{"observation",Observe()}}),true);return;
+        }
+        if(method=="prepare_render") {
+            if(!params.empty()) {Complete(id,Error(id,"invalid_params","prepare_render takes no parameters"));return;}
+            if(!ready_||terminalFrozen_||inStep_||tick_!=0) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing requires a paused ready fight at tick zero"));return;}
+            if(!backend_.RequiresRenderPreparation()||backend_.RenderPrepared()) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing is unavailable or has already completed"));return;}
+            ++revision_;
+            Audit("render_preparing",{{"request_id",id}});
+            Json receipt;
+            try {receipt=backend_.RenderFrame(Version(),true);}
+            catch(const std::exception& error) {
+                Fail(std::string("Warm drawing failed: ")+error.what());
+                Audit("render_failed",{{"request_id",id},{"warm",true},{"message",error.what()}});
+                Complete(id,Error(id,"render_failed",error.what()));return;
+            }
+            Audit("render_prepared",{{"request_id",id},{"render",receipt}});
+            Complete(id,Success(id,{{"prepared",true},{"render",receipt},{"observation",Observe()}}));return;
         }
         if(method=="rng_restore"||method=="rng_seed"||method=="clock_restore") {
             if(!ready_||terminalFrozen_||inStep_) { Complete(id,Error(id,"not_in_fight","State initialization requires a paused fight boundary"));return; }
@@ -307,6 +344,7 @@ void Controller::Request(const Json& req,Reply reply) {
             }
             if(!result.value("ok",false)) { Complete(id,Error(id,method+"_rejected",result.value("error",std::string("State initialization failed"))));return; }
             if(method=="clock_restore") nativeTick_=backend_.NativeTick();
+            backend_.InvalidateFrame(method);
             ++revision_;result["observation"]=Observe();Audit(event,payload);
             Complete(id,Success(id,std::move(result)));return;
         }
@@ -319,6 +357,9 @@ void Controller::Request(const Json& req,Reply reply) {
             Complete(id,Success(id,std::move(result)));return;
         }
         if(!ready_||terminalFrozen_) { Complete(id,Error(id,"not_in_fight","A stable active fight without a frozen terminal transition is required")); return; }
+        if(backend_.RequiresRenderPreparation()&&!backend_.RenderPrepared()) {
+            Complete(id,Error(id,"render_not_prepared","Seed/read back RNG and restore clocks, then prepare_render before advancement/actions"));return;
+        }
         const char* countKey=method=="advance"?"max_ticks":"advance_ticks";
         Json count=params.value(countKey,Json(0));
         if(!count.is_number_integer()||count.get<int64_t>()<0||count.get<int64_t>()>MaxTicks) {
@@ -342,6 +383,7 @@ void Controller::Request(const Json& req,Reply reply) {
             outcome["ordinal"]=i; outcome["action"]=actions[i];
             // Even failed calls can touch cursor/selection state; conservatively invalidate observations.
             ++revision_;
+            backend_.InvalidateFrame("action_attempt");
             pending_->actions.push_back(outcome);
             Audit("action",{{"request_id",id},{"ordinal",i},{"action",actions[i]},{"result",outcome}});
             if(!outcome.value("ok",false)) { Finish("action_failed"); return; }

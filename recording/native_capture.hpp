@@ -31,8 +31,10 @@ struct CaptureResult {
 // Checks this exact 1.0.0.1051 image and the functions/field-access instructions
 // used here. This is not permission to capture from an arbitrary thread.
 bool ValidateCaptureTarget() noexcept;
-// Must be called on the runtime's game thread at a paused, version-checked
-// boundary. Pass its previously established thread ID, not a new worker's ID.
+// Internal render stage only: this changes original engine rendering state and
+// may consume RNG. Never call this API from capture_frame. The draw gate must
+// already be installed, and the caller retains all resulting state in audit.
+// Pass the previously established game thread ID, not a new worker's ID.
 // No HWND operations, foreground changes, desktop capture or input injection.
 CaptureResult CaptureOriginalFrame(uint32_t gameThreadId);
 }

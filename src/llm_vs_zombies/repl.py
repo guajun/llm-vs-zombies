@@ -94,12 +94,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trace", type=Path, required=True, help="Append-only client session JSONL")
     parser.add_argument("--timeout", type=float, default=15.0, help="Whole request deadline in seconds")
     parser.add_argument("--script", type=Path, help="Execute a file with game/plant/shovel in scope, then exit")
+    parser.add_argument("--seed", type=int, default=0, help="Seed used only for an unprepared ready controlled-draw game")
+    parser.add_argument("--defer-preparation", action="store_true",
+                        help="Leave one-time render preparation to an explicit initialization recipe")
     args = parser.parse_args(argv)
     try:
         with SessionTrace(args.trace) as trace:
             trace.emit("session_start", {"pid": args.pid, "endpoint": args.endpoint, "script": str(args.script) if args.script else None})
             try:
                 with connect(pid=args.pid, endpoint=args.endpoint, trace=trace, timeout=args.timeout) as game:
+                    if not args.defer_preparation:
+                        from .initialization import ensure_render_prepared
+                        ensure_render_prepared(game, args.seed)
                     console = RecordedConsole(game, trace)
                     if args.script:
                         return 0 if console.execute_cell(args.script.read_text(encoding="utf-8"), str(args.script)) else 1

@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 from .audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA as AUDIT_SCHEMA, canonical,
                             audit_files, digests, file_hash, first_difference, hash_backend, jsonl, particle_semantics,
-                            spawn_semantics, read_json, version)
+                            spawn_semantics, read_json, version, DRAW_SCHEDULE_MODE, draw_mode, render_semantics)
 from .client import Client, OutcomeUnknown, RemoteError
 
 SCHEMA = "lvz.engine-replay.v1"
@@ -93,6 +93,7 @@ def _validate_identity(identity: dict) -> None:
     game = identity["game"]
     if game.get("schema") != AUDIT_SCHEMA or game.get("loaded_signatures_match") is not True:
         raise EvidenceError("unsupported game target identity")
+    draw_mode(game)
 
 
 def _validate_initial(initial: dict) -> None:
@@ -110,7 +111,40 @@ def _validate_initial(initial: dict) -> None:
         raise EvidenceError("initial full audit_snapshot is required")
     if initial["state"].get("rng", {}).get("target") != initial["identity"]["game"].get("target"):
         raise EvidenceError("initial RNG/game target mismatch")
+    mode = draw_mode(initial["identity"]["game"])
+    if mode:
+        expected = {"mode": mode, "warm_frames": 1, "step_frames": 0}
+        if (initial["initialization"].get("execution_mode") != mode
+                or initial["initialization"].get("draw_schedule") != initial["identity"]["game"]["draw_schedule"]
+                or observation.get("render_prepared") is not True
+                or first_difference(expected, initial["state"].get("draw_schedule"))):
+            raise EvidenceError("initial marker must declare the prepared controlled draw mode")
+    elif ("draw_schedule" in initial["state"]
+          or initial["initialization"].get("execution_mode") == DRAW_SCHEDULE_MODE):
+        raise EvidenceError("initial controlled drawing lacks an explicit engine identity")
     digests(initial["state"])
+
+
+def _validate_capture_mode(response, before, after, mode):
+    result = response.get("result", {})
+    if not mode:
+        if result.get("mode") == DRAW_SCHEDULE_MODE or result.get("method") == "cached_controlled_engine_frame":
+            raise EvidenceError("cached controlled capture lacks an explicit engine identity")
+        return
+    if after != before:
+        raise EvidenceError("cached capture changed the simulation boundary")
+    if response.get("ok") is not True:
+        return  # An explicit RPC failure has no invented frame receipt.
+    if result.get("forced_render") is not False:
+        raise EvidenceError("controlled capture must read its cache without drawing")
+    if result.get("capture_ok"):
+        if (result.get("mode") != mode or result.get("method") != "cached_controlled_engine_frame"
+                or result.get("frame_version") != before or result.get("version") != before
+                or result.get("known_rng_unchanged") is not True
+                or type(result.get("game_clock_before")) is not int
+                or result.get("game_clock_before") != result.get("game_clock_after")
+                or result.get("width") != 800 or result.get("height") != 600 or result.get("pixel_format") != "bgr24"):
+            raise EvidenceError("cached capture receipt is stale or lacks its read-only guards")
 
 
 def _capture_response(response: dict) -> tuple[dict, dict | None]:
@@ -331,6 +365,8 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
         raise EvidenceError("trajectory has no executed requests")
     if audit.manifest != initial["identity"]["game"]:
         raise EvidenceError("native audit target/coverage identity differs from hello")
+    audit.validate_draw_initial(initial)
+    mode = draw_mode(audit.manifest)
     if _native_steps(audit) != [step for step in steps if step["request"]["method"] in STEP_METHODS]:
         raise EvidenceError("native authoritative requests/results differ from source trajectory")
     current = initial["observation"]["version"]
@@ -369,6 +405,7 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
         if method == "capture_frame":
             response = step["capture_response"]
             after = version(step.get("after_version"))
+            _validate_capture_mode(response, current, after, mode)
             if (after["epoch"] != current["epoch"] or after["tick"] != current["tick"]
                     or after["revision"] not in {current["revision"], current["revision"] + 1}):
                 raise EvidenceError("capture is missing an actual bounded post-response boundary")
@@ -575,6 +612,12 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
               "scope": "captured state, actual action outcomes, and controlled initializer-exit spawns",
               "requests": [], "equal": False, "spawn_events_compared": 0, "spawn_exercised": False}
     report["audit_hash_backend"] = hash_backend()
+    controlled_draw = draw_mode(trajectory.audit.manifest)
+    report["draw_schedule"] = {"mode": controlled_draw or "legacy_autonomous_draw_schedule",
+        "original_engine_bitwise_unmodified": False if controlled_draw else None,
+        "warm_receipts_compared": 0, "step_receipts_compared": 0, "terminal_skips_compared": 0,
+        "final_health_verified": False, "automatic_draw_counters_compared": False,
+        "source_health": trajectory.audit.draw_health}
     report["particle_shake"] = {"mode": trajectory.audit.manifest.get("particle_shake", {}).get("mode", "not_declared"),
                                 "original_engine_bitwise_unmodified": False if trajectory.audit.manifest.get("particle_shake") else None,
                                 "semantic_seed_calls_compared": 0, "raw_pointer_seeds_compared": False,
@@ -617,6 +660,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             require_equal(session.identity["build"], hello.get("build"), "live_build")
             require_equal(session.identity["game"], hello.get("game"), "live_game")
             required = {"observe", "audit_snapshot"} | {step["request"]["method"] for step in trajectory.steps if step["request"]["method"] in STEP_METHODS}
+            if controlled_draw:
+                required.update({"prepare_render", DRAW_SCHEDULE_MODE})
             if report["pause_controls"]["recorded"]:
                 # Protocol v1 implements these controller methods, but historic
                 # hello manifests omit their capability keys. Probe status and
@@ -669,6 +714,15 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             source_frame_stream = trajectory.audit._frames(reuse_state=True)
             actual_audit = AuditTail(session.audit_directory)
             require_equal(trajectory.audit.manifest, actual_audit.manifest, "audit_manifest")
+            if controlled_draw:
+                # Consume initialization evidence before executing any recorded
+                # request. Warm rendering belongs to B0, never to tick one.
+                if any(actual_audit.read_request(None)):
+                    raise EvidenceError("initializer executed an audited update before B0")
+                actual_audit.validate_draw_initial({"observation": observation, "state": snapshot["state"]})
+                require_equal(render_semantics(trajectory.audit.warm_render, map_version=mapped_version),
+                              render_semantics(actual_audit.warm_render), "initial_warm_render")
+                report["draw_schedule"]["warm_receipts_compared"] = 1
             for ordinal, step in enumerate(trajectory.steps):
                 if target_tick is not None and client.version["tick"] >= target_tick:
                     break
@@ -714,6 +768,9 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     continue
                 if req["method"] == "capture_frame":
                     report["capture_interventions"]["attempted"] += 1
+                    capture_before = client.request("audit_snapshot") if controlled_draw else None
+                    if capture_before is not None:
+                        require_equal(client.version, capture_before.get("version"), f"capture[{ordinal}].before_boundary")
                     try:
                         actual_result = client.request("capture_frame", params, expect=mapped_version(req["expect"]), request_id=actual_id)
                         actual_response = {"ok": True, "result": actual_result}
@@ -731,6 +788,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     wanted = copy.deepcopy(step["capture_response"])
                     if wanted["ok"]:
                         wanted["result"]["version"] = mapped_version(wanted["result"]["version"])
+                        if "frame_version" in wanted["result"]:
+                            wanted["result"]["frame_version"] = mapped_version(wanted["result"]["frame_version"])
                     require_equal(wanted, actual_metadata, f"capture[{ordinal}].metadata")
                     require_equal(step["pixels_evidence"] is not None, actual_pixels is not None, f"capture[{ordinal}].pixel_evidence_present")
                     if actual_pixels is not None:
@@ -738,13 +797,17 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     # Read the actual current observation even after an explicit
                     # capture failure; never synthesize it from expected values.
                     observation = client.observe()
+                    _validate_capture_mode(actual_metadata, mapped_version(source_before), observation["version"], controlled_draw)
                     require_equal(mapped_version(step["after_version"]), observation["version"], f"capture[{ordinal}].after_version")
                     if "observation_after" in step:
                         require_equal(mapped_observation(step["observation_after"]), observation, f"capture[{ordinal}].observation")
-                    if "state_after" in step:
+                    if "state_after" in step or controlled_draw:
                         snapshot = client.request("audit_snapshot")
                         require_equal(client.version, snapshot.get("version"), f"capture[{ordinal}].snapshot_boundary")
-                        require_equal(step["state_after"], snapshot.get("state"), f"capture[{ordinal}].state")
+                        if "state_after" in step:
+                            require_equal(step["state_after"], snapshot.get("state"), f"capture[{ordinal}].state")
+                        if capture_before is not None:
+                            require_equal(capture_before.get("state"), snapshot.get("state"), f"capture[{ordinal}].read_only_state")
                     execution["observation_after"] = observation
                     execution["post_capture_state_compared"] = "state_after" in step
                     report["capture_interventions"]["compared"] += 1
@@ -779,6 +842,11 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     require_equal(req["request_id"], left.payload.get("request_id"), "source_frame_request")
                     require_equal(left.kind, right.kind, f"audit[{ordinal}:{index}].phase")
                     require_equal(mapped_version(left.version), right.version, f"audit[{ordinal}:{index}].version")
+                    require_equal(render_semantics(left.payload.get("render"), map_version=mapped_version),
+                                  render_semantics(right.payload.get("render")), f"audit[{ordinal}:{index}].render")
+                    if controlled_draw and right.kind == "post_step":
+                        key = "terminal_skips_compared" if right.payload["render"]["phase"] == "terminal" else "step_receipts_compared"
+                        report["draw_schedule"][key] += 1
                     require_equal([particle_semantics(event, map_version=mapped_version) for event in left.particle_seeds],
                                   [particle_semantics(event) for event in right.particle_seeds],
                                   f"audit[{ordinal}:{index}].particle_shake")
@@ -857,13 +925,17 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 on_takeover(session, copy.deepcopy(report["takeover"]))
         particle_required = trajectory.audit.manifest.get("particle_shake") is not None
         spawn_required = report["spawn_comparison"]["hook_declared"] or trajectory.audit.birth_counts["controlled"] > 0
-        if particle_required or spawn_required:
+        if particle_required or spawn_required or controlled_draw:
             if on_takeover is None:
                 actual_audit.verify_closed()
+                closed_audit = actual_audit
             else:
-                AuditLog(session.audit_directory, require_closed=True)
+                closed_audit = AuditLog(session.audit_directory, require_closed=True)
             report["particle_shake"]["final_health_verified"] = particle_required
             report["spawn_comparison"]["final_health_verified"] = spawn_required
+            if controlled_draw:
+                report["draw_schedule"].update(final_health_verified=True, actual_health=closed_audit.draw_health,
+                    health_scope="full_branch" if on_takeover else "executed_prefix")
             if on_takeover is None:
                 require_equal(report["spawn_events_compared"], actual_audit.birth_counts["controlled"],
                               "spawn.uncompared_close_events")

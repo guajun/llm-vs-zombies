@@ -8,19 +8,17 @@
 
 ```python
 from llm_vs_zombies.engine_replay import capture_initial, identity_from_launcher
+from llm_vs_zombies.initialization import apply_recipe
 
-# client 是已连接、已初始化并暂停在 B(0) 的 Client。
+# client 已加载场景并暂停，launcher 使用 defer_preparation=True。
+# 双方均 seed → clock_restore → verify → prepare_render 一次 → postwarm B(0)。
+recipe = apply_recipe(client, seed=42)
 # launcher_state 来自这个实际进程的 launcher.start()，不能从目标轨迹复制。
 identity = identity_from_launcher(client.hello(), launcher_state)
 marker = capture_initial(
     client,
     identity=identity,
-    initialization={
-        "scenario": "liangyi",
-        "game_mode": 13,
-        "cards": [16, 30, 14, 63, 15, 2, 20, 17, 8, 27],
-        # 记录实际执行的 seed/clock 初始配置；不要填写尚未执行的配置。
-    },
+    initialization=recipe,
 )
 
 client.commit([{"op": "plant", "type": 8, "row": 2, "col": 5}], advance_ticks=1)
@@ -96,7 +94,23 @@ python -m llm_vs_zombies.engine_replay run trajectory-dir replay-output `
 
 这里 `my_experiment:cold_start` 是使用者自己的 Python 函数入口，签名如上；本命令不会自动下载游戏或猜测初始化配置。项目实验运行器可以直接组合 launcher 与 replay API。
 
+## 明确的绘制调度模式
+
+`deterministic_draw_schedule_v1` 将原版绘制纳入控制边界：先按实际 seed 和 clock 配方执行一次 warm draw，之后每个已验证的普通 +1 更新执行一次原版绘制，再写 `post_step`。自动战斗绘制被 gate 拒绝，截图只读取最后的缓存。此模式改变原版的绘制调度，`original_engine_bitwise_unmodified:false`；旧 EB40 等轨迹继续以旧模式读取，不能用新模式冒充同一个实验身份。
+
+manifest/hello 的完整 `draw_schedule` 规范进入轨迹 identity。初态必须是 warm1/step0、`render_prepared:true`；recipe 中的 seed、prewarm `clock_anchor`、`postwarm_clock` 和 RNG SHA-256 必须与 native `render_preparing → render_prepared` 凭证及实际 B(0) 一致。warm 之前的 624 个 MT words、cursor 和 CRT 状态独立按种子公式核验。warm 可以消耗 RNG，记录它的真实前后摘要，不恢复 RNG 来制造相等。重放开始前读取已同步落盘的 warm 证据；缺失或半行不会通过推进第一帧补救。
+
+每个普通 `post_step.payload.render` 必须含且仅代表一次 step 绘制：精确 frame_version、native clock、前后完整 clock、RNG 摘要、像素格式及累计计数。读取器把这些值与当前全状态、warm 和全部先前 receipt 核对；重放还逐项比较 receipt，只映射 epoch 和初始化 revision。绘制期间发生的出生和粒子调用仍属于同一 pre→post 更新边界，照常逐条比较，不能因 controller tick 已增加而改绑到下一帧。未声明模式却出现新 receipt、缺失、重复、错序或计数不符均拒绝。
+
+同 Board 的已验证 +1 终局可以有明确的 `phase:terminal, skipped:true, reason:left_ready_fight, cache_invalidated:true` receipt。此时 audited UI 已离开战斗，step_frames 不增加；同请求随后必须有唯一 verified terminal_transition 和 scene_changed completion。对应 post 生成的只读 first-boundary birth 注释可以出现在两者之间，真正的出生初始化、粒子调用或新动作不可以。普通战斗不能借此跳过绘制，零 GameClock 增量的终局仍拒绝。
+
+源和实际记录都必须以健康的 `draw_schedule_closed` 封口，验证 controlled_calls = warm_frames + step_frames 及零 fault/wrong_thread。`automatic_allowed/automatic_denied` 是墙钟调度诊断，完整保存但不要求跨进程相等。报告 `draw_schedule` 分别给出 warm/step/terminal-skip 的实际比较次数、源/实际健康摘要及比较范围；seek 只比较实际重算前缀，分支回调后的健康摘要明确标作 full_branch。
+
 ## 捕获原画面也是要重现的操作
+
+新绘制模式要求缓存捕获返回 `forced_render:false`、`method:cached_controlled_engine_frame`、精确 `frame_version == expect == version`，以及未变的 RNG/clock guard。成功和明确失败都保留在原始轨迹中并实际重放；重放同时取实际前后完整快照，缓存读取若改变任何已覆盖状态即失败。图像像素仍单独散列归档，不以像素一致代替游戏状态一致。
+
+以下强制绘制说明仅适用于未声明新 draw_schedule 的旧录制：
 
 `capture_frame` 会在源 SessionTrace 的原位置保留为独立干预，并在重放中实际调用同一接口。不会因为 tick 没有增加就跳过一次强制绘制。成功帧、协议成功但 `capture_ok:false` 的捕获失败、以及有明确错误响应的 `RemoteError` 都能保留；超时、断连或无法判断是否完成的操作仍拒绝打包/继续重放。
 
@@ -148,7 +162,13 @@ replayer 比较末帧状态及转场字段，然后刷新观察以获取 Control
 python tools/check-boundary-equivalence.py work/single-trajectory work/batch-trajectory --purpose batch --ticks 100 --output work/batch-acceptance.json
 ```
 
-录像干预组使用相同动作时序与 seed/初始化配方，左组关闭 capture，右组按实际录像节奏调用成功的 `capture_frame`。右组所有捕获都必须实际 forced_render、报告 known RNG 未变且前后 GameClock 一致。每次捕获后必须至少有一个受审计的推进帧；在最后一帧才捕获而没有后续审计，不能证明动画等隐藏状态未变，工具会拒绝。视频是否写入 FFmpeg 不影响这里的游戏状态判据，但正式录像实验仍应保留视频和 frame mapping。
+有实际策略动作的较长区间可用 `--purpose schedule` 比较不同推进分组。两份关闭轨迹必须有相同 B(0)、总 ticks、每次动作的 tick/顺序/载荷/结果，且都不含 capture；实际预算序列必须不同，并至少有一次多 tick 请求。所有 pre/post 的相对版本、完整状态、绘制 receipt、RNG、粒子和出生检查保持不变。该模式不替代无动作的严格 single-vs-batch 验收，也不重新运行策略来生成另一套动作。
+
+```powershell
+python tools/check-boundary-equivalence.py work/policy-single work/policy-grouped --purpose schedule --ticks 5000 --output work/schedule-acceptance.json
+```
+
+录像干预组使用相同动作时序与 seed/初始化配方，左组关闭 capture，右组按实际录像节奏调用成功的 `capture_frame`。新模式要求只读缓存，旧模式要求实际 forced_render；二者都报告 known RNG 未变且前后 GameClock 一致。每次捕获后必须至少有一个受审计的推进帧；在最后一帧才捕获而没有后续审计，不能证明动画等隐藏状态未变，工具会拒绝。视频是否写入 FFmpeg 不影响这里的游戏状态判据，但正式录像实验仍应保留视频和 frame mapping。
 
 ```powershell
 python tools/check-boundary-equivalence.py work/capture-off-trajectory work/capture-on-trajectory --purpose render --ticks 100 --output work/render-acceptance.json
@@ -212,6 +232,7 @@ python tools/check-boundary-equivalence.py work/capture-off-trajectory work/capt
 python -m llm_vs_zombies.engine_replay demo work/replay-demo
 python -m unittest discover -s tests -p test_engine_replay.py -v
 python -m unittest discover -s tests -p test_audit_compare.py -v
+python -m unittest discover -s tests -p test_draw_schedule.py -v
 ```
 
 demo 明确使用 synthetic counter，创建两个独立计数器实例并经过真实 Client/SessionTrace/封装/重放路径。它不启动游戏。测试覆盖失败动作的原顺序、同帧 revision、epoch 映射、从头 seek、父分支身份、首个隐藏字段差异、实际响应差异、资产篡改、源记录缺失和已验证/未验证的终局。捕获测试还覆盖强制绘制影响隐藏状态、明确失败与未知结果、轻量/旧版像素证据、保护字段变化，以及图像不同但状态和元数据一致的合法重放。原版冷启动、两旗与扰动证据由独立实机验收提供。

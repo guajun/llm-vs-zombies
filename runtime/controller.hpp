@@ -26,6 +26,11 @@ struct Backend {
     virtual Json SeedRng(uint32_t) { return {{"ok",false},{"error","unsupported"}}; }
     virtual Json RestoreClocks(const Json&) { return {{"ok",false},{"error","unsupported"}}; }
     virtual Json CaptureFrame(const Json&) { return {{"capture_ok",false},{"reason","unsupported"}}; }
+    virtual bool RequiresRenderPreparation() const { return false; }
+    virtual bool RenderPrepared() const { return true; }
+    virtual Json RenderFrame(const Json&,bool) { return Json::object(); }
+    virtual void InvalidateFrame(const std::string&) {}
+    virtual void ResetRenderPreparation() {}
     virtual void CloseRecording() {}
     virtual void Audit(const std::string&, const Json&, const Json&) = 0;
 };

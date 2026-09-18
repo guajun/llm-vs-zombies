@@ -18,6 +18,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from .initialization import DRAW_MODE
+
 
 class VideoError(RuntimeError):
     pass
@@ -256,6 +258,12 @@ class StreamingVideo:
                 raise ValueError("frame geometry, pixel format or source changed")
             if not isinstance(frame.pixels, bytes) or len(frame.pixels) != self.width * self.height * 3:
                 raise ValueError("frame must contain exactly width * height * 3 packed bytes")
+            if self.provider.get("mode") == DRAW_MODE:
+                if (frame.metadata.get("mode") != DRAW_MODE
+                        or frame.metadata.get("method") != "cached_controlled_engine_frame"
+                        or frame.metadata.get("forced_render") is not False
+                        or frame.metadata.get("frame_version") != frame.stamp.as_dict()):
+                    raise ValueError("controlled video requires exact cached-frame evidence")
             # Validate metadata before sending irreversible bytes to the encoder.
             json.dumps(frame.metadata, allow_nan=False)
         except (ValueError, TypeError) as exc:

@@ -1,4 +1,5 @@
 #include "native_capture.hpp"
+#include "draw_gate.hpp"
 #include <windows.h>
 #include <ddraw.h>
 #include <d3d.h>
@@ -133,14 +134,13 @@ bool ValidateCaptureTarget() noexcept {
     const auto* nt=reinterpret_cast<IMAGE_NT_HEADERS32*>(0x400000+dos->e_lfanew);
     if(nt->Signature!=IMAGE_NT_SIGNATURE||nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_I386||
        nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR32_MAGIC) return false;
-    static constexpr uint8_t draw[]={0x6a,0xff,0x68,0xee,0x78,0x64,0x00,0x64,0xa1,0,0,0,0,0x50,0x81,0xec,0x68,0x01,0,0};
     static constexpr uint8_t manager[]={0x8b,0x8e,0x20,0x03,0,0,0x51,0xc6,0x86,0x58,0x04,0,0,0x01,0xe8,0x52,0xc7,0xfe,0xff};
     static constexpr uint8_t image[]={0x8b,0x4d,0x60,0xe8,0xce,0xda,0x04,0};
     static constexpr uint8_t surface[]={0x8b,0x47,0x68,0x53,0x6a,0x11,0x8d,0x94,0x24,0x04,0x01,0,0};
     static constexpr uint8_t flush[]={0x80,0x7e,0x3c,0,0x74,0x1d,0x8b,0x46,0x20,0x8b,0x08,0x8b,0x51,0x18,0x50,0xff,0xd2};
     static constexpr uint8_t crt[]={0xe8,0xb1,0xa9,0,0,0x8b,0x48,0x14,0x69,0xc9,0xfd,0x43,0x03,0};
     static constexpr uint8_t videoOnly[]={0x80,0xbf,0xfc,0x0c,0,0,0,0x75,0x45,0x8b,0x47,0x64};
-    return Match(0x538eb0,draw)&&Match(0x54c74b,manager)&&Match(0x538f5a,image)&&
+    return DrawEntryVerified()&&Match(0x54c74b,manager)&&Match(0x538f5a,image)&&
         Match(0x5630ed,surface)&&Match(0x568ec0,flush)&&Match(0x61e087,crt)&&Match(0x56354c,videoOnly);
 }
 
@@ -163,6 +163,13 @@ CaptureResult CaptureOriginalFrame(uint32_t gameThreadId) {
         if(!screenImage||Read<uintptr_t>(manager+0x60)!=screenImage) throw std::runtime_error("widget target is not the engine screen image");
         auto* surface=reinterpret_cast<IDirectDrawSurface*>(Read<uintptr_t>(dd+0x68));
         if(!surface||!Accessible(reinterpret_cast<uintptr_t>(surface),sizeof(void*))) throw std::runtime_error("engine draw surface is unavailable");
+        auto verifyTarget=[&] {
+            if(Read<uintptr_t>(AppPointer)!=app||Read<uintptr_t>(app+0x768)!=board||Read<int>(app+0x7fc)!=3
+                ||Read<uintptr_t>(app+0x320)!=manager||Read<uintptr_t>(app+0x36c)!=dd
+                ||Read<uintptr_t>(dd+0xce8)!=screenImage||Read<uintptr_t>(manager+0x60)!=screenImage
+                ||Read<uintptr_t>(dd+0x68)!=reinterpret_cast<uintptr_t>(surface)||Read<uint8_t>(dd+0xcfc))
+                throw std::runtime_error("engine draw target identity changed during controlled rendering");
+        };
         result.used3D=Read<uint8_t>(dd+0x38)!=0;
         uintptr_t d3d=0;
         if(result.used3D) {
@@ -178,17 +185,19 @@ CaptureResult CaptureOriginalFrame(uint32_t gameThreadId) {
             if(FAILED(hr)) throw std::runtime_error("could not clear the engine's 3D draw target");
         }
         // Proven caller at 0x54c74b pushes manager; callee ends with ret 4.
-        using DrawScreen=bool (__stdcall*)(void*);
         bool drew=false;
         {DrawingGuard drawing(app);
             result.forcedRender=true;
-            drew=reinterpret_cast<DrawScreen>(0x538eb0)(reinterpret_cast<void*>(manager));}
+            drew=DrawControlled(reinterpret_cast<void*>(manager));}
         if(result.used3D) Flush3D(d3d);
         result.gameClockAfter=Read<int>(board+0x5568);
         result.knownRngUnchanged=randomBefore.Unchanged();
-        if(result.gameClockAfter!=result.gameClockBefore||!result.knownRngUnchanged)
-            throw std::runtime_error("capture rendering changed the game clock or a monitored RNG; pixels rejected");
+        // Drawing is now a deterministic part of each controlled step. Its
+        // actual RNG consumption is retained and audited, never restored.
+        if(result.gameClockAfter!=result.gameClockBefore)
+            throw std::runtime_error("controlled drawing changed the game clock; pixels rejected");
         if(!drew) throw std::runtime_error("engine did not draw current widgets; refusing stale frame");
+        verifyTarget();
         DDSURFACEDESC desc{};desc.dwSize=sizeof(desc);
         LockGuard locked{surface};HRESULT status=DDERR_WASSTILLDRAWING;
         for(int attempt=0;attempt<64;++attempt) {
@@ -208,6 +217,7 @@ CaptureResult CaptureOriginalFrame(uint32_t gameThreadId) {
         auto* lowest=static_cast<uint8_t*>(desc.lpSurface);
         if(layout.pitch<0) lowest+=int64_t(layout.pitch)*(layout.height-1);
         result.pixels=ConvertPixels({lowest,stride*layout.height},layout);
+        verifyTarget();
         if(std::none_of(result.pixels.begin(),result.pixels.end(),[](uint8_t c){return c!=0;})) throw std::runtime_error("draw surface is entirely black; capture unavailable");
         result.width=layout.width;result.height=layout.height;result.rowStride=layout.width*3;result.ok=true;
     } catch(const std::exception& error) {result.ok=false;result.error=error.what();result.pixels.clear();}

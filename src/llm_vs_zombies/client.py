@@ -19,9 +19,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from .session import SessionTrace
+from .initialization import DRAW_MODE, draw_mode
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
-READ_ONLY_METHODS = frozenset({"hello", "observe", "status"})
+READ_ONLY_METHODS = frozenset({"hello", "observe", "status", "audit_snapshot"})
 
 
 class ProtocolError(RuntimeError):
@@ -281,8 +282,10 @@ class Client:
             if not isinstance(method, str) or not method:
                 raise ValueError("method must be a nonempty string")
             # New protocol methods may mutate; classify conservatively until known.
-            mutation = method not in READ_ONLY_METHODS
-            if method in {"commit", "advance"} and expect is None:
+            controlled_capture = (method == "capture_frame" and self.hello_result is not None
+                                  and draw_mode(self.hello_result) == DRAW_MODE)
+            mutation = method not in READ_ONLY_METHODS and not controlled_capture
+            if (method in {"commit", "advance", "prepare_render"} or controlled_capture) and expect is None:
                 if self._last_observation is None:
                     self.observe()
                 expect = self.version
@@ -335,6 +338,16 @@ class Client:
                     raise ProtocolError("invalid success response")
                 result = response["result"]
                 _completed_step(method, result)
+                if controlled_capture:
+                    if result.get("forced_render") is not False:
+                        raise ProtocolError("controlled capture must not render")
+                    if result.get("capture_ok") is True:
+                        if (result.get("method") != "cached_controlled_engine_frame"
+                                or result.get("mode") != DRAW_MODE
+                                or _version(result.get("frame_version")) != request["expect"]
+                                or _version(result.get("version")) != request["expect"]
+                                or result.get("known_rng_unchanged") is not True):
+                            raise ProtocolError("controlled capture did not return the exact cached boundary")
                 observation = result if method == "observe" else result.get("observation")
                 if observation is not None:
                     if not isinstance(observation, dict) or "version" not in observation:
@@ -370,6 +383,22 @@ class Client:
 
     def status(self) -> dict[str, Any]:
         return self.request("status")
+
+    def prepare_render(self, *, expect: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        hello = self.hello_result if self.hello_result is not None else self.hello()
+        if draw_mode(hello) != DRAW_MODE:
+            raise ProtocolError("runtime does not support controlled render preparation")
+        return self.request("prepare_render", {}, expect=expect)
+
+    def capture_frame(self, *, expect: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Read cached pixels in new mode; legacy capture retains its old semantics."""
+        if self.hello_result is None:
+            self.hello()
+        if expect is None:
+            if self.version is None:
+                self.observe()
+            expect = self.version
+        return self.request("capture_frame", {"format": "bgr24"}, expect=expect)
 
     def commit(self, actions: Sequence[Mapping[str, Any]], *, advance_ticks: int = 0,
                expect: Mapping[str, Any] | None = None, request_id: str | None = None,

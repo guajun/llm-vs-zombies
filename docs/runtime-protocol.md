@@ -16,6 +16,7 @@ Implementation contract for the native runtime, Python client, replay and tests.
 - `rng_seed`: params `{seed:12345}`, where `seed` is an integer in `0..4294967295` (booleans/floats rejected). Requires exact `expect`, paused active fight, no pending advance, and open recording. It seeds only the target adapter's declared RNG instances. Success increments revision once and records `rng_seeded` with the actual seed.
 - `rng_restore`: params `{snapshot:{...}}`, with the same pause/version restrictions. Success increments revision and records `rng_restored`. It restores known RNG instances, not the Board.
 - `clock_restore`: params `{snapshot:{...}}`, with the same pause/version restrictions. The target backend validates the entire clock sidecar before writing. Success increments revision and records `clocks_restored`; controller native-clock bookkeeping is synchronized so this explicit clock initialization does not trigger an accidental epoch reset. Controller tick, Board object state, wave timers and object ages are not restored. Use this before the experiment's B(0) marker.
+- `prepare_render`: params `{}`, exact `expect`, paused ready fight at tick zero, and no previously completed warm draw. Requires the negotiated `deterministic_draw_schedule_v1` capability. After `rng_seed`, optional `clock_restore`, and verification of the seeded snapshot, it performs exactly one original engine warm draw and creates the initial frame cache. Native code independently verifies all 624 MT words/cursor and the game-thread CRT against the last explicit paused-fight seed **before** drawing. It increments revision and returns `{prepared:true,render:<receipt>,observation}`. Capture the experiment B(0) marker after preparation. A failed warm draw freezes the run; repeated identical request IDs recover the prior result without drawing again. Unprepared `advance`/`commit` returns `render_not_prepared`.
 - `stop_recording`: requires exact `expect` and no pending advancement; flushes/closes native recording. Further state mutations and captures are rejected, and the engine will not resume automatically.
 - Mutations deduplicate same epoch/request_id and identical request content. Changed payload with reused ID fails. New epoch on Board/readiness transitions or an external backward native clock; stale observations fail. RNG and clock sidecar operations retain the epoch and explicitly increment revision. State-changing same-tick actions increment revision.
 - Every action, including failed attempts, goes through the same executor for REPL and replay. Preserve request/execution boundaries and ordinal in logs. Strict determinism and checkpoints remain false until independently verified.
@@ -42,9 +43,38 @@ Capturing without a game-state change does not increment revision. If the backen
 
 Frame responses have a separate dedup cache so video cannot consume the mutation journal's byte budget. Only the latest **four** capture responses are retained, with up to 100,000 request-ID tombstones and 16 MiB of capture request metadata per epoch. A capture request is at most 4096 bytes; each response obeys the ordinary 4 MiB frame bound. An identical expired request ID returns `request_result_expired` and never renders again. Reusing an ID with changed content or another method remains `request_id_conflict`. These limits appear in `hello.limits`. A new epoch clears both action and capture dedup domains.
 
-Original-frame capture is a real engine intervention when it forces drawing. A recording/replay implementation must preserve and evaluate this intervention; it must not silently treat every render as a proven read-only operation merely because controller tick did not change.
+In `deterministic_draw_schedule_v1`, capture only copies the latest CPU-owned original-frame cache. Success requires `method:"cached_controlled_engine_frame"`, `forced_render:false`, the negotiated `mode`, and `frame_version` exactly equal to the current epoch/tick/revision. It never triggers a draw or flush. RNG/clock mutations, attempted actions, epoch/terminal changes and failed rendering invalidate the cache. An action-only zero-tick command therefore cannot immediately produce a fresh picture; capture returns `capture_ok:false` and `frame_cache_stale` or `frame_cache_unavailable: <reason>` until a verified update renders a new frame. The older mode that forced drawing on capture is an intervention and is not interchangeable with this mode.
 
 This contract may gain methods through capability negotiation. It does not itself certify exact stepping or deterministic playback.
+
+## Controlled original drawing
+
+`hello.game.draw_schedule` and `audit/manifest.json.draw_schedule` describe `mode:"deterministic_draw_schedule_v1"`, `installed`, `original_engine_bitwise_unmodified:false`, `target_entry_rva:1281712`, `autonomous_fight_draws:false`, `capture:"cached_bgr24_only"`, `rng_restore_after_draw:false`, and the fixed schedule. `live_verified:false` is not a live acceptance claim. The separate particle-shake execution mode remains in force.
+
+An exact-signature hook at original `WidgetManager::DrawScreen` (0x538eb0, stack argument and `ret 4`) permits initialization UI drawing until the first ready fight. At that moment it latches: automatic drawing is denied during play, pause, disconnect, faults and after recording closure. Only the owning game thread's explicit controlled-render scope may call the original trampoline. Wrong-thread, reentrant or modified-hook calls fail closed. This controls original engine drawing without window/input automation.
+
+Every successful nonterminal native update is `pre_step audit → original update → one full original draw/flush/read → post_step audit`. The last three operations happen before delivering a completed advance. Drawing's actual RNG consumption and rendering-state writes remain in state; RNG is never restored to conceal them. App/Board/manager/DD/image/surface identity and all three clocks are checked around drawing. Every update reads one fixed 800×600 BGR24 frame into a bounded 1,440,000-byte latest-frame buffer even when video is disabled, so video sampling does not alter the simulation schedule. Rendering and pixel-read cost is paid once per update; live overhead requires measurement.
+
+The **pre_step hook boundary stays active through update and drawing**, including original zombie initializers and particle-shake calls. The controller's post version is used to stamp pixels, but no intervening `Audit` call relabels hook events. Only the existing `post_step` drains events and clears the boundary. Its payload contains a `render` receipt:
+
+```json
+{
+  "schema":"lvz.controlled-render.v1", "mode":"deterministic_draw_schedule_v1",
+  "phase":"step", "frame_version":{"epoch":2,"tick":1,"revision":0},
+  "native_clock":3152, "width":800, "height":600, "pixel_format":"bgr24",
+  "clocks_before":{}, "clocks_after":{}, "rng_before":{}, "rng_after":{},
+  "rng_unchanged":true, "rng_restored":false,
+  "counts":{"mode":"deterministic_draw_schedule_v1","warm_frames":1,"step_frames":1}
+}
+```
+
+The clock objects use the complete `CaptureClocks` schema; before and after must be identical. RNG objects contain the existing FNV-1a-64 canonical-JSON `Digests` of `CaptureRng().instances`, including `global_mt`, `game_thread_crt` and `all`. `rng_unchanged` can be false: readers compare the actual state rather than undoing it. Receipts contain no timing or pixel data.
+
+Warm preparation emits `render_preparing`, performs the draw with initialization-labelled hooks, then emits `render_prepared` with `{request_id,render}`. Its receipt uses `phase:"warm"` and adds `seed_readback:{seed,global_mt_words:624,global_mt_cursor:624,game_thread_crt:<seed>,verified_before_draw:true}`. All warm initialization events must precede the first controlled pre-step. `state.draw_schedule` retains `mode,warm_frames,step_frames`; B(0) has 1/0, and each normal update increments only `step_frames`.
+
+A same-Board terminal update with verified delta1 invalidates the cache without drawing the now-non-ready scene. Its post receipt is exactly the terminal variant: `schema`, `mode`, `phase:"terminal"`, `skipped:true`, `reason:"left_ready_fight"`, `frame_version`, `native_clock`, `cache_invalidated:true`. It does not increment draw counts and is valid only with the immediate corresponding verified `terminal_transition`, `scene_changed` completion, and no later updates/actions. Delta0, negative/multiple delta or a different Board still cannot certify a simulated tick.
+
+If rendering fails after an update, `render_failed` records the actual execution count, no successful post snapshot/frame is invented, and the pending request returns the controller fault with actual `executed_ticks`. Closure remains available. Successful close order is `recording_closed → draw_schedule_closed → particle_shake_closed → spawn_hook_closed`. Drawing health requires `installed,latched,sealed,healthy:true`, `active:false`, `faults=wrong_thread_calls=0`, and `controlled_calls=warm_frames+step_frames`. `automatic_allowed` and `automatic_denied` are retained diagnostic counts driven by outer-pump timing; they do not enter state digests or cross-run semantic equality. The gate stays installed after close until the owned process exits.
 
 ## Long-session mutation deduplication
 

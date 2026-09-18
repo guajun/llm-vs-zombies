@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .video import StreamingVideo, TickStamp, VideoError, VideoFrame
+from .initialization import DRAW_MODE, LEGACY_DRAW_MODE, draw_mode
 
 
 class CaptureUnavailable(RuntimeError):
@@ -27,20 +28,30 @@ class RemoteGameFrameProvider:
     def __init__(self, request: Callable, capability: dict):
         self.request, self.capability = request, dict(capability)
         self.last_observation: dict | None = None
+        self.mode = self.capability.get("mode", LEGACY_DRAW_MODE)
+        if self.mode not in (DRAW_MODE, LEGACY_DRAW_MODE):
+            raise ValueError("unsupported original-frame capture mode")
+
+    @classmethod
+    def from_hello(cls, request: Callable, hello: dict) -> "RemoteGameFrameProvider":
+        """Bind capture behavior to the actually negotiated native mode."""
+        mode = draw_mode(hello)
+        return cls(request, {"available": hello.get("capabilities", {}).get("capture_frame") is True,
+            "mode": mode, "hidden_window_support": "runtime_reported_not_live_verified"})
 
     def capabilities(self) -> dict:
         return {**self.capability, "source": "original_game_frame",
                 "available": self.capability.get("available") is True,
-                "method": "runtime_capture_rpc"}
+                "mode": self.mode,
+                "method": "cached_controlled_engine_frame" if self.mode == DRAW_MODE else "runtime_capture_rpc"}
 
     def capture(self, observation: dict) -> VideoFrame:
         self.last_observation = None
         try:
             return self._capture(observation)
         except CaptureUnavailable:
-            # Rendering can reveal a changed boundary, and a failed RPC may
-            # have completed before transport failure. Refresh if the same
-            # connection remains usable; never retry the capture automatically.
+            # Legacy capture can mutate; cached capture may expose stale caller
+            # state. Refresh if possible, without retrying or warming/rendering.
             if self.capabilities()["available"]:
                 try:
                     refreshed = self.request("observe", {}, None)
@@ -58,11 +69,24 @@ class RemoteGameFrameProvider:
             result = self.request("capture_frame", {"format": "bgr24"}, stamp.as_dict())
         except Exception as exc:
             raise CaptureUnavailable(f"capture RPC failed: {exc}") from exc
+        if self.mode == DRAW_MODE and result.get("forced_render") is not False:
+            raise CaptureUnavailable("controlled capture must not render")
         if result.get("source") != "original_game_frame" or result.get("capture_ok") is not True:
             raise CaptureUnavailable(result.get("reason", "runtime did not certify a captured frame"))
-        actual = TickStamp(**result["version"])
+        try:
+            actual = TickStamp(**result["version"])
+            cached_stamp = TickStamp(**result["frame_version"]) if self.mode == DRAW_MODE else None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CaptureUnavailable("invalid capture/cache version") from exc
         if actual != stamp:
             raise CaptureUnavailable("capture version differs from the completed observation")
+        if self.mode == DRAW_MODE:
+            if (result.get("mode") != DRAW_MODE or result.get("method") != "cached_controlled_engine_frame"
+                    or cached_stamp != stamp
+                    or result.get("known_rng_unchanged") is not True):
+                raise CaptureUnavailable("capture cache does not certify the requested controlled boundary")
+        elif result.get("mode") == DRAW_MODE or result.get("method") == "cached_controlled_engine_frame":
+            raise CaptureUnavailable("cached draw mode was not negotiated")
         width, height = result["width"], result["height"]
         if type(width) is not int or type(height) is not int or not 1 <= width <= 8192 or not 1 <= height <= 8192:
             raise CaptureUnavailable("invalid capture geometry")
@@ -88,7 +112,7 @@ class RemoteGameFrameProvider:
         return VideoFrame(stamp, width, height, pixel_format, pixels, "original_game_frame",
                           {"method": result.get("method", "unspecified"),
                            **{key: result[key] for key in ("forced_render", "used_3d", "known_rng_unchanged",
-                              "game_clock_before", "game_clock_after") if key in result},
+                              "game_clock_before", "game_clock_after", "mode", "frame_version") if key in result},
                            "hidden_window_support": self.capability.get("hidden_window_support", "unverified")})
 
 

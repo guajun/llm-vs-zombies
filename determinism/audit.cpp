@@ -1,4 +1,5 @@
 #include "audit.hpp"
+#include "recording/draw_gate.hpp"
 #include "model.hpp"
 #include "json_diff.hpp"
 #include "memory.hpp"
@@ -246,7 +247,7 @@ Json ProbeTarget() {
         {"rng_capture",ValidateTargetImage()}, {"rng_restore",ValidateTargetImage()},
         {"rng_seed",ValidateTargetImage()},
         {"spawn_hook",std::move(spawn)},
-        {"particle_shake",ParticleShakeManifest()},
+        {"particle_shake",ParticleShakeManifest()},{"draw_schedule",lvz::recording::DrawGateManifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
 }
 void Initialize(const std::filesystem::path& runDir) {
@@ -373,6 +374,7 @@ Json CaptureState() {
     if(!app) throw std::runtime_error("Game app unavailable");
     const auto board=Read<uint32_t>(app+0x768);
     Json state={{"schema",kSchema},{"rng",CaptureRng()},{"particle_shake",ParticleShakeSnapshot()},
+        {"draw_schedule",lvz::recording::DrawScheduleSnapshot()},
         {"app",{{"game_mode",Read<int32_t>(app+0x7f8)},{"ui",Read<int32_t>(app+0x7fc)},
             {"mj_clock",Read<uint32_t>(app+0x838)}}}};
     uint16_t x87=0; uint32_t mxcsr=0;
@@ -424,7 +426,10 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
         {"payload",payload},{"version",lastObservationVersion}};
     if(kind!="pre_step"&&kind!="post_step") {
         Write(events,envelope);
-        if(kind=="request_completed") Flush();
+        // prepare_render has no request_completed event: its successful RPC
+        // acknowledgement must also make warm-draw receipts and drained hook
+        // evidence visible to a replay reader before the first update.
+        if(kind=="request_completed"||kind=="render_prepared") Flush();
         return;
     }
     Json state=CaptureState();
@@ -478,6 +483,8 @@ void Flush() {
 void Shutdown() {
     if(!initialized) return;
     RequireThread();DrainAndCheckSpawns();DrainAndCheckParticleShake();
+    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","draw_schedule_closed"},
+        {"version",lastObservationVersion},{"payload",lvz::recording::DrawGateStatus()}});
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_closed"},
         {"version",lastObservationVersion},{"payload",ParticleShakeStatus()}});
     const auto finalHealth=SpawnHookStatus();
