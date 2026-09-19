@@ -144,14 +144,23 @@ public:
                 {"audit_snapshot",true},{"rng_restore",true},{"rng_seed",true},{"clock_restore",true},{"stop_recording",true},
                 {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false},
                 {"app_update_anchor",lvz::determinism::silentaudio::Enabled()},{"initial_app_update_anchor_v1",lvz::determinism::silentaudio::Enabled()},
+                {"sound_counter_origin",lvz::determinism::silentaudio::Enabled()},{"sound_effects_counter_origin_v1",lvz::determinism::silentaudio::Enabled()},
                 {"sound_effects_allocation_none_v1",lvz::determinism::silentaudio::Enabled()},{"prepare_render",true},{"deterministic_draw_schedule_v1",true},{"controlled_engine_call_v1",true}}}};
     }
     bool RequiresRenderPreparation()const override {return true;}
     bool RenderPrepared()const override {return renderPrepared_;}
     bool SupportsAppUpdateAnchor()const override{return lvz::determinism::silentaudio::Enabled();}
     bool AppUpdateAnchored()const override{return appAnchor_.Applied();}
+    bool SupportsSoundCounterOrigin()const override{return lvz::determinism::silentaudio::Enabled();}
+    bool SoundCounterBound()const override{return lvz::determinism::silentaudio::CounterBound();}
+    Json BindSoundCounterOrigin()override{
+        if(!Ready()||GetCurrentThreadId()!=ownerThread)return {{"ok",false},{"error","Sound origin requires ready owner game thread"}};
+        return lvz::determinism::silentaudio::BindCounterOrigin(boundarySeed_,seededAtBoundary_,renderPrepared_,appAnchor_.Applied(),
+            []{return lvz::determinism::CaptureState();});
+    }
     Json AnchorAppUpdate(uint32_t requested)override {
         if(!Ready()||GetCurrentThreadId()!=ownerThread)return {{"ok",false},{"error","App anchor requires ready owner game thread"}};
+        if(SupportsSoundCounterOrigin()&&!SoundCounterBound())return {{"ok",false},{"error","Explicit sound counter origin must precede App anchor"}};
         const auto app=lvz::determinism::Read<uint32_t>(0x6a9ec0);
         if(!app)return {{"ok",false},{"error","App anchor target unavailable"}};
         return appAnchor_.Apply(app+0x484,requested,boundarySeed_,SupportsAppUpdateAnchor(),seededAtBoundary_,renderPrepared_,
@@ -167,6 +176,7 @@ public:
         if(!Ready()||warm==renderPrepared_)throw std::runtime_error("Controlled drawing preparation/order mismatch");
         const auto beforeRng=lvz::determinism::CaptureRng();
         if(warm) {
+            if(SupportsSoundCounterOrigin()&&!SoundCounterBound())throw std::runtime_error("Sound counter origin must precede warm drawing");
             if(SupportsAppUpdateAnchor()&&!appAnchor_.Applied())throw std::runtime_error("App anchor must precede warm drawing");
             if(!seededAtBoundary_)throw std::runtime_error("rng_seed at the paused fight boundary must precede warm drawing");
             const auto& instances=beforeRng.at("instances");

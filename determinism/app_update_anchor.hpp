@@ -5,6 +5,9 @@
 namespace lvz::determinism {
 inline constexpr char AppUpdateAnchorMode[]="initial_app_update_anchor_v1";
 nlohmann::json AppUpdateAnchorManifest();
+// Shared original-state checks for the two explicit prewarm operations.
+void ValidateEmptyInitialAudio(const nlohmann::json& state);
+void ValidateSeededInitialRng(const nlohmann::json& state,uint32_t seed);
 // The owner-thread controller supplies the paused/tick/entered-call gates.
 // This class independently enforces audio state, actual seeded RNG, one write
 // per epoch, and full state equality except the single declared field.

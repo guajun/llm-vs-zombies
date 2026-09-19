@@ -269,3 +269,13 @@ demo 明确使用 synthetic counter，创建两个独立计数器实例并经过
 原版 demo 的录制/播放标志（`+0x510/+0x511`）必须实际为零。回执保留这两个 byte、`+0x578/+0x49c` 的 uint32 和 `+0x4a0` 的 byte 原值，前后必须相同；不会为这些关联字段添加偏移。完整回执留在已绑定的原生事件及 SessionTrace 中。跨运行允许实际校准前 App 计数不同，例如源 1295、冷启动 1294，但各自必须真实写入并读回共同目标 1295。比较锚定后的完整状态、原始 demo 字段、请求值及映射后的版本；报告另列双方真实 before，不把它们伪称相等。所有 B0 和后续 pre/post 状态仍逐项比较真实原始 App 计数。
 
 `test_app_update_anchor.py` 用模拟器覆盖完整回放、seek 0/2、原始 before 旁证、状态外溢修改、demo 守卫、缺/重复/晚事件及旧能力兼容。这些离线检查不代替新构建的真实冷启动验证，也不修改已失败的旧来源归档。
+
+`sound_effects_counter_origin_v1` 进一步声明独立的计数范围；只有 game 的 `sound_counter` 配置和对应 mode/RPC capability 一致时生效，原有 sound-effects 与 App-anchor 规格不变。原生 `sound_counter_origin` 在 seed/clock readback 后、App anchor 和 warm 前执行一次。它不写游戏字段，也不重置 bootstrap 的累计计数：原生 state 在绑定前增加 `counter_scope:bootstrap_lifetime`，绑定后改为 `counter_scope:experiment`，此时 `calls` 是原生实际累计调用数减去固定原点。旧档没有新能力时仍使用原来的绝对 `calls`，不添加 scope，也不自动升级。
+
+成功事件 `sound_counter_origin_bound` 保留完整原始 activation 形状的 `raw_before/raw_after`、原点绝对值、完整游戏 before/after 状态和实际相邻 revision。读取器要求两个 raw status 完全相同并与 recorder attach 的真实属主/线程/补丁相符，绝对数不小于 attach；状态前后只允许 `calls` 和 `counter_scope` 两处表示变化，原始 RNG、游戏字段、历史、参数均须相同。配方只保存稳定配置，动态回执完整保留在初始化证据与原生事件中。
+
+初始化链逐步核验 `origin.after_state == app_anchor.before_state`，包括相同版本；不存在来源期望值填入实际结果的路径。原点操作发生在 App 校准之前，此时双方原始 App 计数仍可能不同，因此跨运行比较计数原点的操作合同/版本/原生 bound-count=0 与 scope，随后由实际 `app_anchor.after_state` 和 B0 执行完整状态比较。原点回执全文仍分别验证和归档，比较器不会删除 App 字段，也不会临时改写任何游戏状态或摘要。warm 在原点之后，其调用数直接体现在 B0，不能通过 B0 再归零掩盖 warm 分叉。
+
+每个 pre/post 的 `sound-counter-raw.jsonl` 必须与对应 authoritative 边界逐条关联：schema、seq、kind、version、engine-call ID 全部精确匹配；绝对计数与固定 origin 都为无溢出的 uint32，绝对值不倒退，差值必须等于同次采样原生 state 的 experiment calls。sidecar 必须存在，零步文件为空；缺失、额外、乱序、错误 call ID 或差值均拒绝。它参与原来的 SHA-256 封包和 live 增量校验；与 animation/engine-call raw stream 分开定位，不能用新流替代已有旁证。
+
+新模式的 `sound_effects_closed` 保留实际 `origin_raw_calls` 和 `raw_calls`，核对它们的差值、末次 raw/state 和全部健康字段。跨运行只在已验证的 health 比较视图中排除这两个启动期绝对诊断值，继续比较实际 experiment calls；报告同时列出双方 origin/raw end/experiment end 以及执行范围。旧模式仍比较完整原始 health。`test_sound_counter.py` 的模拟回放覆盖 origin 14/16 与 App 初值不同、warm 计数、完整回放/seek、回执/sidecar/关闭篡改及旧档兼容；这些通过仍不替代新构建的实机记录。

@@ -6,6 +6,7 @@ that every original-engine source of nondeterminism has been controlled.
 from __future__ import annotations
 from . import sound_effects
 from . import app_update_anchor
+from . import sound_counter
 
 import argparse
 import base64
@@ -60,6 +61,7 @@ def identity_from_launcher(hello: dict, launcher: dict) -> dict:
         raise EvidenceError("hello lacks build/game identity")
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
+    sound_counter.negotiate(hello)
     return {"build": copy.deepcopy(hello["build"]), "game": copy.deepcopy(hello["game"]),
             "artifacts": copy.deepcopy(artifacts)}
 
@@ -74,6 +76,7 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
     hello = client.hello()
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
+    sound_counter.negotiate(hello)
     _validate_identity(identity)
     if hello.get("build") != identity["build"] or hello.get("game") != identity["game"]:
         raise EvidenceError("launcher/runtime identity mismatch")
@@ -106,6 +109,7 @@ def _validate_identity(identity: dict) -> None:
     engine_call_mode(game)
     sound_effects.artifacts(game, identity["artifacts"])
     app_update_anchor.mode(game)
+    sound_counter.mode(game)
 
 
 def _validate_initial(initial: dict) -> None:
@@ -140,6 +144,7 @@ def _validate_initial(initial: dict) -> None:
         raise EvidenceError("engine call origin lacks an explicit engine identity")
     sound_effects.initial(initial)
     app_update_anchor.initial(initial)
+    sound_counter.initial(initial)
     digests(initial["state"])
 
 
@@ -388,6 +393,7 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
     audit.validate_draw_initial(initial)
     audit.validate_audio_initial(initial)
     audit.validate_app_anchor_initial(initial)
+    audit.validate_sound_counter_initial(initial)
     mode = draw_mode(audit.manifest)
     call_mode = engine_call_mode(audit.manifest)
     if _native_steps(audit) != [step for step in steps if step["request"]["method"] in STEP_METHODS]:
@@ -646,6 +652,9 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     controlled_calls = engine_call_mode(trajectory.audit.manifest)
     audio_mode = sound_effects.mode(trajectory.audit.manifest)
     anchor_mode = app_update_anchor.mode(trajectory.audit.manifest)
+    counter_mode = sound_counter.mode(trajectory.audit.manifest)
+    report["sound_counter"] = {"mode": counter_mode or "bootstrap_lifetime", "receipt_compared": False,
+        "native_state_compared": False, "raw_origins_compared": False, "state_normalized_by_comparator": False}
     report["app_update_anchor"] = {"mode": anchor_mode or "not_declared", "receipt_compared": False,
         "original_engine_bitwise_unmodified": False if anchor_mode else None,
         "before_values_compared": False, "subsequent_state_normalized": False}
@@ -704,6 +713,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             hello = client.hello()
             sound_effects.negotiate(hello)
             app_update_anchor.negotiate(hello)
+            sound_counter.negotiate(hello)
             require_equal(session.identity["build"], hello.get("build"), "live_build")
             require_equal(session.identity["game"], hello.get("game"), "live_game")
             required = {"observe", "audit_snapshot"} | {step["request"]["method"] for step in trajectory.steps if step["request"]["method"] in STEP_METHODS}
@@ -715,6 +725,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 required.add(sound_effects.MODE)
             if anchor_mode:
                 required.update({app_update_anchor.MODE, app_update_anchor.METHOD})
+            if counter_mode:
+                required.update({sound_counter.MODE, sound_counter.METHOD})
             if report["pause_controls"]["recorded"]:
                 # Protocol v1 implements these controller methods, but historic
                 # hello manifests omit their capability keys. Probe status and
@@ -785,6 +797,14 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                               render_semantics(actual_audit.warm_render), "initial_warm_render")
                 report["draw_schedule"]["warm_receipts_compared"] = 1
             actual_audit.validate_app_anchor_initial(actual_marker)
+            actual_audit.validate_sound_counter_initial(actual_marker)
+            if counter_mode:
+                expected_counter, actual_counter = trajectory.audit.sound_counter_receipt, actual_audit.sound_counter_receipt
+                require_equal(sound_counter.semantics(expected_counter, map_version=mapped_version),
+                              sound_counter.semantics(actual_counter), "initial_sound_counter")
+                report["sound_counter"].update(receipt_compared=True, native_state_compared=True,
+                    source_origin_raw_calls=expected_counter["origin_raw_calls"],
+                    actual_origin_raw_calls=actual_counter["origin_raw_calls"])
             if anchor_mode:
                 expected_anchor, actual_anchor = trajectory.audit.app_anchor_receipt, actual_audit.app_anchor_receipt
                 require_equal(app_update_anchor.semantics(expected_anchor, map_version=mapped_version),
@@ -1035,8 +1055,16 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 report["sound_effects"].update(final_health_verified=True, actual_health=closed_audit.sound_effects_health,
                     health_scope="full_branch" if on_takeover else "executed_prefix")
                 if target_tick is None and on_takeover is None:
-                    require_equal(trajectory.audit.sound_effects_health, closed_audit.sound_effects_health,
+                    require_equal(sound_counter.health_semantics(trajectory.audit.sound_effects_health, trajectory.audit.manifest),
+                                  sound_counter.health_semantics(closed_audit.sound_effects_health, closed_audit.manifest),
                                   "sound_effects.close")
+                if counter_mode:
+                    report["sound_counter"].update(final_health_verified=True,
+                        source_raw_calls_end=trajectory.audit.sound_effects_health["raw_calls"],
+                        actual_raw_calls_end=closed_audit.sound_effects_health["raw_calls"],
+                        source_experiment_calls_end=trajectory.audit.sound_effects_health["calls"],
+                        actual_experiment_calls_end=closed_audit.sound_effects_health["calls"],
+                        health_scope="full_branch" if on_takeover else "executed_prefix")
             if on_takeover is None:
                 require_equal(report["spawn_events_compared"], actual_audit.birth_counts["controlled"],
                               "spawn.uncompared_close_events")

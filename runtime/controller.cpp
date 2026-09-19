@@ -12,7 +12,8 @@ Json Success(const std::string& id,Json result) {
 Json Controller::Version() const { return {{"epoch",epoch_},{"tick",tick_},{"revision",revision_}}; }
 Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Version();
     if(backend_.RequiresRenderPreparation())value["render_prepared"]=backend_.RenderPrepared();
-    if(backend_.SupportsAppUpdateAnchor())value["app_update_anchored"]=backend_.AppUpdateAnchored();return value; }
+    if(backend_.SupportsAppUpdateAnchor())value["app_update_anchored"]=backend_.AppUpdateAnchored();
+    if(backend_.SupportsSoundCounterOrigin())value["counter_origin_bound"]=backend_.SoundCounterBound();return value; }
 Json Controller::Status() const {
     return {{"state",!fault_.empty()?"audit_failed":(!storageFault_.empty()||!journal_.Fault().empty()?"dedup_storage_failed":(pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight"))))},
         {"fault",fault_.empty()?Json(nullptr):Json(fault_)},
@@ -322,7 +323,7 @@ void Controller::Request(const Json& req,Reply reply) {
             } else reply(Success(id,Status()));
             return;
         }
-        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render"&&method!="app_update_anchor") {
+        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render"&&method!="app_update_anchor"&&method!="sound_counter_origin") {
             reply(Error(id,"unsupported_method","Method is not implemented")); return;
         }
         std::string canonical=req.dump();
@@ -400,7 +401,7 @@ void Controller::Request(const Json& req,Reply reply) {
             // audit or the action dedup budget. Expired IDs remain tombstones.
             reply(std::move(response));return;
         }
-        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||method=="app_update_anchor"||req.contains("expect")) {
+        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||method=="app_update_anchor"||method=="sound_counter_origin"||req.contains("expect")) {
             if(!req.contains("expect") || req["expect"]!=Version()) {
                 reply(Error(id,"stale_observation","expect must exactly match epoch, tick and revision")); return;
             }
@@ -425,6 +426,32 @@ void Controller::Request(const Json& req,Reply reply) {
             backend_.CloseRecording();recordingClosed_=true;
             Complete(id,Success(id,{{"closed",true},{"observation",Observe()}}),true);return;
         }
+        if(method=="sound_counter_origin") {
+            if(!params.empty()){Complete(id,Error(id,"invalid_params","sound_counter_origin takes exactly empty parameters"));return;}
+            if(!ready_||terminalFrozen_||inStep_||tick_!=0||engineCalls_.Health().at("entered_calls")!=0
+                ||!backend_.SupportsSoundCounterOrigin()||backend_.SoundCounterBound()||backend_.RenderPrepared()||backend_.AppUpdateAnchored()) {
+                Complete(id,Error(id,"sound_counter_origin_rejected","Sound counter origin requires an unused seeded pre-App-anchor prewarm paused silent recording"));return;
+            }
+            const auto beforeVersion=Version();Json result;
+            try {result=backend_.BindSoundCounterOrigin();}
+            catch(const std::exception& error){
+                ++revision_;Fail(std::string("Sound counter origin failed: ")+error.what());
+                Audit("sound_counter_origin_failed",{{"request_id",id},{"before_version",beforeVersion},{"after_version",Version()},{"message",error.what()}});
+                Complete(id,Error(id,"sound_counter_origin_failed",error.what()));return;
+            }
+            if(!result.value("ok",false)&&!result.value("bind_attempted",false)) {
+                Complete(id,Error(id,"sound_counter_origin_rejected",result.value("error",std::string("Sound counter origin rejected"))));return;
+            }
+            ++revision_;backend_.InvalidateFrame("sound_counter_origin");
+            auto receipt=result.at("counter_origin");receipt["before_version"]=beforeVersion;receipt["after_version"]=Version();
+            if(!result.value("ok",false)) {
+                Fail(result.value("error",std::string("Sound counter origin post-bind verification failed")));
+                Audit("sound_counter_origin_failed",{{"request_id",id},{"counter_origin",receipt},{"message",result.value("error",std::string())}});
+                Complete(id,Error(id,"sound_counter_origin_failed",result.value("error",std::string("Sound counter origin failed"))));return;
+            }
+            Audit("sound_counter_origin_bound",{{"request_id",id},{"counter_origin",receipt}});
+            Complete(id,Success(id,{{"bound",true},{"counter_origin",std::move(receipt)},{"observation",Observe()}}));return;
+        }
         if(method=="app_update_anchor") {
             if(params.size()!=1||!params.contains("app_update_count")||!params["app_update_count"].is_number_integer()) {
                 Complete(id,Error(id,"invalid_params","app_update_count must be the only parameter, an integer in 0..2147483647"));return;
@@ -433,7 +460,8 @@ void Controller::Request(const Json& req,Reply reply) {
             const bool valid=count.is_number_unsigned()?count.get<uint64_t>()<=INT32_MAX:count.get<int64_t>()>=0&&count.get<int64_t>()<=INT32_MAX;
             if(!valid){Complete(id,Error(id,"invalid_params","app_update_count must be in 0..2147483647"));return;}
             if(!ready_||terminalFrozen_||inStep_||tick_!=0||engineCalls_.Health().at("entered_calls")!=0
-                ||!backend_.SupportsAppUpdateAnchor()||backend_.RenderPrepared()||backend_.AppUpdateAnchored()) {
+                ||!backend_.SupportsAppUpdateAnchor()||backend_.RenderPrepared()||backend_.AppUpdateAnchored()
+                ||(backend_.SupportsSoundCounterOrigin()&&!backend_.SoundCounterBound())) {
                 Complete(id,Error(id,"app_update_anchor_rejected","App anchor requires an unused prewarm paused silent fight, tick zero and no entered engine call"));return;
             }
             const auto beforeVersion=Version();Json result;
@@ -476,8 +504,9 @@ void Controller::Request(const Json& req,Reply reply) {
             Complete(id,Success(id,{{"prepared",true},{"render",receipt},{"observation",Observe()}}));return;
         }
         if(method=="rng_restore"||method=="rng_seed"||method=="clock_restore") {
-            if(backend_.SupportsAppUpdateAnchor()&&backend_.AppUpdateAnchored()) {
-                Complete(id,Error(id,"initialization_sealed","RNG/clock initialization is sealed by the explicit App update anchor"));return;
+            if((backend_.SupportsAppUpdateAnchor()&&backend_.AppUpdateAnchored())
+                ||(backend_.SupportsSoundCounterOrigin()&&backend_.SoundCounterBound())) {
+                Complete(id,Error(id,"initialization_sealed","RNG/clock initialization is sealed by the explicit counter/App boundary"));return;
             }
             if(!ready_||terminalFrozen_||inStep_) { Complete(id,Error(id,"not_in_fight","State initialization requires a paused fight boundary"));return; }
             Json result;

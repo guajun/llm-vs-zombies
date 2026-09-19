@@ -109,6 +109,7 @@ def activation(value, game):
 
 
 def state(value, game):
+    from . import sound_counter
     declared = mode(game)
     sound = value.get("sound_effects")
     if not declared:
@@ -116,6 +117,10 @@ def state(value, game):
             fail("state lacks an explicit engine mode")
         return None
     required = {"mode", "calls", "errors", "app_update_count", "active_types", "histories", "parameters", "channels", "slots_empty", "patch_owned"}
+    if sound_counter.mode(game):
+        required.add("counter_scope")
+        if not isinstance(sound, dict) or sound.get("counter_scope") not in {"bootstrap_lifetime", "experiment"}:
+            fail("invalid declared native counter scope")
     if (not isinstance(sound, dict) or set(sound) != required or sound["mode"] != MODE
             or sound["slots_empty"] is not True or sound["patch_owned"] is not True
             or type(sound["errors"]) is not int or sound["errors"] != 0
@@ -182,7 +187,9 @@ def initial(marker):
 
 class Evidence:
     def __init__(self, game, receipt_file=None):
+        from . import sound_counter
         self.game = game
+        self.experimental_counter = bool(sound_counter.mode(game))
         self.enabled = bool(mode(game))
         if self.enabled:
             activation(receipt_file, game)
@@ -190,7 +197,7 @@ class Evidence:
             fail("activation evidence lacks an explicit engine mode")
         self.activation = copy.deepcopy(receipt_file)
         self.attach_calls = receipt_file["recorder_attach"]["calls"] if self.enabled else None
-        self.calls = self.attach_calls
+        self.calls = 0 if self.experimental_counter else self.attach_calls
         self.first_calls = None
         self.health = None
         self.version = None
@@ -200,7 +207,7 @@ class Evidence:
         if not self.enabled:
             return
         calls = marker["state"]["sound_effects"]["calls"]
-        if calls < self.attach_calls or (self.first_calls is not None and calls > self.first_calls):
+        if (not self.experimental_counter and calls < self.attach_calls) or (self.first_calls is not None and calls > self.first_calls):
             fail("B0 allocation counter is outside attach/first-frame boundaries")
         if self.health is not None and calls > self.health["calls"]:
             fail("B0 allocation counter exceeds closed counter")
@@ -211,6 +218,8 @@ class Evidence:
         sound = state(frame.state, self.game)
         if sound is None:
             return
+        if self.experimental_counter and sound["counter_scope"] != "experiment":
+            fail("audited frame has an unbound lifetime counter")
         if self.health is not None or (self.calls is not None and sound["calls"] < self.calls):
             fail("audio counters regressed or frame followed close")
         if self.first_calls is None:
@@ -224,7 +233,12 @@ class Evidence:
         if not self.enabled or self.health is not None:
             fail("undeclared or duplicate audio close")
         h = event["payload"]
-        if (not isinstance(h, dict) or set(h) != {"mode", "healthy", "calls", "errors", "patch_owned", "owner_pinned", "slots_empty", "scope"}
+        keys = {"mode", "healthy", "calls", "errors", "patch_owned", "owner_pinned", "slots_empty", "scope"}
+        if self.experimental_counter:
+            from .sound_counter import health_semantics
+            keys.update({"counter_scope", "origin_raw_calls", "raw_calls"})
+            health_semantics(h, self.game)
+        if (not isinstance(h, dict) or set(h) != keys
                 or h["mode"] != MODE or h["healthy"] is not True or h["errors"] != 0 or type(h["errors"]) is not int
                 or h["patch_owned"] is not True or h["owner_pinned"] is not True or h["slots_empty"] is not True
                 or h["scope"] != "allocation-none SFX experiment; music/exhaustive determinism unverified"

@@ -181,6 +181,56 @@ class AppAnchorPreparationRuntime(PreparationRuntime):
         return encoded
 
 
+class CounterPreparationRuntime(AppAnchorPreparationRuntime):
+    """Lifetime instrumentation stays intact; warm contributes to the epoch."""
+    def __init__(self, count=1362, raw_calls=14, fault=None):
+        from llm_vs_zombies import sound_counter as counter
+        super().__init__(count)
+        self.raw_calls = raw_calls
+        self.counter_bound = False
+        self.counter_fault = fault
+        self.state['sound_effects'].update(calls=raw_calls, counter_scope='bootstrap_lifetime')
+        self.hello_value['game']['sound_counter'] = copy.deepcopy(counter.SPEC)
+        self.hello_value['capabilities'].update({counter.MODE: True, counter.METHOD: True})
+
+    def observe(self):
+        return dict(super().observe(), counter_origin_bound=self.counter_bound)
+
+    def exchange(self, payload, timeout):
+        from llm_vs_zombies import sound_counter as counter
+        from test_sound_effects import activation
+        request = json.loads(payload)
+        if request['method'] != counter.METHOD:
+            if request['method'] in ('app_update_anchor', 'prepare_render') and not self.counter_bound:
+                raise AssertionError('origin must precede App anchoring and warm')
+            reply = super().exchange(payload, timeout)
+            if request['method'] == 'prepare_render':
+                self.raw_calls += 3
+                self.state['sound_effects']['calls'] += 3
+            return reply
+        self.requests.append(request)
+        if (request.get('expect') != self.version or request['params'] != {} or self.counter_bound
+                or self.anchored or self.prepared or self.seed is None):
+            raise AssertionError('invalid fixture origin order')
+        before_state, before_version = copy.deepcopy(self.state), self.version
+        raw = activation()['recorder_attach']
+        raw['calls'] = self.raw_calls
+        self.state['sound_effects'].update(calls=0, counter_scope='experiment')
+        self.counter_bound = True
+        self.revision += 1
+        receipt = dict(schema='lvz.sound-counter-origin.v1', mode=counter.MODE, origin_raw_calls=self.raw_calls,
+            raw_before=copy.deepcopy(raw), raw_after=copy.deepcopy(raw), before_state=before_state,
+            after_state=copy.deepcopy(self.state), before_version=before_version, after_version=self.version)
+        if self.counter_fault == 'other_field':
+            receipt['after_state']['rng']['instances']['game_thread_crt']['state'] ^= 1
+        if self.counter_fault == 'raw_changed': receipt['raw_after']['calls'] += 1
+        result = dict(bound=True, counter_origin=receipt, observation=self.observe())
+        if self.counter_fault == 'flag': result['observation']['counter_origin_bound'] = False
+        encoded = json.dumps(dict(protocol=1, request_id=request['request_id'], ok=True, result=result)).encode()
+        if self.counter_fault == 'readback': self.state['sound_effects']['calls'] = 1
+        return encoded
+
+
 class InitializationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -491,6 +541,54 @@ class AppAnchorPreparationTests(unittest.TestCase):
                     with self.assertRaises((ValueError, RuntimeError)):
                         apply_recipe(client, 42, app_update_count=value)
                 self.assertFalse(any(r['method'] in ('rng_seed', 'clock_restore', 'prepare_render') for r in runtime.requests))
+
+
+class CounterPreparationTests(unittest.TestCase):
+    def test_distinct_lifetime_totals_preserved_while_full_post_initial_state_converges(self):
+        source, cold = CounterPreparationRuntime(), CounterPreparationRuntime(1427, 16)
+        for runtime, target in ((source, None), (cold, 1362)):
+            trace = Mock()
+            with Client(runtime, trace=trace) as client:
+                client.hello()
+                runtime.recipe = apply_recipe(client, 42, app_update_count=target)
+            origin = 14 if runtime is source else 16
+            self.assertEqual(runtime.raw_calls, origin + 3)
+            self.assertEqual(runtime.state['sound_effects']['calls'], 3)
+            self.assertEqual(runtime.state['sound_effects']['counter_scope'], 'experiment')
+            evidence = next(c.args[1]['evidence'] for c in trace.emit.call_args_list
+                            if c.args[0] == 'initialization_prepared')
+            self.assertEqual(evidence['sound_counter']['origin_raw_calls'], origin)
+            self.assertEqual(evidence['sound_counter']['raw_before']['calls'], origin)
+            self.assertEqual(evidence['sound_counter']['raw_after']['calls'], origin)
+            self.assertEqual(evidence['sound_counter']['after_state'], evidence['app_update_anchor']['before_state'])
+            methods = [r['method'] for r in runtime.requests]
+            self.assertLess(methods.index('clock_restore'), methods.index('sound_counter_origin'))
+            self.assertLess(methods.index('sound_counter_origin'), methods.index('app_update_anchor'))
+            self.assertLess(methods.index('app_update_anchor'), methods.index('prepare_render'))
+            self.assertEqual(methods.count('sound_counter_origin'), 1)
+        self.assertEqual(source.state, cold.state)
+        self.assertEqual(source.recipe, cold.recipe)
+
+    def test_bad_origin_receipt_and_actual_readback_stop_before_app_anchor(self):
+        for fault in ('other_field', 'raw_changed', 'readback', 'flag'):
+            with self.subTest(fault=fault):
+                runtime = CounterPreparationRuntime(fault=fault)
+                with Client(runtime, trace=Mock()) as client:
+                    client.hello()
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        apply_recipe(client, 42)
+                self.assertEqual(runtime.anchor_calls, 0)
+                self.assertEqual(runtime.draws, 0)
+                self.assertEqual(runtime.raw_calls, 14)
+
+    def test_counter_capability_mismatch_rejected_before_mutation(self):
+        from llm_vs_zombies import sound_counter as counter
+        runtime = CounterPreparationRuntime()
+        runtime.hello_value['capabilities'][counter.METHOD] = False
+        with Client(runtime, trace=Mock()) as client:
+            client.hello()
+            with self.assertRaises(ValueError): apply_recipe(client, 42)
+        self.assertFalse(any(r['method'] in ('rng_seed', 'sound_counter_origin') for r in runtime.requests))
 
 
 if __name__ == '__main__': unittest.main()

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from . import sound_effects
 from . import app_update_anchor
+from . import sound_counter
 
 SCHEMA = "lvz.audit.v1"
 RAW_ANIMATIONS = "reanimation-handles.jsonl"
@@ -298,6 +299,7 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     """Resolve supported evidence files without trusting a manifest path."""
     draw_mode(manifest)
     app_update_anchor.mode(manifest)
+    counter_mode = sound_counter.mode(manifest)
     coverage = manifest.get("coverage", {})
     if not isinstance(coverage, dict):
         raise EvidenceError("invalid native audit coverage")
@@ -345,6 +347,13 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
         result += (sound_effects.EVIDENCE,)
     elif audio_file:
         raise EvidenceError("sound effects activation lacks an explicit engine mode")
+    counter_file = (directory / sound_counter.RAW_FILE).is_file()
+    if counter_mode:
+        if not counter_file:
+            raise EvidenceError("required raw sound counter evidence is missing")
+        result += (sound_counter.RAW_FILE,)
+    elif counter_file:
+        raise EvidenceError("raw sound counter evidence lacks an explicit mode")
     return result
 
 
@@ -1334,6 +1343,7 @@ class _AuditStreamDecoder:
     """Single merge cursor: one state, one frame of seeds, and small counters."""
     def __init__(self, manifest, files, *, reuse_state, audio_activation=None):
         self.audio = sound_effects.Evidence(manifest, audio_activation)
+        self.sound_counter = sound_counter.Evidence(manifest, audio_activation)
         self.app_anchor = app_update_anchor.Evidence(manifest)
         self.calls = _EngineCallEvidence() if engine_call_mode(manifest) else None
         self.frames = _FrameDecoder(reuse_state=reuse_state, engine_calls=self.calls is not None)
@@ -1353,6 +1363,7 @@ class _AuditStreamDecoder:
     def event(self, event, raw):
         self.summary.accept(event)
         self.audio.event(event)
+        self.sound_counter.event(event)
         self.app_anchor.event(event)
         if self.calls:
             self.calls.event(event, raw)
@@ -1400,11 +1411,14 @@ class _AuditStreamDecoder:
         frame = self.frames.accept(records[0], records[1])
         self.audio.frame(frame)
         self.app_anchor.frame(frame)
+        engine_raw_index = 2 + int(self.animation is not None)
         if self.calls:
-            self.calls.frame(frame, records[-1])
-            frame = replace(frame, raw_engine_call=records[-1])
+            self.calls.frame(frame, records[engine_raw_index])
+            frame = replace(frame, raw_engine_call=records[engine_raw_index])
         elif "engine_call" in frame.payload:
             raise EvidenceError("engine call frame lacks its declared mode")
+        if self.sound_counter.enabled:
+            self.sound_counter.frame(frame, records[engine_raw_index + int(self.calls is not None)])
         if self.draw:
             self.draw.frame(frame)
         elif "draw_schedule" in frame.state or "render" in frame.payload:
@@ -1462,6 +1476,8 @@ def _walk_audit(decoder, read, *, retain_event=None, request_id=None, constrain_
         names.append(RAW_ANIMATIONS)
     if decoder.calls:
         names.append(ENGINE_CALL_RAW)
+    if decoder.sound_counter.enabled:
+        names.append(sound_counter.RAW_FILE)
     frame_readers = [iter(read(name)) for name in names]
     rows = zip_longest(*frame_readers)
     raw = iter(read(PARTICLE_SHAKE_RAW)) if decoder.particle else iter(())
@@ -1585,6 +1601,7 @@ class AuditLog:
         self._particle, self._summary, self._draw, self._calls = decoder.particle, decoder.summary, decoder.draw, decoder.calls
         self._audio = decoder.audio
         self._app_anchor = decoder.app_anchor
+        self._sound_counter = decoder.sound_counter
         self.peak_pending_particle_calls = decoder.peak_pending
         self.frames = FrameSelection(self)
         if require_closed:
@@ -1621,6 +1638,13 @@ class AuditLog:
     def app_anchor_receipt(self):
         return copy.deepcopy(self._app_anchor.anchor)
 
+    def validate_sound_counter_initial(self, initial):
+        self._sound_counter.initial(initial)
+
+    @property
+    def sound_counter_receipt(self):
+        return copy.deepcopy(self._sound_counter.origin)
+
     @property
     def sound_effects_health(self):
         return copy.deepcopy(self._audio.health)
@@ -1649,7 +1673,7 @@ class AuditLog:
             raise EvidenceError("invalid native audit schema/sequence")
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
-        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed"}:
+        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed", "sound_counter_origin_failed"}:
             raise EvidenceError("native hook fault invalidates strict evidence")
         if record["kind"] == "particle_shake_seed":
             if record.get("native_phase") != "before_srand" or record.get("phase") not in {"controlled_boundary", "initialization"}:
@@ -1738,6 +1762,7 @@ class AuditTail:
         self._calls = self._stream.calls
         self._audio = self._stream.audio
         self._app_anchor = self._stream.app_anchor
+        self._sound_counter = self._stream.sound_counter
         self._identities = {}
         self._requests, self._request_frames = {}, {}
         self.events = _ConsumedEventStream(self)
@@ -1764,6 +1789,13 @@ class AuditTail:
     @property
     def app_anchor_receipt(self):
         return copy.deepcopy(self._app_anchor.anchor)
+
+    def validate_sound_counter_initial(self, initial):
+        self._sound_counter.initial(initial)
+
+    @property
+    def sound_counter_receipt(self):
+        return copy.deepcopy(self._sound_counter.origin)
 
     @property
     def sound_effects_health(self):

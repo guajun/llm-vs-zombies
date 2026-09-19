@@ -1,5 +1,6 @@
 #include "audit.hpp"
 #include "app_update_anchor.hpp"
+#include "sound_counter_origin.hpp"
 #include "silent_audio_audit.hpp"
 #include "recording/draw_gate.hpp"
 #include "model.hpp"
@@ -22,7 +23,7 @@ constexpr uintptr_t kAppPointer = 0x6a9ec0;
 DWORD ownerThread = 0;
 bool initialized = false;
 uint64_t sequence = 0;
-std::ofstream checksums, changes, events, reanimationHandles, particleSeeds, engineCallRaw;
+std::ofstream checksums, changes, events, reanimationHandles, particleSeeds, engineCallRaw, soundCounterRaw;
 Json previous;
 ReanimationAuditor reanimationAuditor;
 Json reanimationEvidence;
@@ -256,7 +257,7 @@ Json ProbeTarget() {
         {"particle_shake",ParticleShakeManifest()},{"draw_schedule",lvz::recording::DrawGateManifest()},
         {"engine_call_boundary",lvz::runtime::EngineCallManifest()},{"foley_trace",foleytrace::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
-    if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();}
+    if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();result["sound_counter"]=SoundCounterManifest();}
     return result;
 }
 void Initialize(const std::filesystem::path& runDir) {
@@ -266,7 +267,7 @@ void Initialize(const std::filesystem::path& runDir) {
     if(!ValidateTargetImage()) throw std::runtime_error("Unsupported PvZ engine image: deterministic adapter rejected");
     const auto directory=runDir/"audit";
     std::filesystem::create_directories(directory);
-    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl","engine-call-raw.jsonl"})
+    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl","engine-call-raw.jsonl","sound-counter-raw.jsonl"})
         if(std::filesystem::exists(directory/file) && std::filesystem::file_size(directory/file))
             throw std::runtime_error("Audit output already exists; create a fresh run");
     checksums.open(directory/"checksums.jsonl",std::ios::out|std::ios::binary);
@@ -282,6 +283,10 @@ void Initialize(const std::filesystem::path& runDir) {
     bool hookInstalled=false;
     try {
         silentaudio::Initialize(runDir);
+        if(silentaudio::Enabled()){
+            soundCounterRaw.open(directory/"sound-counter-raw.jsonl",std::ios::out|std::ios::binary);
+            if(!soundCounterRaw)throw std::runtime_error("Cannot open sound counter raw evidence");
+        }
         std::string error;
         if(!InstallSpawnHook(error)) throw std::runtime_error(error);
         hookInstalled=true;
@@ -300,7 +305,7 @@ void Initialize(const std::filesystem::path& runDir) {
             if(!RemoveSpawnHook(removeError))
                 throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
         }
-        checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();initialized=false;
+        checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();initialized=false;
         throw;
     }
 }
@@ -453,10 +458,12 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
         // prepare_render has no request_completed event: its successful RPC
         // acknowledgement must also make warm-draw receipts and drained hook
         // evidence visible to a replay reader before the first update.
-        if(kind=="request_completed"||kind=="render_prepared"||kind=="app_update_anchored"||kind=="app_update_anchor_failed") Flush();
+        if(kind=="request_completed"||kind=="render_prepared"||kind=="app_update_anchored"||kind=="app_update_anchor_failed"
+            ||kind=="sound_counter_origin_bound"||kind=="sound_counter_origin_failed") Flush();
         return;
     }
     Json state=CaptureState();
+    if(silentaudio::Enabled())Write(soundCounterRaw,silentaudio::CounterBoundary(envelope,state));
     // Exactly the same capture as this checksum/delta, with the same seq and
     // version. Read-only audit_snapshot calls only refresh the in-memory cache.
     auto rawAnimations=envelope;
@@ -502,6 +509,7 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
 }
 void Flush() {
     RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();particleSeeds.flush();engineCallRaw.flush();
+    if(soundCounterRaw.is_open()){soundCounterRaw.flush();if(!soundCounterRaw)throw std::runtime_error("Sound counter raw evidence flush failed");}
     foleytrace::Flush();
     if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds||!engineCallRaw) throw std::runtime_error("Audit output flush failed");
 }
@@ -522,6 +530,7 @@ void Shutdown() {
     if(!RemoveParticleShakeHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
     if(!RemoveSpawnHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
     Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();
+    if(soundCounterRaw.is_open()){soundCounterRaw.close();if(soundCounterRaw.fail())throw std::runtime_error("Sound counter raw evidence close failed");}
     if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()) throw std::runtime_error("Audit output close failed");
     initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;

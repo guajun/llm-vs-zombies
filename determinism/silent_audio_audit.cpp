@@ -1,4 +1,5 @@
 #include "silent_audio_audit.hpp"
+#include "sound_counter_origin.hpp"
 #include "memory.hpp"
 #include "launcher/silent_audio.hpp"
 #include "launcher/file_hash.hpp"
@@ -15,6 +16,8 @@ std::filesystem::path directory;
 uint32_t lastCalls=0;
 Json spec;
 std::string firstFault;
+SoundCounterOrigin counterOrigin;
+Json sampledRawStatus=nullptr;
 #ifdef LVZ_SILENT_AUDIO_TESTING
 Json (*fixtureSnapshot)()=nullptr;
 #endif
@@ -107,13 +110,32 @@ Json SnapshotImpl(){
         }
     }
     for(unsigned i=0;i<32;++i){auto channel=Read<uint32_t>(manager+0x3008+i*4);if(channel)throw std::runtime_error("silent audio found bypassed manager channel");channels.push_back(channel);}
-    return {{"mode",contract::Mode},{"calls",status.calls},{"errors",status.errors},{"app_update_count",Read<uint32_t>(app+0x484)},
+    Json audio={{"mode",contract::Mode},{"calls",status.calls},{"errors",status.errors},{"app_update_count",Read<uint32_t>(app+0x484)},
         {"active_types",count},{"histories",std::move(histories)},{"parameters",std::move(parameterState)},
         {"channels",std::move(channels)},{"slots_empty",true},{"patch_owned",true}};
+    auto raw=Raw(status);
+    auto presented=counterOrigin.Present(std::move(audio),raw);
+    sampledRawStatus=std::move(raw);
+    return presented;
 }
 Json Snapshot(){
+    sampledRawStatus=nullptr;
     try {return SnapshotImpl();}
     catch(const std::exception& error){if(firstFault.empty())firstFault=error.what();throw;}
+}
+bool CounterBound(){return enabled&&counterOrigin.Bound();}
+Json SampledRawStatus(){
+    if(!enabled||sampledRawStatus.is_null())throw std::runtime_error("No successful silent audio snapshot sample");
+    return sampledRawStatus;
+}
+Json BindCounterOrigin(uint32_t seed,bool seeded,bool warmed,bool appAnchored,const std::function<Json()>& capture){
+    auto result=counterOrigin.Apply(seed,enabled,seeded,warmed,appAnchored,capture,[]{return SampledRawStatus();});
+    if(!result.at("ok").get<bool>()&&result.at("bind_attempted").get<bool>()&&firstFault.empty())
+        firstFault=result.at("error").get<std::string>();
+    return result;
+}
+Json CounterBoundary(const Json& envelope,const Json& state){
+    return counterOrigin.Boundary(envelope,state.at("sound_effects"),SampledRawStatus());
 }
 Json Health(){
     if(!enabled)return nullptr;
@@ -124,9 +146,15 @@ Json Health(){
 #else
         auto state=Snapshot();
 #endif
-        return {{"mode",contract::Mode},{"healthy",true},{"calls",state["calls"]},{"errors",0},
+        Json health={{"mode",contract::Mode},{"healthy",true},{"calls",state["calls"]},{"errors",0},
             {"patch_owned",true},{"owner_pinned",true},{"slots_empty",true},
             {"scope","allocation-none SFX experiment; music/exhaustive determinism unverified"}};
+#ifdef LVZ_SILENT_AUDIO_TESTING
+        // Legacy health-only fixture has no installed live counter. The new
+        // origin fixture independently exercises Health with actual samples.
+        if(fixtureSnapshot)return health;
+#endif
+        return counterOrigin.Health(std::move(health),state,SampledRawStatus());
     }catch(const std::exception& error){
         if(firstFault.empty())firstFault=error.what();
         // Persist a genuine unhealthy close even if the fault that froze the

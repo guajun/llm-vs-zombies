@@ -42,6 +42,8 @@ void Seeded(const Json& state,uint32_t seed){
     for(unsigned i=0;i<624;++i){if(words[i]!=word)throw std::runtime_error("App anchor MT word differs from explicit seed");word=1812433253u*(word^(word>>30))+i+1;}
 }
 }
+void ValidateEmptyInitialAudio(const Json& state){EmptyAudio(state);}
+void ValidateSeededInitialRng(const Json& state,uint32_t seed){Seeded(state,seed);}
 Json InitialAppUpdateAnchor::Apply(uintptr_t address,uint32_t requested,uint32_t seed,bool audioEnabled,
                                   bool seeded,bool warmed,const std::function<Json()>& capture,const std::function<Json()>& captureDemo){
     Json receipt={{"schema","lvz.app-update-anchor.v1"},{"mode",AppUpdateAnchorMode},{"requested",requested},

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from . import sound_effects
 from . import app_update_anchor
+from . import sound_counter
 
 DRAW_MODE = "deterministic_draw_schedule_v1"
 LEGACY_DRAW_MODE = "legacy_autonomous_draw_schedule"
@@ -97,6 +98,7 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     mode = draw_mode(hello)
     sound_mode = sound_effects.negotiate(hello)
     app_anchor_mode = app_update_anchor.negotiate(hello)
+    counter_mode = sound_counter.negotiate(hello)
     if app_update_count is not None and app_anchor_mode is None:
         raise RuntimeError("runtime has no declared initial App update anchor capability")
     if (anchor is not None or mode == DRAW_MODE) and capabilities.get("clock_restore") is not True:
@@ -129,6 +131,27 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     before_clock = clock_anchor(seeded)
     if anchor is not None and before_clock != anchor:
         raise RuntimeError("clock readback differs from the initialization anchor")
+    counter_receipt = None
+    if counter_mode:
+        before_version = copy.deepcopy(client.version)
+        if seeded.get("version") != before_version:
+            raise RuntimeError("Sound counter origin requires the current seeded audit boundary")
+        result = client.request("sound_counter_origin", {}, expect=before_version)
+        expected_version = {**before_version, "revision": before_version["revision"] + 1}
+        if (result.get("bound") is not True or client.version != expected_version
+                or result.get("observation", {}).get("version") != expected_version
+                or result.get("observation", {}).get("counter_origin_bound") is not True):
+            raise RuntimeError("Sound counter origin did not establish the next initialization boundary")
+        counter_receipt = sound_counter.receipt(result.get("counter_origin"), hello["game"],
+            before_version=before_version, after_version=expected_version, seed=seed)
+        if counter_receipt["before_state"] != seeded["state"]:
+            raise RuntimeError("Sound counter origin before-state differs from the actual seeded snapshot")
+        counted = client.request("audit_snapshot")
+        if (counted.get("version") != expected_version or counted.get("state") != counter_receipt["after_state"]
+                or clock_anchor(counted) != before_clock):
+            raise RuntimeError("Sound counter origin readback differs from its actual receipt")
+        seeded = counted
+        verify_seeded_rng(seeded, seed)
     app_receipt = None
     if app_anchor_mode:
         target = seeded["state"]["sound_effects"]["app_update_count"] if app_update_count is None else app_update_count
@@ -160,6 +183,8 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     if app_receipt is not None:
         recipe["app_update_anchor"] = {"configuration": copy.deepcopy(hello["game"]["app_update_anchor"]),
                                        "app_update_count": app_receipt["requested"]}
+    if counter_receipt is not None:
+        recipe["sound_counter"] = {"configuration": copy.deepcopy(hello["game"]["sound_counter"])}
     prepared = None
     snapshot = seeded
     if mode == DRAW_MODE:
@@ -205,6 +230,8 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         "initial_version": observation["version"], "final_draw_health": "pending_native_close" if mode == DRAW_MODE else "not_supported"}
     if app_receipt is not None:
         evidence["app_update_anchor"] = app_receipt
+    if counter_receipt is not None:
+        evidence["sound_counter"] = counter_receipt
     trace = getattr(client, "trace", None)
     if trace is not None:
         trace.emit("initialization_prepared", {"recipe": recipe, "evidence": evidence})
@@ -219,6 +246,7 @@ def ensure_render_prepared(client, seed: int = 0) -> dict | None:
     hello = client.hello_result if client.hello_result is not None else client.hello()
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
+    sound_counter.negotiate(hello)
     if draw_mode(hello) != DRAW_MODE:
         return None
     observation = client.observe()

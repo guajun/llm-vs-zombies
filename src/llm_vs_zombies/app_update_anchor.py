@@ -96,6 +96,9 @@ def receipt(value, game, *, requested=None, before_version=None, after_version=N
                     {"mode": "deterministic_draw_schedule_v1", "warm_frames": 0, "step_frames": 0})):
             fail("receipt lacks full ready prewarm state")
         sound = sound_effects.state(state, game)
+        from . import sound_counter
+        if sound_counter.mode(game) and sound["counter_scope"] != "experiment":
+            fail("App anchor must follow the actual sound counter origin")
         if sound["app_update_count"] != counter:
             fail("receipt counter differs from captured state")
         digests(state)  # Retain ordinary integer-bit/schema validation.
