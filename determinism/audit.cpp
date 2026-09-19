@@ -1,4 +1,5 @@
 #include "audit.hpp"
+#include "silent_audio_audit.hpp"
 #include "recording/draw_gate.hpp"
 #include "model.hpp"
 #include "json_diff.hpp"
@@ -243,7 +244,7 @@ Json ProbeTarget() {
         {"semantic","exact_initializer_exit"},
         {"phase","ZombieInitialize exit, before caller resumes"},
         {"live_validated",false}};
-    return {{"schema",kSchema},{"target",kTarget},{"loaded_signatures_match",ValidateTargetImage()},
+    Json result={{"schema",kSchema},{"target",kTarget},{"loaded_signatures_match",ValidateTargetImage()},
         {"addresses_evidence","determinism/evidence.json"},
         {"normalize_scope","verified animation handle semantic identity; raw handle evidence is stored separately"},
         {"rng_capture",ValidateTargetImage()}, {"rng_restore",ValidateTargetImage()},
@@ -252,6 +253,8 @@ Json ProbeTarget() {
         {"particle_shake",ParticleShakeManifest()},{"draw_schedule",lvz::recording::DrawGateManifest()},
         {"engine_call_boundary",lvz::runtime::EngineCallManifest()},{"foley_trace",foleytrace::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
+    if(silentaudio::Enabled())result["sound_effects"]=silentaudio::Manifest();
+    return result;
 }
 void Initialize(const std::filesystem::path& runDir) {
     if(initialized) {
@@ -275,6 +278,7 @@ void Initialize(const std::filesystem::path& runDir) {
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
     bool hookInstalled=false;
     try {
+        silentaudio::Initialize(runDir);
         std::string error;
         if(!InstallSpawnHook(error)) throw std::runtime_error(error);
         hookInstalled=true;
@@ -383,6 +387,7 @@ Json CaptureState() {
         {"draw_schedule",lvz::recording::DrawScheduleSnapshot()},
         {"app",{{"game_mode",Read<int32_t>(app+0x7f8)},{"ui",Read<int32_t>(app+0x7fc)},
             {"mj_clock",Read<uint32_t>(app+0x838)}}}};
+    if(silentaudio::Enabled())state["sound_effects"]=silentaudio::Snapshot();
     uint16_t x87=0; uint32_t mxcsr=0;
     __asm__ volatile("fnstcw %0":"=m"(x87));
     __asm__ volatile("stmxcsr %0":"=m"(mxcsr));
@@ -501,6 +506,8 @@ void Shutdown() {
     if(!initialized) return;
     RequireThread();DrainAndCheckSpawns();DrainAndCheckParticleShake();
     foleytrace::Shutdown();
+    if(silentaudio::Enabled())Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","sound_effects_closed"},
+        {"version",lastObservationVersion},{"payload",silentaudio::Health()}});
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","draw_schedule_closed"},
         {"version",lastObservationVersion},{"payload",lvz::recording::DrawGateStatus()}});
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_closed"},

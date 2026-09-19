@@ -24,6 +24,7 @@ from typing import Any
 
 from .records import finish, read_json, sha256, write_json
 from .initialization import apply_recipe, clock_anchor
+from . import sound_effects
 
 SCHEMA = "lvz.evaluation.v1"
 PLAN_SCHEMA = "lvz.evaluation-plan.v1"
@@ -44,8 +45,10 @@ class Plan:
     timeout_seconds: float = 90.0
     wall_budget_seconds: float = 3600.0
     strategy: str | None = None
+    audio_mode: str = "original"
 
     def validate(self) -> "Plan":
+        sound_effects.configured(self.audio_mode)
         if self.schema != PLAN_SCHEMA or self.tier not in {"smoke", "strict"}:
             raise ValueError("unsupported evaluation schema or tier")
         if not isinstance(self.seeds, (tuple, list)) or not self.seeds or len(set(self.seeds)) != len(self.seeds):
@@ -367,7 +370,8 @@ def live_session(root: Path, name: str, plan: Plan, seed: int = 0):
         monitor = LaunchWindowMonitor()
         try:
             with monitor:
-                state = start(root, run, timeout=plan.timeout_seconds, seed=seed, defer_preparation=True)
+                state = start(root, run, timeout=plan.timeout_seconds, seed=seed, defer_preparation=True,
+                              audio_mode=plan.audio_mode)
         finally:
             windows = monitor.result(state["pid"] if state is not None else None)
             write_json(run / "evaluation-windows.json", windows)
@@ -386,8 +390,14 @@ def live_session(root: Path, name: str, plan: Plan, seed: int = 0):
             except Exception as error:
                 cleanup["close_error"] = str(error)
             finally:
-                client.close()
-        trace.close()
+                try:
+                    client.close()
+                except Exception as error:
+                    cleanup["client_close_error"] = str(error)
+        try:
+            trace.close()
+        except Exception as error:
+            cleanup["trace_close_error"] = str(error)
         if state is not None:
             try:
                 stop(run)
@@ -650,6 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("output", type=Path)
     sample.add_argument("--tier", choices=("smoke", "strict"), default="smoke")
     sample.add_argument("--strategy")
+    sample.add_argument("--audio-mode", choices=("original", sound_effects.MODE), default="original")
     run = commands.add_parser("run", help="execute the plan against owned original-game processes")
     run.add_argument("plan", type=Path)
     run.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
@@ -662,7 +673,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise FileExistsError(args.output)
             plan = Plan(tier=args.tier, cold_starts=10 if args.tier == "strict" else 1,
                         tick_budget=200000 if args.tier == "strict" else 1000,
-                        strategy=str(Path(args.strategy).resolve()) if args.strategy else None).validate()
+                        strategy=str(Path(args.strategy).resolve()) if args.strategy else None,
+                        audio_mode=args.audio_mode).validate()
             write_json(args.output, asdict(plan))
             print(args.output)
             return 0

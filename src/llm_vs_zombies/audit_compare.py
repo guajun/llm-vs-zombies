@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
+from . import sound_effects
 
 SCHEMA = "lvz.audit.v1"
 RAW_ANIMATIONS = "reanimation-handles.jsonl"
@@ -335,6 +336,13 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
         result += (ENGINE_CALL_RAW,)
     elif call_file:
         raise EvidenceError("raw engine call evidence lacks an explicit engine mode")
+    audio_file = (directory / sound_effects.EVIDENCE).is_file()
+    if sound_effects.mode(manifest):
+        if not audio_file:
+            raise EvidenceError("required sound effects activation evidence is missing")
+        result += (sound_effects.EVIDENCE,)
+    elif audio_file:
+        raise EvidenceError("sound effects activation lacks an explicit engine mode")
     return result
 
 
@@ -664,7 +672,7 @@ class _DrawEvidence:
         if self.preparing is not None and self.warm is None and kind != "render_prepared":
             if kind not in {"zombie_initialized", "particle_shake_seed"} or event.get("phase") != "initialization":
                 raise EvidenceError("warm drawing contains an unexpected controlled mutation")
-        if self.terminal_completed and kind not in {"recording_closed", "engine_call_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if self.terminal_completed and kind not in {"recording_closed", "engine_call_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("simulation event follows terminal completion")
         if kind == "render_preparing":
             if (self.preparing is not None or self.warm is not None or self.seen_frame
@@ -806,7 +814,7 @@ class _EngineCallEvidence:
 
     def event(self, event, raw=None):
         kind, payload = event["kind"], event["payload"]
-        footer = {"recording_closed", "engine_call_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}
+        footer = {"recording_closed", "engine_call_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}
         if self.terminal_completed and kind not in footer:
             raise EvidenceError("engine event follows terminal completion")
         if kind in {"particle_shake_seed", "zombie_initialized"}:
@@ -1008,7 +1016,7 @@ class _ParticleEvidence:
 
 class _EventSummary:
     def __init__(self):
-        self.tail = deque(maxlen=5)
+        self.tail = deque(maxlen=6)
         self.birth_count = 0
         self.controlled_birth_count = 0
         self.initialization_birth_count = 0
@@ -1022,9 +1030,9 @@ class _EventSummary:
             raise EvidenceError("native animation link fault invalidates strict evidence")
         if event["seq"] < self.last_seq:
             raise EvidenceError("audit event sequence moved backwards")
-        if self.recording_closed and event["kind"] not in {"engine_call_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if self.recording_closed and event["kind"] not in {"engine_call_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("native event after recording close")
-        if not self.recording_closed and event["kind"] in {"engine_call_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if not self.recording_closed and event["kind"] in {"engine_call_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("native hook close precedes recording close")
         self.last_seq = event["seq"]
         if event["kind"] == "zombie_initialized":
@@ -1040,7 +1048,7 @@ class _EventSummary:
         self.count += 1
 
 
-def _closed_events(summary, *, particle=None, draw=None, calls=None, spawn_required=False):
+def _closed_events(summary, *, particle=None, draw=None, calls=None, audio=None, spawn_required=False):
     """Validate the declared close sequence and all hook health summaries."""
     final = list(summary.tail)
     if spawn_required and (not final or final[-1]["kind"] != "spawn_hook_closed"):
@@ -1072,6 +1080,14 @@ def _closed_events(summary, *, particle=None, draw=None, calls=None, spawn_requi
         final = final[:-1]
     elif any(event["kind"] == "draw_schedule_closed" for event in final):
         raise EvidenceError("draw close has no declared engine mode")
+    if audio is not None and audio.enabled:
+        if not final or final[-1]["kind"] != "sound_effects_closed" or audio.health is None:
+            raise EvidenceError("required sound effects close health is missing")
+        if len(final) < 2 or final[-1]["version"] != final[-2]["version"]:
+            raise EvidenceError("sound effects close differs from recording close")
+        final = final[:-1]
+    elif any(event["kind"] == "sound_effects_closed" for event in final):
+        raise EvidenceError("sound effects close lacks an explicit mode")
     if calls is not None:
         if not final or final[-1]["kind"] != "engine_call_closed":
             raise EvidenceError("required engine call close health is missing")
@@ -1314,7 +1330,8 @@ class _FrameDecoder:
 
 class _AuditStreamDecoder:
     """Single merge cursor: one state, one frame of seeds, and small counters."""
-    def __init__(self, manifest, files, *, reuse_state):
+    def __init__(self, manifest, files, *, reuse_state, audio_activation=None):
+        self.audio = sound_effects.Evidence(manifest, audio_activation)
         self.calls = _EngineCallEvidence() if engine_call_mode(manifest) else None
         self.frames = _FrameDecoder(reuse_state=reuse_state, engine_calls=self.calls is not None)
         self.animation = _AnimationDecoder(manifest) if RAW_ANIMATIONS in files else None
@@ -1332,6 +1349,7 @@ class _AuditStreamDecoder:
 
     def event(self, event, raw):
         self.summary.accept(event)
+        self.audio.event(event)
         if self.calls:
             self.calls.event(event, raw)
         elif event["kind"] == "engine_call_closed" or "engine_call" in event["payload"] or "engine_call_id" in event["payload"]:
@@ -1376,6 +1394,7 @@ class _AuditStreamDecoder:
         if self.summary.recording_closed:
             raise EvidenceError("native frame after recording close")
         frame = self.frames.accept(records[0], records[1])
+        self.audio.frame(frame)
         if self.calls:
             self.calls.frame(frame, records[-1])
             frame = replace(frame, raw_engine_call=records[-1])
@@ -1541,10 +1560,15 @@ class AuditLog:
             raise EvidenceError("native target signatures did not match")
         self.evidence_files = audit_files(self.directory, self.manifest)
         self._files = {name: EventStream(self.directory / name) for name in self.evidence_files}
+        self.audio_activation = (read_json(self.directory / sound_effects.EVIDENCE)
+                                 if sound_effects.EVIDENCE in self.evidence_files else None)
+        if self.audio_activation is not None:
+            self._files[sound_effects.EVIDENCE].verify()
         self.events = self._files["events.jsonl"]
         self._control_events, self._headers, self._frame_headers = [], [], []
         self._requests, self._request_frames, self._frame_indices = {}, {}, {}
-        decoder = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True)
+        decoder = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True,
+                                      audio_activation=self.audio_activation)
         for index, frame in enumerate(_walk_audit(decoder, self._files.__getitem__, retain_event=self._retain_event)):
             header = AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, {})
             rid = frame.payload.get("request_id")
@@ -1554,10 +1578,11 @@ class AuditLog:
             self._frame_indices.setdefault(rid, []).append(index)
         decoder.finish(final=True)
         self._particle, self._summary, self._draw, self._calls = decoder.particle, decoder.summary, decoder.draw, decoder.calls
+        self._audio = decoder.audio
         self.peak_pending_particle_calls = decoder.peak_pending
         self.frames = FrameSelection(self)
         if require_closed:
-            _closed_events(self._summary, particle=self._particle, draw=self._draw, calls=self._calls,
+            _closed_events(self._summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio,
                            spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
 
     def _retain_event(self, event):
@@ -1579,6 +1604,13 @@ class AuditLog:
     def validate_draw_initial(self, initial):
         if self._draw:
             self._draw.initial(initial)
+
+    def validate_audio_initial(self, initial):
+        self._audio.initial(initial)
+
+    @property
+    def sound_effects_health(self):
+        return copy.deepcopy(self._audio.health)
 
     @property
     def warm_render(self):
@@ -1633,7 +1665,10 @@ class AuditLog:
         self._files["manifest.json"].verify()
         if audit_files(self.directory, self.manifest) != self.evidence_files:
             raise EvidenceError("closed audit evidence file set changed")
-        decoder = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=reuse_state)
+        if self.audio_activation is not None:
+            self._files[sound_effects.EVIDENCE].verify()
+        decoder = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=reuse_state,
+                                      audio_activation=self.audio_activation)
         yield from _walk_audit(decoder, self._files.__getitem__)
         decoder.finish(final=True)
 
@@ -1673,13 +1708,22 @@ class AuditTail:
             raise EvidenceError("invalid live audit target manifest")
         self._manifest_file = EventStream(self.directory / "manifest.json")
         self.evidence_files = audit_files(self.directory, self.manifest)
+        self._static_files = {name: EventStream(self.directory / name) for name in self.evidence_files
+                              if name == sound_effects.EVIDENCE}
+        self.audio_activation = (read_json(self.directory / sound_effects.EVIDENCE)
+                                 if self._static_files else None)
+        for evidence in self._static_files.values():
+            evidence.verify()
         self._headers, self._control_events = [], []
-        self._positions = {name: 0 for name in self.evidence_files if name != "manifest.json"}
+        self._positions = {name: 0 for name in self.evidence_files
+                           if name != "manifest.json" and name not in self._static_files}
         self._hashes = {name: hashlib.sha256() for name in self._positions}
-        self._stream = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True)
+        self._stream = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True,
+                                          audio_activation=self.audio_activation)
         self._decoder, self._animation, self._particle = self._stream.frames, self._stream.animation, self._stream.particle
         self._draw = self._stream.draw
         self._calls = self._stream.calls
+        self._audio = self._stream.audio
         self._identities = {}
         self._requests, self._request_frames = {}, {}
         self.events = _ConsumedEventStream(self)
@@ -1696,6 +1740,13 @@ class AuditTail:
     def validate_draw_initial(self, initial):
         if self._draw:
             self._draw.initial(initial)
+
+    def validate_audio_initial(self, initial):
+        self._audio.initial(initial)
+
+    @property
+    def sound_effects_health(self):
+        return copy.deepcopy(self._audio.health)
 
     @property
     def warm_render(self):
@@ -1785,6 +1836,8 @@ class AuditTail:
 
     def read_request(self, request_id: str | None):
         self._manifest_file.verify()
+        for evidence in self._static_files.values():
+            evidence.verify()
         if audit_files(self.directory, self.manifest) != self.evidence_files:
             raise EvidenceError("live audit evidence file set changed")
         for frame in _walk_audit(self._stream, self._new_records, retain_event=self._retain_event,
@@ -1798,7 +1851,7 @@ class AuditTail:
         for _ in self.read_request(None):
             raise EvidenceError("unexpected unconsumed frames at recording close")
         self._stream.finish(final=True)
-        _closed_events(self._stream.summary, particle=self._particle, draw=self._draw, calls=self._calls,
+        _closed_events(self._stream.summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio,
                        spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
         for name, position in self._positions.items():
             if self._check_file(name).st_size != position:

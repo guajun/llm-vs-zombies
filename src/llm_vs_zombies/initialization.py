@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+from . import sound_effects
 
 DRAW_MODE = "deterministic_draw_schedule_v1"
 LEGACY_DRAW_MODE = "legacy_autonomous_draw_schedule"
@@ -91,6 +92,7 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     if capabilities.get("rng_seed") is not True:
         raise RuntimeError("runtime has no implemented rng_seed capability; planned seed is not evidence")
     mode = draw_mode(hello)
+    sound_mode = sound_effects.negotiate(hello)
     if (anchor is not None or mode == DRAW_MODE) and capabilities.get("clock_restore") is not True:
         raise RuntimeError("runtime lacks clock_restore needed by the recorded initialization recipe")
     observation = client.observe()
@@ -117,6 +119,7 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         client.request("clock_restore", {"snapshot": anchor}, expect=client.version)
     seeded = client.request("audit_snapshot")
     verify_seeded_rng(seeded, seed)
+    sound_effects.state(seeded["state"], hello.get("game", {}))
     before_clock = clock_anchor(seeded)
     if anchor is not None and before_clock != anchor:
         raise RuntimeError("clock readback differs from the initialization anchor")
@@ -155,6 +158,10 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
             postwarm_clock=after_clock,
             render_preparation={"warm_frames": 1, "step_frames": 0, "verified_before_draw": True,
                 "seeded_rng_sha256": _rng_sha256(seeded), "postwarm_rng_sha256": _rng_sha256(snapshot)})
+    sound = sound_effects.state(snapshot["state"], hello.get("game", {}))
+    if sound_mode:
+        recipe["sound_effects"] = {"configuration": copy.deepcopy(hello["game"]["sound_effects"]),
+                                   "b0_state_sha256": sound_effects.state_sha256(sound)}
     # A read-only observation checks that persistence binds the same final boundary.
     observation = client.observe()
     if snapshot.get("version") != observation["version"]:
@@ -175,6 +182,7 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
 def ensure_render_prepared(client, seed: int = 0) -> dict | None:
     """Prepare an attached ready new-mode game; reconnecting never reseeds it."""
     hello = client.hello_result if client.hello_result is not None else client.hello()
+    sound_effects.negotiate(hello)
     if draw_mode(hello) != DRAW_MODE:
         return None
     observation = client.observe()

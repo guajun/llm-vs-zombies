@@ -16,6 +16,7 @@ import subprocess
 import time
 
 from .records import read_json, sha256, write_json
+from . import sound_effects
 
 DEFAULT_CARDS = [16, 30, 14, 63, 15, 2, 20, 17, 8, 27]
 REFERENCE_LAYOUT = {
@@ -64,7 +65,8 @@ def synthetic_profile() -> dict[str, bytes]:
     return {"users.dat": users, "user1.dat": struct.pack("<205I", *values)}
 
 
-def prepare(root: Path, run: Path) -> dict:
+def prepare(root: Path, run: Path, *, audio_mode: str = "original") -> dict:
+    audio_mode = sound_effects.configured(audio_mode)
     root, run = root.resolve(), run.resolve()
     if not run.is_relative_to(root / "experiments/runs"):
         raise ValueError("experiment run must be under this project's experiments/runs")
@@ -118,7 +120,7 @@ def prepare(root: Path, run: Path) -> dict:
     state = {"schema": 1, "run": str(run), "sandbox": str(sandbox), "engine": str(game / "PlantsVsZombies.exe"),
              "native_launcher": str(module / "lvz-launcher.exe"), "bootstrap": str(module / "lvz-bootstrap.dll"),
              "runtime": str(module / "recorder.dll"), "headless_mode": "hidden_window",
-             "status": "prepared", "input_hashes": inputs,
+             "status": "prepared", "audio_mode": audio_mode, "input_hashes": inputs,
              "module_hashes": {p.name: sha256(p) for p in module.iterdir() if p.suffix in (".dll", ".exe")},
              "profile_hashes": {name: hashlib.sha256(content).hexdigest() for name, content in profiles.items()},
              "resource_hashes": {p.relative_to(game).as_posix(): sha256(p) for p in game.rglob("*") if p.is_file()},
@@ -155,20 +157,23 @@ def stop(run: Path) -> dict:
 
 
 def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90.0, seed: int = 0,
-          defer_preparation: bool = False) -> dict:
+          defer_preparation: bool = False, audio_mode: str = "original") -> dict:
     from .client import connect
     from .session import SessionTrace
     if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
         raise ValueError("seed must be uint32")
     if type(defer_preparation) is not bool:
         raise ValueError("defer_preparation must be boolean")
-    state = prepare(root, run)
+    audio_mode = sound_effects.configured(audio_mode)
+    state = prepare(root, run, audio_mode=audio_mode)
+    state["audio_mode"] = audio_mode
     state["initialization_seed"] = seed
     state["preparation_deferred"] = defer_preparation
     sandbox = Path(state["sandbox"])
     try:
         receipt = _native(state, "launch", state["engine"], state["bootstrap"], state["sandbox"],
-                          str(sandbox / "game"), str(sandbox / "native-receipt.json"))
+                          str(sandbox / "game"), str(sandbox / "native-receipt.json"),
+                          *([audio_mode] if audio_mode != "original" else []))
         state.update(receipt, status="started")
         write_json(run / "launcher.json", state)
         _native(state, "inject", state["pid"], state["engine"], state["creation_time"], state["runtime"])
@@ -176,6 +181,7 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
         write_json(run / "launcher.json", state)
         with SessionTrace(run / "decisions/launcher.jsonl") as trace, connect(pid=state["pid"], trace=trace, timeout=timeout) as client:
             state["hello"] = client.hello_result
+            verify_audio_activation(state, client.hello_result)
             observation = client.observe()
             if initialize:
                 deadline = time.monotonic() + timeout
@@ -215,18 +221,38 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
         return state
     except BaseException as error:
         receipt_path = sandbox / "native-receipt.json"
-        if "pid" not in state and receipt_path.is_file():
-            state.update(read_json(receipt_path))
+        try:
+            if "pid" not in state and receipt_path.is_file():
+                state.update(read_json(receipt_path))
+        except Exception as receipt_error:
+            error.add_note(f"Cannot recover native process receipt: {receipt_error}")
         state.update(status="failed", error=f"{type(error).__name__}: {error}")
-        write_json(run / "launcher.json", state)
+        # A disk failure must not prevent closing a process we already own.
         if "pid" in state:
             try:
                 _native(state, "stop", state["pid"], state["engine"], state["creation_time"], "unused")
                 state["process_cleaned_up"] = True
             except Exception as cleanup_error:
                 state["cleanup_error"] = str(cleanup_error)
-        write_json(run / "launcher.json", state)
+                error.add_note(f"Owned process cleanup failed: {cleanup_error}")
+        try:
+            write_json(run / "launcher.json", state)
+        except Exception as persistence_error:
+            error.add_note(f"Cannot persist launcher failure/cleanup evidence: {persistence_error}")
         raise
+
+
+def verify_audio_activation(state: dict, hello: dict) -> None:
+    """Bind requested mode to the suspended-launch receipt and resident code."""
+    actual = sound_effects.negotiate(hello, expected=state["audio_mode"])
+    if actual is None:
+        if "audio_activation" in state:
+            raise ValueError("original audio launch contains an unexpected activation receipt")
+        return
+    spec = hello["game"]["sound_effects"]
+    if spec["bootstrap_sha256"] != state.get("module_hashes", {}).get("lvz-bootstrap.dll"):
+        raise ValueError("sound effects bootstrap differs from the prepared launcher module")
+    sound_effects.receipt(state.get("audio_activation"), spec, pre_resume=True)
 
 
 def verify_scenario(observation: dict) -> None:
@@ -252,6 +278,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-initialize", action="store_true")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--audio-mode", choices=("original", sound_effects.MODE), default="original",
+                        help="Explicit SFX allocation semantics; original remains the default")
     parser.add_argument("--defer-preparation", action="store_true",
                         help="Leave seeded/warm boundary preparation to the evaluation or replay recipe")
     arguments = parser.parse_args(argv)
@@ -259,10 +287,11 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "stop":
             result = stop(arguments.run.resolve())
         elif arguments.command == "prepare":
-            result = prepare(arguments.root, arguments.run)
+            result = prepare(arguments.root, arguments.run, audio_mode=arguments.audio_mode)
         else:
             result = start(arguments.root, arguments.run, initialize=not arguments.no_initialize,
-                           timeout=arguments.timeout, seed=arguments.seed, defer_preparation=arguments.defer_preparation)
+                           timeout=arguments.timeout, seed=arguments.seed, defer_preparation=arguments.defer_preparation,
+                           audio_mode=arguments.audio_mode)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as error:

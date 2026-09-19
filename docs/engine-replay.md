@@ -253,3 +253,11 @@ python -m unittest discover -s tests -p test_engine_calls.py -v
 ```
 
 demo 明确使用 synthetic counter，创建两个独立计数器实例并经过真实 Client/SessionTrace/封装/重放路径。它不启动游戏。测试覆盖失败动作的原顺序、同帧 revision、epoch 映射、从头 seek、父分支身份、首个隐藏字段差异、实际响应差异、资产篡改、源记录缺失和已验证/未验证的终局。捕获测试还覆盖强制绘制影响隐藏状态、明确失败与未知结果、轻量/旧版像素证据、保护字段变化，以及图像不同但状态和元数据一致的合法重放。原版冷启动、两旗与扰动证据由独立实机验收提供。
+
+显式 `sound_effects_allocation_none_v1` 模式必须重新录制来源。读取器校验 hello/manifest 的完整固定规格、游戏 EXE 与 bootstrap 的实际文件哈希、recipe 中完整 B0 音效状态的 SHA-256，以及 `audit/audio-activation.json` 中主线程恢复前和 recorder 附着时的原始回执。回执要求恢复前调用数为零、尚无 App、模块已固定、补丁归属有效、实际跳转目标与 replacement 相符；两个阶段除累计调用数外必须一致。该静态 JSON 文件独立绑定大小、身份和 SHA-256，参与轨迹复制/封包；live `AuditTail` 每次读取前重新校验它，不把它误当追加 JSONL。
+
+新模式的每个完整状态保留 110 种 Foley 历史及其八个槽、活动资源参数、32 个声道、原始 App 更新计数与累计分配调用数。每个槽的实际 instance/refcount、每个声道必须为零；原始 start/pause/last-variation 字段和 App 计数不会被清零或作跨进程偏移归一。分配计数从 recorder 附着、B0、每个 pre/post 到关闭必须不倒退，完整状态仍逐字段比较。只对原始安装回执中的进程地址分别验证归属和跳转关系，不要求两个进程的模块地址相同。
+
+关闭顺序在声明全部模式时为 `recording_closed` → `engine_call_closed` → `sound_effects_closed` → `draw_schedule_closed` → `particle_shake_closed` → `spawn_hook_closed`，版本必须一致。缺失、重复、乱序或不健康的音效关闭证据使严格封包/重放失败；原生正常封口的失败诊断仍可保留为普通实验归档。完整重放也比较源和实际最终音效调用数；seek/接管只把自身执行前缀或完整分支的关闭健康与原轨迹末尾区分报告。
+
+重放报告的 `sound_effects` 明确列出模式、B0/逐帧状态比较、安装证据校验和最终健康范围。跨模式 source/replay 在执行记录动作之前拒绝；旧 manifest 没有音效声明时保持旧合同兼容，不能添加新模式状态、回执或关闭事件冒充旧格式。此模式改变原版音效分配语义，始终声明 `original_engine_bitwise_unmodified:false`，也不声称音乐/BASS 或完整游戏确定性已验证。实现和实机门槛见 [silent-audio.md](silent-audio.md)。离线专项可运行 `python -m unittest discover -s tests -p test_sound_effects.py -v`；模拟器通过不代替新模式真实冷启动验收。

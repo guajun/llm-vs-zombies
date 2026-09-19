@@ -4,6 +4,7 @@ This is verified scheduling and captured-state comparison, not a declaration
 that every original-engine source of nondeterminism has been controlled.
 """
 from __future__ import annotations
+from . import sound_effects
 
 import argparse
 import base64
@@ -56,6 +57,7 @@ def identity_from_launcher(hello: dict, launcher: dict) -> dict:
     _artifacts(artifacts)
     if not isinstance(hello.get("build"), dict) or not isinstance(hello.get("game"), dict):
         raise EvidenceError("hello lacks build/game identity")
+    sound_effects.negotiate(hello)
     return {"build": copy.deepcopy(hello["build"]), "game": copy.deepcopy(hello["game"]),
             "artifacts": copy.deepcopy(artifacts)}
 
@@ -68,6 +70,7 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
     trajectory when describing a newly launched process.
     """
     hello = client.hello()
+    sound_effects.negotiate(hello)
     _validate_identity(identity)
     if hello.get("build") != identity["build"] or hello.get("game") != identity["game"]:
         raise EvidenceError("launcher/runtime identity mismatch")
@@ -98,6 +101,7 @@ def _validate_identity(identity: dict) -> None:
         raise EvidenceError("unsupported game target identity")
     draw_mode(game)
     engine_call_mode(game)
+    sound_effects.artifacts(game, identity["artifacts"])
 
 
 def _validate_initial(initial: dict) -> None:
@@ -130,6 +134,7 @@ def _validate_initial(initial: dict) -> None:
         validate_engine_origin(initial.get("engine_call_origin"))
     elif "engine_call_origin" in initial:
         raise EvidenceError("engine call origin lacks an explicit engine identity")
+    sound_effects.initial(initial)
     digests(initial["state"])
 
 
@@ -376,6 +381,7 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
     if audit.manifest != initial["identity"]["game"]:
         raise EvidenceError("native audit target/coverage identity differs from hello")
     audit.validate_draw_initial(initial)
+    audit.validate_audio_initial(initial)
     mode = draw_mode(audit.manifest)
     call_mode = engine_call_mode(audit.manifest)
     if _native_steps(audit) != [step for step in steps if step["request"]["method"] in STEP_METHODS]:
@@ -632,6 +638,12 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     report["audit_hash_backend"] = hash_backend()
     controlled_draw = draw_mode(trajectory.audit.manifest)
     controlled_calls = engine_call_mode(trajectory.audit.manifest)
+    audio_mode = sound_effects.mode(trajectory.audit.manifest)
+    report["sound_effects"] = {"mode": audio_mode or "original", "state_compared": False,
+        "original_engine_bitwise_unmodified": False if audio_mode else None,
+        "activation_evidence_verified": False, "final_health_verified": False,
+        "source_health": trajectory.audit.sound_effects_health,
+        "raw_activation_addresses_compared": False, "scope": "allocation-none SFX; music/exhaustive determinism unverified"}
     report["engine_calls"] = {"mode": controlled_calls or "not_declared", "returned_calls_compared": 0,
         "clock_steps_compared": 0, "terminal_zero_calls_compared": 0, "last_source_call_id": None,
         "last_actual_call_id": None, "final_health_verified": False, "source_health": trajectory.audit.engine_call_health,
@@ -680,6 +692,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             _validate_identity(session.identity)
             require_equal(trajectory.initial["identity"], session.identity, "identity")
             hello = client.hello()
+            sound_effects.negotiate(hello)
             require_equal(session.identity["build"], hello.get("build"), "live_build")
             require_equal(session.identity["game"], hello.get("game"), "live_game")
             required = {"observe", "audit_snapshot"} | {step["request"]["method"] for step in trajectory.steps if step["request"]["method"] in STEP_METHODS}
@@ -687,6 +700,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 required.update({"prepare_render", DRAW_SCHEDULE_MODE})
             if controlled_calls:
                 required.add(ENGINE_CALL_MODE)
+            if audio_mode:
+                required.add(sound_effects.MODE)
             if report["pause_controls"]["recorded"]:
                 # Protocol v1 implements these controller methods, but historic
                 # hello manifests omit their capability keys. Probe status and
@@ -745,6 +760,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             source_frame_stream = trajectory.audit._frames(reuse_state=True)
             actual_audit = AuditTail(session.audit_directory)
             require_equal(trajectory.audit.manifest, actual_audit.manifest, "audit_manifest")
+            actual_audit.validate_audio_initial(actual_marker)
+            report["sound_effects"].update(state_compared=bool(audio_mode), activation_evidence_verified=bool(audio_mode))
             if controlled_draw:
                 # Consume initialization evidence before executing any recorded
                 # request. Warm rendering belongs to B0, never to tick one.
@@ -979,7 +996,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 on_takeover(session, copy.deepcopy(report["takeover"]))
         particle_required = trajectory.audit.manifest.get("particle_shake") is not None
         spawn_required = report["spawn_comparison"]["hook_declared"] or trajectory.audit.birth_counts["controlled"] > 0
-        if particle_required or spawn_required or controlled_draw:
+        if particle_required or spawn_required or controlled_draw or audio_mode:
             if on_takeover is None:
                 actual_audit.verify_closed()
                 closed_audit = actual_audit
@@ -993,6 +1010,12 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             if controlled_calls:
                 report["engine_calls"].update(final_health_verified=True, actual_health=closed_audit.engine_call_health,
                     health_scope="full_branch" if on_takeover else "executed_prefix")
+            if audio_mode:
+                report["sound_effects"].update(final_health_verified=True, actual_health=closed_audit.sound_effects_health,
+                    health_scope="full_branch" if on_takeover else "executed_prefix")
+                if target_tick is None and on_takeover is None:
+                    require_equal(trajectory.audit.sound_effects_health, closed_audit.sound_effects_health,
+                                  "sound_effects.close")
             if on_takeover is None:
                 require_equal(report["spawn_events_compared"], actual_audit.birth_counts["controlled"],
                               "spawn.uncompared_close_events")

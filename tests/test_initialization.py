@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from llm_vs_zombies.client import Client, ProtocolError
 from llm_vs_zombies.initialization import (DRAW_MODE, LEGACY_DRAW_MODE, apply_recipe,
@@ -264,6 +264,60 @@ class InitializationTests(unittest.TestCase):
 
 
 class LauncherPreparationTests(unittest.TestCase):
+    def test_disk_failure_after_native_launch_still_stops_owned_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = dict(sandbox=str(root/'sandbox'), engine='engine', bootstrap='bootstrap', runtime='recorder')
+            with patch('llm_vs_zombies.launcher.prepare', return_value=state), \
+                 patch('llm_vs_zombies.launcher._native', side_effect=[dict(pid=123, creation_time=456), {}]) as native, \
+                 patch('llm_vs_zombies.launcher.write_json', side_effect=OSError('disk full')):
+                with self.assertRaisesRegex(OSError, 'disk full') as caught:
+                    start(root, root/'run')
+            self.assertEqual([call.args[1] for call in native.call_args_list], ['launch', 'stop'])
+            self.assertEqual(native.call_args.args[2:5], (123, 'engine', 456))
+            self.assertTrue(state['process_cleaned_up'])
+            self.assertTrue(any('Cannot persist' in note for note in caught.exception.__notes__))
+
+    def test_explicit_audio_launch_binds_receipt_and_cleans_up_mismatch(self):
+        from llm_vs_zombies.sound_effects import MODE
+        from test_sound_effects import SPEC, BOOTSTRAP, activation
+        for fault in (None, 'missing_capability', 'wrong_bootstrap', 'late_calls', 'missing_receipt'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); run = root/'experiments/runs/test'
+                (run/'observations').mkdir(parents=True); (run/'sandbox').mkdir()
+                runtime = PreparationRuntime(menu=True)
+                runtime.hello_value['game']['sound_effects'] = copy.deepcopy(SPEC)
+                runtime.hello_value['capabilities'][MODE] = fault != 'missing_capability'
+                receipt = activation()['pre_resume']
+                if fault == 'late_calls': receipt['calls'] = 1
+                calls = []
+                state = dict(sandbox=str(run/'sandbox'), engine='engine', bootstrap='bootstrap', runtime='recorder',
+                             module_hashes={'lvz-bootstrap.dll': 'f'*64 if fault == 'wrong_bootstrap' else BOOTSTRAP})
+                def native(state, verb, *args):
+                    calls.append((verb, args))
+                    if verb == 'launch':
+                        result = dict(pid=123, creation_time=456)
+                        if fault != 'missing_receipt': result['audio_activation'] = receipt
+                        return result
+                    return {}
+                client = Client(runtime, trace=Mock()); client.hello()
+                with patch('llm_vs_zombies.launcher.prepare', return_value=state), \
+                     patch('llm_vs_zombies.launcher._native', side_effect=native), \
+                     patch('llm_vs_zombies.client.connect', return_value=client):
+                    if fault:
+                        with self.assertRaises(ValueError):
+                            start(root, run, seed=42, defer_preparation=True, audio_mode=MODE)
+                    else:
+                        result = start(root, run, seed=42, defer_preparation=True, audio_mode=MODE)
+                        self.assertEqual(result['audio_mode'], MODE)
+                self.assertEqual(calls[0][1][-1], MODE)
+                if fault:
+                    self.assertEqual(calls[-1][0], 'stop')
+                    self.assertTrue(json.loads((run/'launcher.json').read_text())['process_cleaned_up'])
+                    self.assertNotIn('initialize', [r['method'] for r in runtime.requests])
+                else:
+                    self.assertEqual([c[0] for c in calls], ['launch', 'inject'])
+
     def test_default_launch_prepares_and_deferred_launch_leaves_warm_to_recipe(self):
         for deferred in (False,True):
             with self.subTest(deferred=deferred), tempfile.TemporaryDirectory() as directory:
@@ -302,6 +356,42 @@ class LauncherPreparationTests(unittest.TestCase):
                 with patch('llm_vs_zombies.repl.connect',side_effect=connected):
                     self.assertEqual(main(arguments),0)
                 self.assertEqual(runtime.draws,0 if deferred else 1)
+
+
+class SoundPreparationTests(unittest.TestCase):
+    def test_recipe_binds_complete_sound_state_and_keeps_raw_history(self):
+        from llm_vs_zombies import sound_effects as audio
+        from test_sound_effects import SPEC, sound_state
+        runtime = PreparationRuntime()
+        runtime.hello_value['game']['sound_effects'] = copy.deepcopy(SPEC)
+        runtime.hello_value['capabilities'][audio.MODE] = True
+        runtime.state['sound_effects'] = sound_state()
+        before = copy.deepcopy(runtime.state['sound_effects'])
+        with Client(runtime, trace=Mock()) as client:
+            client.hello()
+            recipe = apply_recipe(client, 42)
+        self.assertEqual(recipe['sound_effects'], dict(configuration=SPEC, b0_state_sha256=audio.state_sha256(before)))
+        self.assertEqual(runtime.state['sound_effects'], before)
+        self.assertEqual(runtime.draws, 1)
+
+    def test_incomplete_or_occupied_sound_state_stops_before_warm(self):
+        from llm_vs_zombies import sound_effects as audio
+        from test_sound_effects import SPEC, sound_state
+        for fault in ('missing_state', 'occupied_last_slot', 'occupied_channel'):
+            with self.subTest(fault=fault):
+                runtime = PreparationRuntime()
+                runtime.hello_value['game']['sound_effects'] = copy.deepcopy(SPEC)
+                runtime.hello_value['capabilities'][audio.MODE] = True
+                if fault != 'missing_state':
+                    runtime.state['sound_effects'] = sound_state()
+                    if fault == 'occupied_last_slot':
+                        runtime.state['sound_effects']['histories'][109]['slots'][7][0] = 123
+                    else:
+                        runtime.state['sound_effects']['channels'][31] = 123
+                with Client(runtime, trace=Mock()) as client:
+                    client.hello()
+                    with self.assertRaises(ValueError): apply_recipe(client, 42)
+                self.assertEqual(runtime.draws, 0)
 
 
 if __name__ == '__main__': unittest.main()

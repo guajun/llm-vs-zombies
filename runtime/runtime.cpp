@@ -1,3 +1,4 @@
+#include "determinism/silent_audio_audit.hpp"
 #include "runtime.hpp"
 #include "pipe_server.hpp"
 #include "pump_guard.hpp"
@@ -140,7 +141,7 @@ public:
                 {"strict_determinism",false},{"step_clock_guard",true},{"exact_step_live_validated",false},{"native_demo",false},{"initialize",true},
                 {"audit_snapshot",true},{"rng_restore",true},{"rng_seed",true},{"clock_restore",true},{"stop_recording",true},
                 {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false},
-                {"prepare_render",true},{"deterministic_draw_schedule_v1",true},{"controlled_engine_call_v1",true}}}};
+                {"sound_effects_allocation_none_v1",lvz::determinism::silentaudio::Enabled()},{"prepare_render",true},{"deterministic_draw_schedule_v1",true},{"controlled_engine_call_v1",true}}}};
     }
     bool RequiresRenderPreparation()const override {return true;}
     bool RenderPrepared()const override {return renderPrepared_;}

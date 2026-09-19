@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdio>
 #include <unordered_set>
+#include "silent_audio.hpp"
 
 namespace {
 std::string sandbox, registryPrefix;
@@ -163,7 +164,7 @@ void SeedRegistry() {
     RegCloseKey(key);
 }
 }
-extern "C" __declspec(dllexport) DWORD WINAPI LvzBootstrapStart(void*) {
+extern "C" __declspec(dllexport) DWORD WINAPI LvzBootstrapStart(void* activation) {
     try {
         wchar_t path[MAX_PATH]={};
         DWORD size=GetEnvironmentVariableW(L"LVZ_SANDBOX",path,MAX_PATH);
@@ -178,8 +179,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI LvzBootstrapStart(void*) {
         registryPrefix="Software\\LLMVsZombies\\"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(identity);
         audit=fopen((sandbox+"\\bootstrap.log").c_str(),"wb");
         if(!audit) return 12;
+        std::string audioError;
+        if(!lvz::silentaudio::Install(static_cast<lvz::silentaudio::Activation*>(activation),audioError)) { Log("audio_failed",audioError.c_str()); return 16; }
         SeedRegistry();
-        if(!Install()) { Log("isolation_failed"); return 13; }
+        if(!Install()) { std::string ignored; lvz::silentaudio::RollbackBeforeResume(ignored); Log("isolation_failed"); return 13; }
         Log("isolation_ready",registryPrefix.c_str());
         return 0;
     } catch(...) { return 14; }

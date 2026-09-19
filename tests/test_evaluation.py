@@ -3,15 +3,52 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from llm_vs_zombies.evaluation import (LIVE_GATES, LaunchWindowMonitor, Plan, ScriptStrategy, apply_recipe,
                                       clock_anchor, evidence, full_cycle_completed,
                                       launch_window_evidence, private_launch_passed, readiness)
 from llm_vs_zombies.session import SessionTrace
+from llm_vs_zombies.sound_effects import MODE
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_live_session_passes_audio_mode_and_stops_after_close_io_errors(self):
+        from llm_vs_zombies.evaluation import live_session
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = root/'run'; run.mkdir()
+            trace = Mock(); trace.close.side_effect = OSError('trace flush failed')
+            client = Mock(); client.close.side_effect = OSError('client close failed')
+            client.observe.return_value = {'version': {'epoch': 1, 'tick': 0, 'revision': 0}}
+            class Monitor:
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def result(self, pid): return {'synthetic_fixture': True}
+            with patch('llm_vs_zombies.cli.create_run', return_value=run), \
+                 patch('llm_vs_zombies.launcher.start', return_value={'pid': 123}) as launch, \
+                 patch('llm_vs_zombies.launcher.stop', return_value={}) as stop, \
+                 patch('llm_vs_zombies.client.connect', return_value=client), \
+                 patch('llm_vs_zombies.session.SessionTrace', return_value=trace), \
+                 patch('llm_vs_zombies.evaluation.LaunchWindowMonitor', Monitor):
+                with live_session(root, 'run', Plan(audio_mode=MODE), 42): pass
+            self.assertEqual(launch.call_args.kwargs['audio_mode'], MODE)
+            stop.assert_called_once_with(run)
+            cleanup = json.loads((run/'evaluation-cleanup.json').read_text())
+            self.assertEqual(cleanup, {'recording_closed': True, 'client_close_error': 'client close failed',
+                                      'trace_close_error': 'trace flush failed', 'owned_process_stopped': True})
+
+    def test_audio_mode_is_explicit_and_old_plans_keep_original(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'plan.json'
+            path.write_text('{}')
+            self.assertEqual(Plan.load(path).audio_mode, 'original')
+            path.write_text(json.dumps({'audio_mode': MODE}))
+            self.assertEqual(Plan.load(path).audio_mode, MODE)
+            for value in ('silent', None, True, 1, {'mode': MODE}):
+                path.write_text(json.dumps({'audio_mode': value}))
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    Plan.load(path)
+
     @staticmethod
     def window_sample(timestamp, handle=10, foreground_pid=100, *, resolved=True, owned=False, visible=False):
         return {"monotonic_seconds": timestamp, "foreground": handle, "foreground_pid": foreground_pid,

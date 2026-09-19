@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <nlohmann/json.hpp>
+#include "silent_audio.hpp"
 
 namespace {
 std::runtime_error Failure(const char* stage) { return std::runtime_error(std::string(stage)+": Win32 error "+std::to_string(GetLastError())); }
@@ -42,9 +44,12 @@ int wmain(int argc,wchar_t** argv) {
     HANDLE process=nullptr,thread=nullptr;
     bool launched=false;
     try {
-        if(argc==7&&!wcscmp(argv[1],L"launch")) {
+        if((argc==7||argc==8)&&!wcscmp(argv[1],L"launch")) {
+            const bool silent=argc==8;
+            if(silent&&wcscmp(argv[7],lvz::silentaudio::ModeW)) throw std::runtime_error("unsupported audio mode");
+            if(!SetEnvironmentVariableW(L"LVZ_AUDIO_MODE",silent?lvz::silentaudio::ModeW:L"original"))throw Failure("audio environment");
             // launch ENGINE BOOTSTRAP SANDBOX CWD RECEIPT
-            SetEnvironmentVariableW(L"LVZ_SANDBOX",argv[4]);
+            if(!SetEnvironmentVariableW(L"LVZ_SANDBOX",argv[4]))throw Failure("sandbox environment");
             STARTUPINFOW startup{}; startup.cb=sizeof(startup); startup.dwFlags=STARTF_USESHOWWINDOW; startup.wShowWindow=SW_HIDE;
             PROCESS_INFORMATION info{};
             std::wstring command=L"\""+std::wstring(argv[2])+L"\"";
@@ -57,13 +62,45 @@ int wmain(int argc,wchar_t** argv) {
             if(!entry) entry=GetProcAddress(local,"LvzBootstrapStart");
             if(!entry) throw Failure("bootstrap export");
             auto remote=reinterpret_cast<LPTHREAD_START_ROUTINE>(module+reinterpret_cast<DWORD>(entry)-reinterpret_cast<DWORD>(local));
-            DWORD result=Remote(process,remote,nullptr); FreeLibrary(local);
+            lvz::silentaudio::Activation activation;activation.primaryThread=info.dwThreadId;
+            void* remoteData=nullptr;
+            if(silent) {
+                remoteData=VirtualAllocEx(process,nullptr,sizeof(lvz::silentaudio::Status),MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+                if(!remoteData||!WriteProcessMemory(process,remoteData,&activation,sizeof(activation),nullptr)) throw Failure("audio activation contract");
+                if(!GetProcAddress(local,"LvzAudioStatus@4")&&!GetProcAddress(local,"LvzAudioStatus")) throw std::runtime_error("bootstrap lacks required audio contract");
+            }
+            DWORD result=Remote(process,remote,remoteData);
+            nlohmann::json audio;
+            if(!result&&silent) {
+                auto seal=GetProcAddress(local,"LvzAudioSeal@4");if(!seal)seal=GetProcAddress(local,"LvzAudioSeal");
+                auto query=GetProcAddress(local,"LvzAudioStatus@4");if(!query)query=GetProcAddress(local,"LvzAudioStatus");
+                if(!seal||!query)throw std::runtime_error("bootstrap audio exports unavailable");
+                auto relocated=[&](FARPROC address){return reinterpret_cast<LPTHREAD_START_ROUTINE>(module+reinterpret_cast<DWORD>(address)-reinterpret_cast<DWORD>(local));};
+                if(Remote(process,relocated(seal),nullptr))throw std::runtime_error("audio pre-resume seal failed");
+                lvz::silentaudio::Status status;
+                if(!WriteProcessMemory(process,remoteData,&status,sizeof(status),nullptr)||Remote(process,relocated(query),remoteData)
+                    ||!ReadProcessMemory(process,remoteData,&status,sizeof(status),nullptr))throw Failure("audio activation receipt");
+                if(status.magic!=lvz::silentaudio::Magic||status.version!=1||!status.enabled||!status.installed||status.phase!=2
+                    ||!status.pinned||!status.patchOwned||status.ownerModule!=module||status.primaryThread!=info.dwThreadId
+                    ||status.calls||status.errors||status.preexistingApp)throw std::runtime_error("audio pre-resume receipt rejected");
+                audio={{"mode",lvz::silentaudio::Mode},{"installed",true},{"before_primary_thread_resume",true},{"phase","sealed_before_resume"},
+                    {"primary_thread",status.primaryThread},{"owner_module",status.ownerModule},{"owner_pinned",true},
+                    {"entry",status.entry},{"replacement",status.replacement},{"patch_owned",true},{"calls",status.calls},{"errors",status.errors},
+                    {"preexisting_app",status.preexistingApp},{"original_bytes",status.original},{"patch_bytes",status.patch},
+                    {"engine_sha256",status.engineSha256},{"bootstrap_sha256",status.bootstrapSha256}};
+            }
+            if(remoteData)VirtualFreeEx(process,remoteData,0,MEM_RELEASE);
+            FreeLibrary(local);
             if(result) throw std::runtime_error("bootstrap isolation failed: code "+std::to_string(result));
             FILE* receipt=_wfopen(argv[6],L"wb");
             if(!receipt) throw std::runtime_error("cannot write launcher receipt");
-            fprintf(receipt,"{\"pid\":%lu,\"creation_time\":%llu,\"isolation_ready\":true}\n",info.dwProcessId,Started(process)); fclose(receipt);
+            nlohmann::json output={{"pid",info.dwProcessId},{"creation_time",Started(process)},{"isolation_ready",true}};
+            if(silent)output["audio_activation"]=audio;
+            const bool written=fprintf(receipt,"%s\n",output.dump().c_str())>=0 && fflush(receipt)==0;
+            const bool closed=fclose(receipt)==0;
+            if(!written||!closed)throw std::runtime_error("launcher receipt write/close failed before resume");
             if(ResumeThread(thread)==static_cast<DWORD>(-1)) throw Failure("ResumeThread");
-            printf("{\"pid\":%lu,\"creation_time\":%llu,\"isolation_ready\":true}\n",info.dwProcessId,Started(process));
+            printf("%s\n",output.dump().c_str());
         } else if(argc==6 && (!wcscmp(argv[1],L"inject")||!wcscmp(argv[1],L"stop"))) {
             DWORD pid=wcstoul(argv[2],nullptr,10); ULONGLONG created=_wcstoui64(argv[4],nullptr,10);
             process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_CREATE_THREAD|PROCESS_VM_OPERATION|PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_TERMINATE|SYNCHRONIZE,FALSE,pid);
