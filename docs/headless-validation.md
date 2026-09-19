@@ -125,3 +125,13 @@ B0实测110组历史、880个Foley槽及32个声道均为空，保留原始变�
 
 
 第一次同D4F8冷启动 `headless-silent-037-replay1` 在B0被严格拒绝，未执行重放动作。对完整捕获状态递归比对，唯一差异为 `/sound_effects/app_update_count`：源1295，实际1294；RNG、分配计数、全部历史/槽/参数和其他状态相同。失败档已正常封存、自有进程停止、用户档未变，manifest SHA256为 `21640600fedc9bca14c117754ffc7ff7c94c61a90c0930ce9013e21a1c17c44a`。新增[#14](https://github.com/guajun/llm-vs-zombies/issues/14)显式初始化锚点控制真实App计数，不能通过忽略字段或比较器偏移掩盖差异；旧037记录和DLL继续冻结，当前仍未实验就绪。
+
+## 显式 App 初始计数与诊断累计值（039）
+
+[#14 的初始化操作](app-update-anchor-native.md)已合入。257 项 Python 测试通过，14 项原生测试通过，最后一处 demo 标志字节宽度修正后定向原生测试再次通过。冻结隔离源码为 `b6f9feb`，recorder 为 `ce9bf82ed6bd21eaca371e7da0d6bc002e557c3efb5a010b05c058d0b1098bae`，bootstrap 为 `5b7d20693de24fc00c367f5386cc24e83c06659d3553402e0faa4ab59c2ab85d`，launcher 为 `88fb19dcbccf8baeef7cb2e5949eae3049beef4549dcfb223e4afec4cc91b7a2`。
+
+`headless-appclock-039-short` 完成100 tick单批推进及200个边界封包，轨迹ID为 `3c8b8937047390b130f840e0c6764af729e734d0d2cd8c737eb4bb0c7c2267fa`，manifest SHA256为 `74c0b4d739b25a274e9cd7c1f969b9701ce96e17f84d5b61a763cdac3c578135`。同DLL冷启动 `headless-appclock-039-short-replay` 的真实App计数由1427显式设置到来源1362；两份完整锚定回执分别保留1362→1362及1427→1362，其他捕获字段在各自操作前后未变。
+
+冷启动仍在B0拒绝，未执行重放动作：完整递归比对唯一差异为 `/sound_effects/calls`，来源14，冷启动16。两局主线程恢复前及recorder attach时的累计值均为0，App锚定前后及B0分别保持14、16。这个字段来自bootstrap私有诊断变量 `lvzSilentCalls`，不是原版字段，也不决定空音效分配函数的返回；差异发生在受控实验之前。原始App、RNG、Foley历史和其他已捕获B0状态已相同。
+
+失败冷档正常封存、进程停止、共享用户档未变，manifest SHA256为 `1d0aa8b266723a84da28ffdf052b2bab90e51d983a3d0221851300b681d057c7`。039保持原结论。新增[#15](https://github.com/guajun/llm-vs-zombies/issues/15)为诊断累计值建立显式实验计数起点，保留绝对累计旁证与错误检测；不会重置bootstrap总量、修改原版状态或升级旧档。短程冷重放尚未通过，长程和完整两旗验收继续待完成。
