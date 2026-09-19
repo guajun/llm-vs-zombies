@@ -22,7 +22,8 @@
 | [#16](https://github.com/guajun/llm-vs-zombies/issues/16) | 将只读窗口观察与状态解码隔离，保留采样完整性门槛 | 041长程冷重放退出时0.691秒采样空隙 |
 | [#17](https://github.com/guajun/llm-vs-zombies/issues/17) | 同一边界音效状态仅验证一次，同时保留全部原始计数核验 | 真实封存样本定位到重复验证开销 |
 | [#18](https://github.com/guajun/llm-vs-zombies/issues/18) | 公开实验运行器的运行期窗口、失败封存及长局资源保护 | 私有集成通过后补齐公开入口保障 |
-| [#19](https://github.com/guajun/llm-vs-zombies/issues/19) | 验证两个独立冷重放进程的隔离，再提供显式双 worker 选项 | 每份独立对源比较、完整关闭与窗口证据；当前仅离线准备 |
+| [#19](https://github.com/guajun/llm-vs-zombies/issues/19) | 验证两个独立冷重放进程的隔离，再提供显式双 worker 选项 | 047首次并行试验窗口证据不合格，尚未验收 |
+| [#20](https://github.com/guajun/llm-vs-zombies/issues/20) | 按原版掉旗生命周期审计旗帜动画的已释放引用 | 045第20波真实失败；保留原始句柄及严格负例 |
 
 用户优先要求 headless：目标为不抢焦点的后台原版引擎，所有实验控制通过有限 IPC 操作。保留隐藏窗口初始化与完全无窗口是不同能力。不得以自动点击窗口代替后台接口，也不得未经验证就声称去除绘制不影响随机轨迹。
 
