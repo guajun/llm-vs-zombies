@@ -16,9 +16,11 @@ class EvaluationTests(unittest.TestCase):
         from llm_vs_zombies.evaluation import live_session
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); run = root/'run'; run.mkdir()
+            (run/'inputs').mkdir()
             trace = Mock(); trace.close.side_effect = OSError('trace flush failed')
             client = Mock(); client.close.side_effect = OSError('client close failed')
             client.observe.return_value = {'version': {'epoch': 1, 'tick': 0, 'revision': 0}}
+            client.request.return_value = {'closed': True}
             class Monitor:
                 def __init__(self, **kwargs): pass
                 def __enter__(self): return self
@@ -30,13 +32,18 @@ class EvaluationTests(unittest.TestCase):
                  patch('llm_vs_zombies.launcher.stop', return_value={}) as stop, \
                  patch('llm_vs_zombies.client.connect', return_value=client), \
                  patch('llm_vs_zombies.session.SessionTrace', return_value=trace), \
+                 patch('llm_vs_zombies.evaluation.host_sources', return_value={'matches_archive': True, 'unchanged': True}), \
                  patch('llm_vs_zombies.evaluation.LaunchWindowMonitor', Monitor):
                 with live_session(root, 'run', Plan(audio_mode=MODE), 42): pass
             self.assertEqual(launch.call_args.kwargs['audio_mode'], MODE)
             stop.assert_called_once_with(run)
             cleanup = json.loads((run/'evaluation-cleanup.json').read_text())
-            self.assertEqual(cleanup, {'recording_closed': True, 'client_close_error': 'client close failed',
-                                      'trace_close_error': 'trace flush failed', 'owned_process_stopped': True})
+            self.assertTrue(cleanup['recording_closed'])
+            self.assertTrue(cleanup['owned_process_stopped'])
+            self.assertNotIn('client_closed', cleanup)
+            self.assertNotIn('trace_closed', cleanup)
+            self.assertEqual(cleanup['client_close_error']['message'], 'client close failed')
+            self.assertEqual(cleanup['trace_close_error']['message'], 'trace flush failed')
 
     def test_audio_mode_is_explicit_and_old_plans_keep_original(self):
         with tempfile.TemporaryDirectory() as temp:
