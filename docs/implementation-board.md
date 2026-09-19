@@ -94,3 +94,5 @@
 这只验收该新模式、种子42、3 tick公共入口的短程与并行管线，`experiment_ready=false`。公开5000 tick、自然终局、完整两旗与十次冷启动仍待完成；047/048以及本次001/002的失败不得升级为通过。
 
 同一新模式、同一集成树的公开5000 tick烟测随后通过（`public-fp-smoke-001`）：源真实到达 `game_clock=8151`（起点3151+5000）并以 `tick_budget_exhausted` 结束，两个并行cold各自完成246条请求、5000次原生调用与时钟步、153次受控出生、695,940次粒子调用，`equal=true`，浮点激活回执比较、10,000条原始边界与关闭health全部通过，实测正推进RPC交叠44.98ms。除smoke专门排除的 `full_cycle`/`ten_cold_starts` 外全部门槛pass，`experiment_ready=false`。源的运行期窗口最大间隔241.07ms贴近250ms门槛，本轮通过不构成余量保证。明细见[固定浮点模式的5000 tick公开烟测](headless-validation.md#固定浮点模式的5000-tick公开烟测)。
+
+公开CI记录：`f86d985` 与 `02447cd` 的 `python` 作业在Linux上失败，原因是 `WorkerProcess.__init__` 在平台判断之前就读取 `subprocess.CREATE_NO_WINDOW`；同一提交的 `windows-native` 作业通过。`96f9fec` 在构造函数入口显式拒绝非Windows平台，并把该Windows专用构造函数测试标记为跳过，随后 `python` 与 `windows-native` 两个作业都成功（run 35459115066）。失败记录保留，不追改为通过。
