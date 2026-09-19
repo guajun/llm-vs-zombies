@@ -1,6 +1,7 @@
 #include "launcher/silent_audio.hpp"
 #include "launcher/file_hash.hpp"
 #include "determinism/silent_audio_audit.hpp"
+#include "determinism/memory.hpp"
 #include <array>
 #include <fstream>
 #include <filesystem>
@@ -108,8 +109,15 @@ int main(int argc,char** argv){using namespace lvz::silentaudio;try{
     // close; no healthy cached result is permitted after a persistent fault.
     lvz::determinism::silentaudio::SetHealthFixture(HealthSnapshot,HealthQuery);
     Check(lvz::determinism::silentaudio::Health()["healthy"]==true,"healthy fixture failed");
+    // The locked game address may fall inside this test executable on a
+    // different linker/ASLR layout. Check actual bytes when readable, rather
+    // than assuming a non-game process leaves that virtual address unmapped.
+    Json expectedEntry=nullptr;
+    if(lvz::determinism::Accessible(Target,6)){
+        std::array<uint8_t,6> bytes;std::memcpy(bytes.data(),reinterpret_cast<void*>(Target),bytes.size());expectedEntry=bytes;
+    }
     for(failure=1;failure<=2;++failure)for(int repeat=0;repeat<2;++repeat){const auto h=lvz::determinism::silentaudio::Health();
-        Check(h["healthy"]==false&&h["raw_status"]["calls"]==12&&h["entry_bytes"].is_null(),"fault close missing bounded raw evidence");}
+        Check(h["healthy"]==false&&h["raw_status"]["calls"]==12&&h["entry_bytes"]==expectedEntry,"fault close missing bounded raw evidence");}
     failure=0;Check(lvz::determinism::silentaudio::Health()["healthy"]==false,"persistent fault was forgotten after recovery");
     std::cout<<"silent audio ABI, mode, signature, lifecycle, counters and unhealthy close fixtures passed\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
