@@ -304,6 +304,11 @@ def worker(path):
 class WorkerProcess:
     """Only holds its own Popen and Job; never discovers/terminates other games."""
     def __init__(self, task, directory):
+        if os.name != "nt":
+            # Only the scheduler starts workers, and a worker owns one Windows
+            # Job and one hidden host process. Fail explicitly here instead of
+            # reaching a platform-specific creation flag that does not exist.
+            raise RuntimeError("parallel cold worker hosts require Windows Job Objects")
         self.task, self.directory = task, Path(directory)
         self.directory.mkdir()
         self.process = self.job = None

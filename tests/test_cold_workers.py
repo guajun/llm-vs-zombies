@@ -61,6 +61,7 @@ class PlanTests(unittest.TestCase):
 
 
 class ReceiptTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=='nt','parallel cold worker hosts require Windows Job Objects')
     def test_constructor_cleanup_keeps_original_failure_and_all_notes(self):
         from types import SimpleNamespace
         original=RuntimeError('owner identity lookup failed')
