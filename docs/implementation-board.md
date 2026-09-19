@@ -41,7 +41,7 @@
 
 实现 agent 交付代码、测试结果与已知边界；主 agent 单独检查接口和失败路径，并执行集成测试。issue 的开发完成与真实实验验收是两件事。仅当 issue 中的验收条件均满足才关闭。
 
-- 公开 CI 不依赖游戏本体；使用协议、日志、重放与原生控制器测试。
+- 公开代码检查不依赖游戏本体；使用协议、日志、重放与原生控制器测试。检查在本机由 `tools/ci.ps1` 执行（GitHub Actions 已移除）。
 - 本机验证使用自行提供的锁定游戏，私有运行目录不加入 Git。
 - 完整实验就绪须具备后台启动、真实两仪场景、精确操作、完整记录及同轨迹重放证据。
 - 10 次冷启动、完整两旗周期及暂停扰动是严格确定性门槛；有限字段相同不能代替完整能力声明。
@@ -96,3 +96,5 @@
 同一新模式、同一集成树的公开5000 tick烟测随后通过（`public-fp-smoke-001`）：源真实到达 `game_clock=8151`（起点3151+5000）并以 `tick_budget_exhausted` 结束，两个并行cold各自完成246条请求、5000次原生调用与时钟步、153次受控出生、695,940次粒子调用，`equal=true`，浮点激活回执比较、10,000条原始边界与关闭health全部通过，实测正推进RPC交叠44.98ms。除smoke专门排除的 `full_cycle`/`ten_cold_starts` 外全部门槛pass，`experiment_ready=false`。源的运行期窗口最大间隔241.07ms贴近250ms门槛，本轮通过不构成余量保证。明细见[固定浮点模式的5000 tick公开烟测](headless-validation.md#固定浮点模式的5000-tick公开烟测)。
 
 公开CI记录：`f86d985` 与 `02447cd` 的 `python` 作业在Linux上失败，原因是 `WorkerProcess.__init__` 在平台判断之前就读取 `subprocess.CREATE_NO_WINDOW`；同一提交的 `windows-native` 作业通过。`96f9fec` 在构造函数入口显式拒绝非Windows平台，并把该Windows专用构造函数测试标记为跳过，随后 `python` 与 `windows-native` 两个作业都成功（run 35459115066）。失败记录保留，不追改为通过。
+
+随后用户要求取消托管CI：公开runner的真实实验需要原版游戏、数十GiB归档和连续数小时墙钟，托管runner无法承载，同一套检查在本地更快且更接近实际运行环境。`.github/workflows/ci.yml` 已删除，等价检查改为本机 `tools/ci.ps1`（锁定AvZ提交、原生与launcher构建、全部Python与原生测试、不接触游戏与用户档的隔离夹具），`-SkipBuild` 只跑测试。之前的托管运行记录保留为历史，不再触发新运行。

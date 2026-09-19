@@ -97,4 +97,4 @@ python -m unittest discover -s tests -v
 ctest --test-dir build/cmake --output-on-failure
 ```
 
-公开 CI 只构建公开代码和运行不依赖游戏的测试；真实实验报告来自本机原版引擎。AvZ 固定为 `c42676c269b5b482a1eb9203a5b979e9d8a2a5c7`。本项目遵循 GPL-3.0；游戏及第三方依赖许可独立。
+公开代码检查在本机执行：`powershell -File tools/ci.ps1`（可加 `-SkipBuild` 只跑测试）按顺序核验锁定 AvZ 提交、构建原生代码与 launcher、运行全部 Python 与原生测试，并执行不接触游戏与用户档的隔离夹具。GitHub Actions 已移除：公开 runner 的真实实验占用大量磁盘与连续墙钟时间，托管 runner 既无原版游戏也无法承载这些实验，同一套检查在本地运行更快也更接近实际环境。真实实验报告来自本机原版引擎。AvZ 固定为 `c42676c269b5b482a1eb9203a5b979e9d8a2a5c7`。本项目遵循 GPL-3.0；游戏及第三方依赖许可独立。
