@@ -37,7 +37,7 @@ cd llm-vs-zombies
 ```powershell
 $env:PYTHONPATH = 'src'
 python -m llm_vs_zombies.repl --help
-python -m llm_vs_zombies.evaluation plan work/smoke-plan.json
+python -m llm_vs_zombies.evaluation plan work/smoke-plan.json --seeds 42 --strategy examples/liangyi_baseline.py --audio-mode sound_effects_allocation_none_v1
 python -m llm_vs_zombies.evaluation run work/smoke-plan.json --output experiments/runs/eval-smoke
 ```
 
@@ -74,7 +74,8 @@ with SessionTrace('experiments/runs/my-run/decisions/session.jsonl') as trace:
 - 原版粒子抖动会用堆地址重新播种 CRT。当前实验启用 [deterministic_particle_shake_v1](docs/particle-shake-determinism.md)，在两个确认过的调用点以验证后的完整粒子 ID 代替地址因子；原始种子、转换种子和调用序列均保存。这会改变该粒子的抖动序列，不能称为未经修改的原版逐位重放。
 - 原引擎 replay 从相同初态重新执行真实请求，定位首个分叉。seek 从起点重算；目前不声称支持完整进程检查点或任意时刻直接恢复。
 - 视频按游戏 tick 采样并流式送入 FFmpeg，不逐帧保存截图。原画来自引擎绘制表面；状态示意图始终标为非原版画面。JSONL 保存捕获元数据和像素 SHA256，原始像素送编码器。
-- 当前显式计数起点版本已通过100 tick冷重放，以及1,000 tick单步/批量加录像的全部捕获状态对照。5,000 tick冷重放已完成在线状态比较，但窗口观察器采样间隔超限，整体验收保持失败；正在独立核验关闭证据并修复观察覆盖。完整两旗与十次冷启动仍未通过，不能宣称严格实验就绪。旧版第1,344 tick音频/RNG分叉及其他失败档均保留在[实机记录](docs/headless-validation.md)。
+- 当前显式模式已通过新的5,000 tick完整冷重放，以及同一13动作时间线的单步/批量、1秒/5秒暂停和缓存录像对照：10,000个前后状态边界、152次受控出生、703,886次粒子调用及全部关闭健康一致，运行期窗口原始证据通过。另已完整重放自然GameOver的6,163个时钟步和最后一次零时钟终局调用。旧窗口超限及音频/RNG分叉档保留原失败结论，详见[实机记录](docs/headless-validation.md)。
+- 公开评测入口已加入运行期观察、关闭后封存、实际磁盘/墙钟限制及源码身份绑定，代码与CI验证通过；该入口的新实机集成、完整两旗和十次冷启动仍待验收，当前 `experiment_ready=false`。
 
 ## 文档与验收
 
