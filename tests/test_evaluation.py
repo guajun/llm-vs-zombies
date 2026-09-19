@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 import tempfile
-import threading
 import unittest
 from unittest.mock import patch, Mock
 
@@ -21,8 +20,10 @@ class EvaluationTests(unittest.TestCase):
             client = Mock(); client.close.side_effect = OSError('client close failed')
             client.observe.return_value = {'version': {'epoch': 1, 'tick': 0, 'revision': 0}}
             class Monitor:
+                def __init__(self, **kwargs): pass
                 def __enter__(self): return self
                 def __exit__(self, *args): pass
+                def bind_pid(self, pid): pass
                 def result(self, pid): return {'synthetic_fixture': True}
             with patch('llm_vs_zombies.cli.create_run', return_value=run), \
                  patch('llm_vs_zombies.launcher.start', return_value={'pid': 123}) as launch, \
@@ -93,26 +94,17 @@ class EvaluationTests(unittest.TestCase):
                                              42, errors=["sample failed"])
             self.assertEqual(windows["foreground_check_status"], status)
 
-    def test_monitor_samples_during_blocking_launch_and_resolves_owned_windows_afterward(self):
-        sampled = threading.Event()
-        calls = []
-        def probe(pid=None):
-            calls.append(pid)
-            if len(calls) >= 2:
-                sampled.set()
-            return {"foreground": 10, "foreground_pid": 100, "foreground_resolved": True,
-                    "owned_windows": [{"handle": 500, "visible": False}] if pid == 42 else []}
-        with patch("llm_vs_zombies.evaluation.window_probe", side_effect=probe):
-            monitor = LaunchWindowMonitor()
-            with monitor:
-                self.assertIsNone(calls[0])
-                # Stand in for a blocking launcher while the observer runs.
-                self.assertTrue(sampled.wait(timeout=1))
-            windows = monitor.result(42)
-        self.assertFalse(monitor.thread.is_alive())
-        self.assertEqual(calls[-1], 42)
-        self.assertGreaterEqual(windows["sampling"]["sample_count"], 3)
-        self.assertFalse(windows["game_foreground_observed"])
+    def test_visible_intermediate_owned_window_is_not_erased_by_hidden_last_sample(self):
+        windows = launch_window_evidence([self.window_sample(0, owned=True),
+            self.window_sample(.025, owned=True, visible=True), self.window_sample(.05, owned=True)], 42)
+        self.assertEqual(windows['foreground_check_status'], 'fail')
+
+    def test_malformed_or_reordered_samples_cannot_be_sorted_into_pass(self):
+        for bad in ({}, {'monotonic_seconds': float('nan')}, self.window_sample(-1, owned=True)):
+            windows = launch_window_evidence([self.window_sample(0, owned=True), bad,
+                self.window_sample(.05, owned=True)], 42)
+            self.assertEqual(windows['foreground_check_status'], 'unverified')
+            self.assertEqual(windows['samples'][1], bad)
 
     def test_invalid_seed_and_incomplete_strict_plan_are_rejected(self):
         for seeds in ((True,), (-1,), (2**32,), (1, 1), ()):

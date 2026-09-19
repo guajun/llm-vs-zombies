@@ -17,7 +17,6 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
-import threading
 import time
 import uuid
 from typing import Any
@@ -26,6 +25,7 @@ from .records import finish, read_json, sha256, write_json
 from .initialization import apply_recipe, clock_anchor
 from . import sound_effects
 from .app_update_anchor import target_from_recipe
+from .window_observer import LaunchWindowMonitor, launch_window_evidence, window_probe
 
 SCHEMA = "lvz.evaluation.v1"
 PLAN_SCHEMA = "lvz.evaluation-plan.v1"
@@ -160,122 +160,6 @@ def profile_fingerprint() -> dict:
     return {"userdata": files, "registry_hkcu": registry}
 
 
-def window_probe(pid: int | None = None) -> dict:
-    """Read foreground ownership and owned visibility; never activate or send input."""
-    import ctypes
-    from ctypes import wintypes
-    user = ctypes.WinDLL("user32", use_last_error=True)
-    user.GetForegroundWindow.restype = wintypes.HWND
-    user.IsWindowVisible.argtypes = [wintypes.HWND]
-    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-    user.GetWindowThreadProcessId.restype = wintypes.DWORD
-    # A foreground switch or destroyed HWND can race the PID lookup. Keep an
-    # unresolved sample rather than attributing it to either the user or game.
-    foreground, foreground_pid, resolved = 0, None, False
-    for _ in range(3):
-        foreground = int(user.GetForegroundWindow() or 0)
-        owner = wintypes.DWORD()
-        thread_id = user.GetWindowThreadProcessId(foreground, ctypes.byref(owner)) if foreground else 0
-        if foreground == int(user.GetForegroundWindow() or 0):
-            resolved = not foreground or bool(thread_id and owner.value)
-            foreground_pid = owner.value if foreground and resolved else None
-            break
-    windows = []
-    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    @callback_type
-    def visit(window, _):
-        owner = wintypes.DWORD()
-        user.GetWindowThreadProcessId(window, ctypes.byref(owner))
-        if owner.value == pid:
-            windows.append({"handle": window, "visible": bool(user.IsWindowVisible(window))})
-        return True
-    if pid is not None:
-        user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
-        if not user.EnumWindows(visit, 0):
-            raise ctypes.WinError(ctypes.get_last_error())
-    return {"foreground": foreground, "foreground_pid": foreground_pid,
-            "foreground_resolved": resolved, "owned_windows": windows}
-
-
-class LaunchWindowMonitor:
-    """Finite read-only sampling covering the complete blocking launcher call.
-
-    PID is resolved after start returns, so foreground transitions are retained
-    even while the helper has not yet written its process receipt.
-    """
-    interval_seconds = 0.025
-    max_gap_seconds = 0.250
-
-    def __init__(self):
-        self.samples = []
-        self.errors = []
-        self.finished = threading.Event()
-        self.thread = None
-
-    def sample(self, pid=None):
-        timestamp = time.monotonic()
-        try:
-            result = window_probe(pid)
-        except Exception as error:
-            message = f"{type(error).__name__}: {error}"
-            self.errors.append(message)
-            result = {"foreground": None, "foreground_pid": None,
-                      "foreground_resolved": False, "owned_windows": [], "error": message}
-        self.samples.append({"monotonic_seconds": timestamp, **result})
-        return self.samples[-1]
-
-    def _poll(self):
-        while not self.finished.wait(self.interval_seconds):
-            self.sample()
-
-    def __enter__(self):
-        self.sample()
-        self.thread = threading.Thread(target=self._poll, name="lvz-foreground-observer", daemon=True)
-        self.thread.start()
-        return self
-
-    def __exit__(self, *_):
-        self.finished.set()
-        self.thread.join(timeout=2)
-        if self.thread.is_alive():
-            self.errors.append("foreground observer did not stop within two seconds")
-
-    def result(self, pid):
-        # Called after stopping the worker; collect the final owned-window list.
-        self.sample(pid)
-        return launch_window_evidence(self.samples, pid, errors=self.errors,
-                                      interval_seconds=self.interval_seconds, max_gap_seconds=self.max_gap_seconds)
-
-
-def launch_window_evidence(samples: list[dict], pid: int | None, *, errors=(),
-                           interval_seconds: float = 0.025, max_gap_seconds: float = 0.250) -> dict:
-    """Classify sampled game ownership, never infer a cause from HWND inequality."""
-    samples = sorted(samples, key=lambda sample: sample["monotonic_seconds"])
-    before, after = (samples[0], samples[-1]) if samples else ({}, {})
-    observed = [sample for sample in samples if pid is not None and sample.get("foreground_pid") == pid]
-    unresolved = [index for index, sample in enumerate(samples) if sample.get("foreground_resolved") is not True]
-    gaps = [right["monotonic_seconds"]-left["monotonic_seconds"] for left, right in zip(samples, samples[1:])]
-    maximum_gap = max(gaps, default=0)
-    owned = after.get("owned_windows", [])
-    hidden = bool(owned) and not any(window["visible"] for window in owned)
-    complete = (type(pid) is int and pid > 0 and len(samples) >= 2 and not errors and not unresolved
-                and maximum_gap <= max_gap_seconds)
-    # A sampled ownership match is positive evidence even if other samples are
-    # missing. A negative conclusion requires complete bounded sampling.
-    status = ("fail" if observed or any(window["visible"] for window in owned)
-              else "pass" if complete and hidden else "unverified")
-    return {"schema": "lvz.launch-windows.v2", "pid": pid, "before": before, "after": after,
-            "hidden": hidden, "foreground_unchanged": before.get("foreground") == after.get("foreground"),
-            "foreground_change_cause": "not_inferred",
-            "game_foreground_observed": bool(observed), "game_foreground_samples": observed,
-            "foreground_check_status": status, "samples": samples,
-            "sampling": {"method": "read_only_foreground_hwnd_and_pid_polling",
-                         "interval_seconds": interval_seconds, "maximum_gap_seconds": maximum_gap,
-                         "allowed_maximum_gap_seconds": max_gap_seconds, "sample_count": len(samples),
-                         "duration_seconds": after.get("monotonic_seconds", 0)-before.get("monotonic_seconds", 0),
-                         "unresolved_sample_indices": unresolved, "errors": list(errors), "complete": complete,
-                         "scope": "launch start through initialized return; final game-window visibility",
-                         "limitation": "finite samples can miss activation between reads; not a continuous-focus guarantee"}}
 
 
 def private_launch_passed(state: dict) -> bool | None:
@@ -368,11 +252,12 @@ def live_session(root: Path, name: str, plan: Plan, seed: int = 0):
     state, client = None, None
     trace = SessionTrace(run / "decisions/evaluation.jsonl")
     try:
-        monitor = LaunchWindowMonitor()
+        monitor = LaunchWindowMonitor(evidence_directory=run / "decisions/window-observer-launch")
         try:
             with monitor:
                 state = start(root, run, timeout=plan.timeout_seconds, seed=seed, defer_preparation=True,
                               audio_mode=plan.audio_mode)
+                monitor.bind_pid(state["pid"])
         finally:
             windows = monitor.result(state["pid"] if state is not None else None)
             write_json(run / "evaluation-windows.json", windows)
