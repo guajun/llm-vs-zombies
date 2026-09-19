@@ -129,6 +129,58 @@ class PreparationRuntime:
     def close(self): self.closed = True
 
 
+class AppAnchorPreparationRuntime(PreparationRuntime):
+    """Actual fixture memory changes once; receipts retain both raw states."""
+    def __init__(self, count=1295, fault=None):
+        from llm_vs_zombies import app_update_anchor as app
+        from llm_vs_zombies import sound_effects as audio
+        from test_sound_effects import SPEC, sound_state
+        from test_draw_schedule import DRAW_SPEC
+        super().__init__()
+        self.anchored = False
+        self.anchor_calls = 0
+        self.anchor_fault = fault
+        self.state['app']['ui'] = 3
+        self.state['sound_effects'] = sound_state()
+        self.state['sound_effects']['app_update_count'] = count
+        self.hello_value['game'].update(target='fixture-only', sound_effects=copy.deepcopy(SPEC),
+            draw_schedule=copy.deepcopy(DRAW_SPEC), app_update_anchor=copy.deepcopy(app.SPEC))
+        self.hello_value['capabilities'].update({audio.MODE: True, app.MODE: True, app.METHOD: True})
+
+    def observe(self):
+        return dict(super().observe(), app_update_anchored=self.anchored)
+
+    def exchange(self, payload, timeout):
+        from llm_vs_zombies.app_update_anchor import MODE
+        request = json.loads(payload)
+        if request['method'] != 'app_update_anchor':
+            reply = super().exchange(payload, timeout)
+            if request['method'] == 'rng_seed':
+                self.state['rng']['instances']['global_mt']['algorithm'] = 'sexy_mt19937_31'
+                self.state['rng']['instances']['game_thread_crt']['algorithm'] = 'msvc_lcg_15'
+            return reply
+        self.requests.append(request)
+        if request.get('expect') != self.version or self.anchored or self.prepared or self.seed is None:
+            raise AssertionError('invalid fixture App anchor order')
+        before_state, before_version = copy.deepcopy(self.state), self.version
+        target = request['params']['app_update_count']
+        self.state['sound_effects']['app_update_count'] = target
+        self.anchor_calls += 1
+        self.anchored = True
+        self.revision += 1
+        demo = dict.fromkeys(('00000510', '00000511', '00000578', '0000049c', '000004a0'), 0)
+        receipt = dict(schema='lvz.app-update-anchor.v1', mode=MODE, requested=target,
+            before=before_state['sound_effects']['app_update_count'], after=target,
+            before_state=before_state, after_state=copy.deepcopy(self.state),
+            before_version=before_version, after_version=self.version, demo_before=demo, demo_after=demo.copy())
+        if self.anchor_fault == 'other_field': receipt['after_state']['rng']['instances']['game_thread_crt']['state'] ^= 1
+        result = dict(anchored=True, anchor=receipt, observation=self.observe())
+        if self.anchor_fault == 'flag': result['observation']['app_update_anchored'] = False
+        encoded = json.dumps(dict(protocol=1, request_id=request['request_id'], ok=True, result=result)).encode()
+        if self.anchor_fault == 'readback': self.state['sound_effects']['app_update_count'] += 1
+        return encoded
+
+
 class InitializationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -392,6 +444,53 @@ class SoundPreparationTests(unittest.TestCase):
                     client.hello()
                     with self.assertRaises(ValueError): apply_recipe(client, 42)
                 self.assertEqual(runtime.draws, 0)
+
+
+class AppAnchorPreparationTests(unittest.TestCase):
+    def test_distinct_startup_counts_converge_by_actual_write_before_warm(self):
+        from llm_vs_zombies import app_update_anchor as app
+        source, cold = AppAnchorPreparationRuntime(1295), AppAnchorPreparationRuntime(1294)
+        for runtime, target in ((source, None), (cold, 1295)):
+            trace = Mock()
+            with Client(runtime, trace=trace) as client:
+                client.hello()
+                recipe = apply_recipe(client, 42, app_update_count=target)
+            runtime.recipe = recipe
+            self.assertEqual(runtime.anchor_calls, 1)
+            self.assertEqual(runtime.draws, 1)
+            methods = [request['method'] for request in runtime.requests]
+            self.assertLess(methods.index('clock_restore'), methods.index('app_update_anchor'))
+            self.assertLess(methods.index('app_update_anchor'), methods.index('prepare_render'))
+            self.assertEqual(app.target_from_recipe(recipe), 1295)
+            evidence = next(c.args[1]['evidence'] for c in trace.emit.call_args_list
+                            if c.args[0] == 'initialization_prepared')['app_update_anchor']
+            self.assertEqual(evidence['before'], 1295 if target is None else 1294)
+            self.assertEqual(evidence['before_state']['sound_effects']['app_update_count'], evidence['before'])
+            self.assertEqual(evidence['after_state']['sound_effects']['app_update_count'], 1295)
+        self.assertEqual(source.state, cold.state)
+        self.assertEqual(source.recipe, cold.recipe)
+        self.assertEqual(cold.state['sound_effects']['app_update_count'], 1295)
+
+    def test_invalid_receipt_or_actual_readback_cannot_reach_warm(self):
+        for fault in ('other_field', 'readback', 'flag'):
+            with self.subTest(fault=fault):
+                runtime = AppAnchorPreparationRuntime(1294, fault=fault)
+                with Client(runtime, trace=Mock()) as client:
+                    client.hello()
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        apply_recipe(client, 42, app_update_count=1295)
+                self.assertEqual(runtime.anchor_calls, 1)
+                self.assertEqual(runtime.draws, 0)
+
+    def test_explicit_target_on_legacy_runtime_and_invalid_values_fail_before_mutation(self):
+        for value in (1295, True, -1, 0x80000000):
+            with self.subTest(value=value):
+                runtime = PreparationRuntime()
+                with Client(runtime, trace=Mock()) as client:
+                    client.hello()
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        apply_recipe(client, 42, app_update_count=value)
+                self.assertFalse(any(r['method'] in ('rng_seed', 'clock_restore', 'prepare_render') for r in runtime.requests))
 
 
 if __name__ == '__main__': unittest.main()

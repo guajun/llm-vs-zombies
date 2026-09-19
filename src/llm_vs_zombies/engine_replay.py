@@ -5,6 +5,7 @@ that every original-engine source of nondeterminism has been controlled.
 """
 from __future__ import annotations
 from . import sound_effects
+from . import app_update_anchor
 
 import argparse
 import base64
@@ -58,6 +59,7 @@ def identity_from_launcher(hello: dict, launcher: dict) -> dict:
     if not isinstance(hello.get("build"), dict) or not isinstance(hello.get("game"), dict):
         raise EvidenceError("hello lacks build/game identity")
     sound_effects.negotiate(hello)
+    app_update_anchor.negotiate(hello)
     return {"build": copy.deepcopy(hello["build"]), "game": copy.deepcopy(hello["game"]),
             "artifacts": copy.deepcopy(artifacts)}
 
@@ -71,6 +73,7 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
     """
     hello = client.hello()
     sound_effects.negotiate(hello)
+    app_update_anchor.negotiate(hello)
     _validate_identity(identity)
     if hello.get("build") != identity["build"] or hello.get("game") != identity["game"]:
         raise EvidenceError("launcher/runtime identity mismatch")
@@ -102,6 +105,7 @@ def _validate_identity(identity: dict) -> None:
     draw_mode(game)
     engine_call_mode(game)
     sound_effects.artifacts(game, identity["artifacts"])
+    app_update_anchor.mode(game)
 
 
 def _validate_initial(initial: dict) -> None:
@@ -135,6 +139,7 @@ def _validate_initial(initial: dict) -> None:
     elif "engine_call_origin" in initial:
         raise EvidenceError("engine call origin lacks an explicit engine identity")
     sound_effects.initial(initial)
+    app_update_anchor.initial(initial)
     digests(initial["state"])
 
 
@@ -382,6 +387,7 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
         raise EvidenceError("native audit target/coverage identity differs from hello")
     audit.validate_draw_initial(initial)
     audit.validate_audio_initial(initial)
+    audit.validate_app_anchor_initial(initial)
     mode = draw_mode(audit.manifest)
     call_mode = engine_call_mode(audit.manifest)
     if _native_steps(audit) != [step for step in steps if step["request"]["method"] in STEP_METHODS]:
@@ -639,6 +645,10 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     controlled_draw = draw_mode(trajectory.audit.manifest)
     controlled_calls = engine_call_mode(trajectory.audit.manifest)
     audio_mode = sound_effects.mode(trajectory.audit.manifest)
+    anchor_mode = app_update_anchor.mode(trajectory.audit.manifest)
+    report["app_update_anchor"] = {"mode": anchor_mode or "not_declared", "receipt_compared": False,
+        "original_engine_bitwise_unmodified": False if anchor_mode else None,
+        "before_values_compared": False, "subsequent_state_normalized": False}
     report["sound_effects"] = {"mode": audio_mode or "original", "state_compared": False,
         "original_engine_bitwise_unmodified": False if audio_mode else None,
         "activation_evidence_verified": False, "final_health_verified": False,
@@ -693,6 +703,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             require_equal(trajectory.initial["identity"], session.identity, "identity")
             hello = client.hello()
             sound_effects.negotiate(hello)
+            app_update_anchor.negotiate(hello)
             require_equal(session.identity["build"], hello.get("build"), "live_build")
             require_equal(session.identity["game"], hello.get("game"), "live_game")
             required = {"observe", "audit_snapshot"} | {step["request"]["method"] for step in trajectory.steps if step["request"]["method"] in STEP_METHODS}
@@ -702,6 +713,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 required.add(ENGINE_CALL_MODE)
             if audio_mode:
                 required.add(sound_effects.MODE)
+            if anchor_mode:
+                required.update({app_update_anchor.MODE, app_update_anchor.METHOD})
             if report["pause_controls"]["recorded"]:
                 # Protocol v1 implements these controller methods, but historic
                 # hello manifests omit their capability keys. Probe status and
@@ -771,6 +784,14 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 require_equal(render_semantics(trajectory.audit.warm_render, map_version=mapped_version),
                               render_semantics(actual_audit.warm_render), "initial_warm_render")
                 report["draw_schedule"]["warm_receipts_compared"] = 1
+            actual_audit.validate_app_anchor_initial(actual_marker)
+            if anchor_mode:
+                expected_anchor, actual_anchor = trajectory.audit.app_anchor_receipt, actual_audit.app_anchor_receipt
+                require_equal(app_update_anchor.semantics(expected_anchor, map_version=mapped_version),
+                              app_update_anchor.semantics(actual_anchor), "initial_app_update_anchor")
+                report["app_update_anchor"].update(receipt_compared=True, source_before=expected_anchor["before"],
+                    actual_before=actual_anchor["before"], requested=expected_anchor["requested"],
+                    source_after=expected_anchor["after"], actual_after=actual_anchor["after"])
             for ordinal, step in enumerate(trajectory.steps):
                 if target_tick is not None and client.version["tick"] >= target_tick:
                     break

@@ -32,6 +32,9 @@ struct Backend {
     virtual Json CaptureFrame(const Json&) { return {{"capture_ok",false},{"reason","unsupported"}}; }
     virtual bool RequiresRenderPreparation() const { return false; }
     virtual bool RenderPrepared() const { return true; }
+    virtual bool SupportsAppUpdateAnchor() const { return false; }
+    virtual bool AppUpdateAnchored() const { return false; }
+    virtual Json AnchorAppUpdate(uint32_t) { return {{"ok",false},{"error","unsupported"}}; }
     virtual Json RenderFrame(const Json&,bool) { return Json::object(); }
     virtual void InvalidateFrame(const std::string&) {}
     virtual void ResetRenderPreparation() {}

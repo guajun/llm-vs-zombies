@@ -23,6 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 from . import sound_effects
+from . import app_update_anchor
 
 SCHEMA = "lvz.audit.v1"
 RAW_ANIMATIONS = "reanimation-handles.jsonl"
@@ -296,6 +297,7 @@ def validate_engine_origin(value):
 def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     """Resolve supported evidence files without trusting a manifest path."""
     draw_mode(manifest)
+    app_update_anchor.mode(manifest)
     coverage = manifest.get("coverage", {})
     if not isinstance(coverage, dict):
         raise EvidenceError("invalid native audit coverage")
@@ -1332,6 +1334,7 @@ class _AuditStreamDecoder:
     """Single merge cursor: one state, one frame of seeds, and small counters."""
     def __init__(self, manifest, files, *, reuse_state, audio_activation=None):
         self.audio = sound_effects.Evidence(manifest, audio_activation)
+        self.app_anchor = app_update_anchor.Evidence(manifest)
         self.calls = _EngineCallEvidence() if engine_call_mode(manifest) else None
         self.frames = _FrameDecoder(reuse_state=reuse_state, engine_calls=self.calls is not None)
         self.animation = _AnimationDecoder(manifest) if RAW_ANIMATIONS in files else None
@@ -1350,6 +1353,7 @@ class _AuditStreamDecoder:
     def event(self, event, raw):
         self.summary.accept(event)
         self.audio.event(event)
+        self.app_anchor.event(event)
         if self.calls:
             self.calls.event(event, raw)
         elif event["kind"] == "engine_call_closed" or "engine_call" in event["payload"] or "engine_call_id" in event["payload"]:
@@ -1395,6 +1399,7 @@ class _AuditStreamDecoder:
             raise EvidenceError("native frame after recording close")
         frame = self.frames.accept(records[0], records[1])
         self.audio.frame(frame)
+        self.app_anchor.frame(frame)
         if self.calls:
             self.calls.frame(frame, records[-1])
             frame = replace(frame, raw_engine_call=records[-1])
@@ -1579,6 +1584,7 @@ class AuditLog:
         decoder.finish(final=True)
         self._particle, self._summary, self._draw, self._calls = decoder.particle, decoder.summary, decoder.draw, decoder.calls
         self._audio = decoder.audio
+        self._app_anchor = decoder.app_anchor
         self.peak_pending_particle_calls = decoder.peak_pending
         self.frames = FrameSelection(self)
         if require_closed:
@@ -1608,6 +1614,13 @@ class AuditLog:
     def validate_audio_initial(self, initial):
         self._audio.initial(initial)
 
+    def validate_app_anchor_initial(self, initial):
+        self._app_anchor.initial(initial)
+
+    @property
+    def app_anchor_receipt(self):
+        return copy.deepcopy(self._app_anchor.anchor)
+
     @property
     def sound_effects_health(self):
         return copy.deepcopy(self._audio.health)
@@ -1636,7 +1649,7 @@ class AuditLog:
             raise EvidenceError("invalid native audit schema/sequence")
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
-        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault"}:
+        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed"}:
             raise EvidenceError("native hook fault invalidates strict evidence")
         if record["kind"] == "particle_shake_seed":
             if record.get("native_phase") != "before_srand" or record.get("phase") not in {"controlled_boundary", "initialization"}:
@@ -1724,6 +1737,7 @@ class AuditTail:
         self._draw = self._stream.draw
         self._calls = self._stream.calls
         self._audio = self._stream.audio
+        self._app_anchor = self._stream.app_anchor
         self._identities = {}
         self._requests, self._request_frames = {}, {}
         self.events = _ConsumedEventStream(self)
@@ -1743,6 +1757,13 @@ class AuditTail:
 
     def validate_audio_initial(self, initial):
         self._audio.initial(initial)
+
+    def validate_app_anchor_initial(self, initial):
+        self._app_anchor.initial(initial)
+
+    @property
+    def app_anchor_receipt(self):
+        return copy.deepcopy(self._app_anchor.anchor)
 
     @property
     def sound_effects_health(self):

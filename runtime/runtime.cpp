@@ -1,10 +1,11 @@
+#include "determinism/app_update_anchor.hpp"
+#include "determinism/memory.hpp"
 #include "determinism/silent_audio_audit.hpp"
 #include "runtime.hpp"
 #include "pipe_server.hpp"
 #include "pump_guard.hpp"
 #include "recorder.hpp"
 #include "determinism/audit.hpp"
-#include "determinism/memory.hpp"
 #include "recording/native_capture.hpp"
 #include "recording/frame_cache.hpp"
 #include "determinism/model.hpp"
@@ -52,6 +53,7 @@ bool FinishTitle() {
 class GameBackend final : public Backend {
     lvz::recording::FrameCache frameCache_;
     bool renderPrepared_=false,seededAtBoundary_=false;
+    lvz::determinism::InitialAppUpdateAnchor appAnchor_;
     uint32_t boundarySeed_=0;
 public:
     bool Ready() const override {
@@ -141,17 +143,31 @@ public:
                 {"strict_determinism",false},{"step_clock_guard",true},{"exact_step_live_validated",false},{"native_demo",false},{"initialize",true},
                 {"audit_snapshot",true},{"rng_restore",true},{"rng_seed",true},{"clock_restore",true},{"stop_recording",true},
                 {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false},
+                {"app_update_anchor",lvz::determinism::silentaudio::Enabled()},{"initial_app_update_anchor_v1",lvz::determinism::silentaudio::Enabled()},
                 {"sound_effects_allocation_none_v1",lvz::determinism::silentaudio::Enabled()},{"prepare_render",true},{"deterministic_draw_schedule_v1",true},{"controlled_engine_call_v1",true}}}};
     }
     bool RequiresRenderPreparation()const override {return true;}
     bool RenderPrepared()const override {return renderPrepared_;}
+    bool SupportsAppUpdateAnchor()const override{return lvz::determinism::silentaudio::Enabled();}
+    bool AppUpdateAnchored()const override{return appAnchor_.Applied();}
+    Json AnchorAppUpdate(uint32_t requested)override {
+        if(!Ready()||GetCurrentThreadId()!=ownerThread)return {{"ok",false},{"error","App anchor requires ready owner game thread"}};
+        const auto app=lvz::determinism::Read<uint32_t>(0x6a9ec0);
+        if(!app)return {{"ok",false},{"error","App anchor target unavailable"}};
+        return appAnchor_.Apply(app+0x484,requested,boundarySeed_,SupportsAppUpdateAnchor(),seededAtBoundary_,renderPrepared_,
+            []{return lvz::determinism::CaptureState();},[app]{
+                using lvz::determinism::Read;
+                return Json{{"00000510",Read<uint8_t>(app+0x510)},{"00000511",Read<uint8_t>(app+0x511)},
+                    {"00000578",Read<uint32_t>(app+0x578)},{"0000049c",Read<uint32_t>(app+0x49c)},{"000004a0",Read<uint8_t>(app+0x4a0)}};});
+    }
     void InvalidateFrame(const std::string& reason)override {frameCache_.Invalidate(reason);}
-    void ResetRenderPreparation()override {renderPrepared_=seededAtBoundary_=false;frameCache_.Invalidate("epoch_changed");}
+    void ResetRenderPreparation()override {appAnchor_.Reset();renderPrepared_=seededAtBoundary_=false;frameCache_.Invalidate("epoch_changed");}
     Json RenderFrame(const Json& version,bool warm)override {
         lvz::recording::CheckDrawGate();
         if(!Ready()||warm==renderPrepared_)throw std::runtime_error("Controlled drawing preparation/order mismatch");
         const auto beforeRng=lvz::determinism::CaptureRng();
         if(warm) {
+            if(SupportsAppUpdateAnchor()&&!appAnchor_.Applied())throw std::runtime_error("App anchor must precede warm drawing");
             if(!seededAtBoundary_)throw std::runtime_error("rng_seed at the paused fight boundary must precede warm drawing");
             const auto& instances=beforeRng.at("instances");
             const auto& mt=instances.at("global_mt");

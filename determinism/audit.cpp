@@ -1,4 +1,5 @@
 #include "audit.hpp"
+#include "app_update_anchor.hpp"
 #include "silent_audio_audit.hpp"
 #include "recording/draw_gate.hpp"
 #include "model.hpp"
@@ -255,7 +256,7 @@ Json ProbeTarget() {
         {"particle_shake",ParticleShakeManifest()},{"draw_schedule",lvz::recording::DrawGateManifest()},
         {"engine_call_boundary",lvz::runtime::EngineCallManifest()},{"foley_trace",foleytrace::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
-    if(silentaudio::Enabled())result["sound_effects"]=silentaudio::Manifest();
+    if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();}
     return result;
 }
 void Initialize(const std::filesystem::path& runDir) {
@@ -452,7 +453,7 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
         // prepare_render has no request_completed event: its successful RPC
         // acknowledgement must also make warm-draw receipts and drained hook
         // evidence visible to a replay reader before the first update.
-        if(kind=="request_completed"||kind=="render_prepared") Flush();
+        if(kind=="request_completed"||kind=="render_prepared"||kind=="app_update_anchored"||kind=="app_update_anchor_failed") Flush();
         return;
     }
     Json state=CaptureState();

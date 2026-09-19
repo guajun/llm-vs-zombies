@@ -25,6 +25,7 @@ from typing import Any
 from .records import finish, read_json, sha256, write_json
 from .initialization import apply_recipe, clock_anchor
 from . import sound_effects
+from .app_update_anchor import target_from_recipe
 
 SCHEMA = "lvz.evaluation.v1"
 PLAN_SCHEMA = "lvz.evaluation-plan.v1"
@@ -605,7 +606,8 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                             add("private_launch", private_launch_passed(state),
                                 {"repeat": repeat, "windows": windows}, replay_run / "evaluation-windows.json")
                             add("scenario", state.get("scenario_verified") is True, {"repeat": repeat}, replay_run / "observations/initial.json")
-                            apply_recipe(replay_client, seed, anchor)
+                            apply_recipe(replay_client, seed, anchor,
+                                         app_update_count=target_from_recipe(expected.initial["initialization"]))
                             actual_initial = replay_client.request("audit_snapshot")["state"]
                             difference = first_difference(expected.initial["state"], actual_initial)
                             write_json(replay_run / "initial-comparison.json", {"equal": difference is None, "difference": difference})

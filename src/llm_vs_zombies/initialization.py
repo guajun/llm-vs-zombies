@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 from . import sound_effects
+from . import app_update_anchor
 
 DRAW_MODE = "deterministic_draw_schedule_v1"
 LEGACY_DRAW_MODE = "legacy_autonomous_draw_schedule"
@@ -84,15 +85,20 @@ def _persist(client, run: Path, hello: dict, recipe: dict, evidence: dict,
 
 
 def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | None = None,
-                 scenario_verified: bool | None = None) -> dict:
+                 scenario_verified: bool | None = None, app_update_count: int | None = None) -> dict:
     if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
         raise ValueError("seed must be uint32")
+    if app_update_count is not None and (type(app_update_count) is not int or not 0 <= app_update_count <= 0x7fffffff):
+        raise ValueError("initial App update count must be an integer in 0..2147483647")
     hello = client.hello()
     capabilities = hello["capabilities"]
     if capabilities.get("rng_seed") is not True:
         raise RuntimeError("runtime has no implemented rng_seed capability; planned seed is not evidence")
     mode = draw_mode(hello)
     sound_mode = sound_effects.negotiate(hello)
+    app_anchor_mode = app_update_anchor.negotiate(hello)
+    if app_update_count is not None and app_anchor_mode is None:
+        raise RuntimeError("runtime has no declared initial App update anchor capability")
     if (anchor is not None or mode == DRAW_MODE) and capabilities.get("clock_restore") is not True:
         raise RuntimeError("runtime lacks clock_restore needed by the recorded initialization recipe")
     observation = client.observe()
@@ -123,10 +129,37 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     before_clock = clock_anchor(seeded)
     if anchor is not None and before_clock != anchor:
         raise RuntimeError("clock readback differs from the initialization anchor")
+    app_receipt = None
+    if app_anchor_mode:
+        target = seeded["state"]["sound_effects"]["app_update_count"] if app_update_count is None else app_update_count
+        if type(target) is not int or not 0 <= target <= 0x7fffffff:
+            raise ValueError("initial App update count must be an integer in 0..2147483647")
+        before_version = copy.deepcopy(client.version)
+        if seeded.get("version") != before_version:
+            raise RuntimeError("App anchor requires the current seeded audit boundary")
+        result = client.request("app_update_anchor", {"app_update_count": target}, expect=before_version)
+        expected_version = {**before_version, "revision": before_version["revision"] + 1}
+        if (result.get("anchored") is not True or client.version != expected_version
+                or result.get("observation", {}).get("version") != expected_version
+                or result.get("observation", {}).get("app_update_anchored") is not True):
+            raise RuntimeError("App anchor did not establish the exact next initialization boundary")
+        app_receipt = app_update_anchor.receipt(result.get("anchor"), hello["game"], requested=target,
+            before_version=before_version, after_version=expected_version, seed=seed)
+        if app_receipt["before_state"] != seeded["state"]:
+            raise RuntimeError("App anchor before-state differs from its actual seeded snapshot")
+        anchored = client.request("audit_snapshot")
+        if (anchored.get("version") != expected_version or anchored.get("state") != app_receipt["after_state"]
+                or clock_anchor(anchored) != before_clock):
+            raise RuntimeError("App anchor readback differs from its actual receipt")
+        seeded = anchored
+        verify_seeded_rng(seeded, seed)
     recipe = {"game_mode": 13, "seed": seed,
         "seed_phase": "before_enter_game_and_paused_after_scenario_load",
         "seed_scope": "global Sexy MT + game-thread CRT; initialization also seeds before scene creation; generated initial state is compared",
         "clock_anchor": before_clock, "execution_mode": mode}
+    if app_receipt is not None:
+        recipe["app_update_anchor"] = {"configuration": copy.deepcopy(hello["game"]["app_update_anchor"]),
+                                       "app_update_count": app_receipt["requested"]}
     prepared = None
     snapshot = seeded
     if mode == DRAW_MODE:
@@ -170,6 +203,8 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         "seeded_version": seeded.get("version"), "seeded_rng_sha256": _rng_sha256(seeded),
         "postwarm_rng_sha256": _rng_sha256(snapshot), "prepare_render": prepared,
         "initial_version": observation["version"], "final_draw_health": "pending_native_close" if mode == DRAW_MODE else "not_supported"}
+    if app_receipt is not None:
+        evidence["app_update_anchor"] = app_receipt
     trace = getattr(client, "trace", None)
     if trace is not None:
         trace.emit("initialization_prepared", {"recipe": recipe, "evidence": evidence})
@@ -183,6 +218,7 @@ def ensure_render_prepared(client, seed: int = 0) -> dict | None:
     """Prepare an attached ready new-mode game; reconnecting never reseeds it."""
     hello = client.hello_result if client.hello_result is not None else client.hello()
     sound_effects.negotiate(hello)
+    app_update_anchor.negotiate(hello)
     if draw_mode(hello) != DRAW_MODE:
         return None
     observation = client.observe()

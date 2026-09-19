@@ -11,7 +11,8 @@ Json Success(const std::string& id,Json result) {
 }
 Json Controller::Version() const { return {{"epoch",epoch_},{"tick",tick_},{"revision",revision_}}; }
 Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Version();
-    if(backend_.RequiresRenderPreparation())value["render_prepared"]=backend_.RenderPrepared();return value; }
+    if(backend_.RequiresRenderPreparation())value["render_prepared"]=backend_.RenderPrepared();
+    if(backend_.SupportsAppUpdateAnchor())value["app_update_anchored"]=backend_.AppUpdateAnchored();return value; }
 Json Controller::Status() const {
     return {{"state",!fault_.empty()?"audit_failed":(!storageFault_.empty()||!journal_.Fault().empty()?"dedup_storage_failed":(pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight"))))},
         {"fault",fault_.empty()?Json(nullptr):Json(fault_)},
@@ -321,7 +322,7 @@ void Controller::Request(const Json& req,Reply reply) {
             } else reply(Success(id,Status()));
             return;
         }
-        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render") {
+        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render"&&method!="app_update_anchor") {
             reply(Error(id,"unsupported_method","Method is not implemented")); return;
         }
         std::string canonical=req.dump();
@@ -399,7 +400,7 @@ void Controller::Request(const Json& req,Reply reply) {
             // audit or the action dedup budget. Expired IDs remain tombstones.
             reply(std::move(response));return;
         }
-        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||req.contains("expect")) {
+        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||method=="app_update_anchor"||req.contains("expect")) {
             if(!req.contains("expect") || req["expect"]!=Version()) {
                 reply(Error(id,"stale_observation","expect must exactly match epoch, tick and revision")); return;
             }
@@ -424,10 +425,44 @@ void Controller::Request(const Json& req,Reply reply) {
             backend_.CloseRecording();recordingClosed_=true;
             Complete(id,Success(id,{{"closed",true},{"observation",Observe()}}),true);return;
         }
+        if(method=="app_update_anchor") {
+            if(params.size()!=1||!params.contains("app_update_count")||!params["app_update_count"].is_number_integer()) {
+                Complete(id,Error(id,"invalid_params","app_update_count must be the only parameter, an integer in 0..2147483647"));return;
+            }
+            const auto& count=params["app_update_count"];
+            const bool valid=count.is_number_unsigned()?count.get<uint64_t>()<=INT32_MAX:count.get<int64_t>()>=0&&count.get<int64_t>()<=INT32_MAX;
+            if(!valid){Complete(id,Error(id,"invalid_params","app_update_count must be in 0..2147483647"));return;}
+            if(!ready_||terminalFrozen_||inStep_||tick_!=0||engineCalls_.Health().at("entered_calls")!=0
+                ||!backend_.SupportsAppUpdateAnchor()||backend_.RenderPrepared()||backend_.AppUpdateAnchored()) {
+                Complete(id,Error(id,"app_update_anchor_rejected","App anchor requires an unused prewarm paused silent fight, tick zero and no entered engine call"));return;
+            }
+            const auto beforeVersion=Version();Json result;
+            try {result=backend_.AnchorAppUpdate(count.get<uint32_t>());}
+            catch(const std::exception& error){
+                // An unexpected backend exception cannot establish whether a
+                // write occurred. Invalidate the boundary and freeze truthfully.
+                ++revision_;Fail(std::string("App update anchor failed: ")+error.what());
+                Audit("app_update_anchor_failed",{{"request_id",id},{"before_version",beforeVersion},{"after_version",Version()},{"message",error.what()}});
+                Complete(id,Error(id,"app_update_anchor_failed",error.what()));return;
+            }
+            if(!result.value("ok",false)&&!result.value("write_attempted",false)) {
+                Complete(id,Error(id,"app_update_anchor_rejected",result.value("error",std::string("App anchor rejected"))));return;
+            }
+            ++revision_;backend_.InvalidateFrame("app_update_anchor");
+            auto receipt=result.at("anchor");receipt["before_version"]=beforeVersion;receipt["after_version"]=Version();
+            if(!result.value("ok",false)) {
+                Fail(result.value("error",std::string("App anchor post-write verification failed")));
+                Audit("app_update_anchor_failed",{{"request_id",id},{"anchor",receipt},{"message",result.value("error",std::string())}});
+                Complete(id,Error(id,"app_update_anchor_failed",result.value("error",std::string("App anchor failed"))));return;
+            }
+            Audit("app_update_anchored",{{"request_id",id},{"anchor",receipt}});
+            Complete(id,Success(id,{{"anchored",true},{"anchor",std::move(receipt)},{"observation",Observe()}}));return;
+        }
         if(method=="prepare_render") {
             if(!params.empty()) {Complete(id,Error(id,"invalid_params","prepare_render takes no parameters"));return;}
             if(!ready_||terminalFrozen_||inStep_||tick_!=0) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing requires a paused ready fight at tick zero"));return;}
             if(!backend_.RequiresRenderPreparation()||backend_.RenderPrepared()) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing is unavailable or has already completed"));return;}
+            if(backend_.SupportsAppUpdateAnchor()&&!backend_.AppUpdateAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Explicit App update anchor must precede warm drawing"));return;}
             ++revision_;
             Audit("render_preparing",{{"request_id",id}});
             Json receipt;
@@ -441,6 +476,9 @@ void Controller::Request(const Json& req,Reply reply) {
             Complete(id,Success(id,{{"prepared",true},{"render",receipt},{"observation",Observe()}}));return;
         }
         if(method=="rng_restore"||method=="rng_seed"||method=="clock_restore") {
+            if(backend_.SupportsAppUpdateAnchor()&&backend_.AppUpdateAnchored()) {
+                Complete(id,Error(id,"initialization_sealed","RNG/clock initialization is sealed by the explicit App update anchor"));return;
+            }
             if(!ready_||terminalFrozen_||inStep_) { Complete(id,Error(id,"not_in_fight","State initialization requires a paused fight boundary"));return; }
             Json result;
             std::string event;

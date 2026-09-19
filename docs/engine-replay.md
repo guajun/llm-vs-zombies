@@ -261,3 +261,11 @@ demo 明确使用 synthetic counter，创建两个独立计数器实例并经过
 关闭顺序在声明全部模式时为 `recording_closed` → `engine_call_closed` → `sound_effects_closed` → `draw_schedule_closed` → `particle_shake_closed` → `spawn_hook_closed`，版本必须一致。缺失、重复、乱序或不健康的音效关闭证据使严格封包/重放失败；原生正常封口的失败诊断仍可保留为普通实验归档。完整重放也比较源和实际最终音效调用数；seek/接管只把自身执行前缀或完整分支的关闭健康与原轨迹末尾区分报告。
 
 重放报告的 `sound_effects` 明确列出模式、B0/逐帧状态比较、安装证据校验和最终健康范围。跨模式 source/replay 在执行记录动作之前拒绝；旧 manifest 没有音效声明时保持旧合同兼容，不能添加新模式状态、回执或关闭事件冒充旧格式。此模式改变原版音效分配语义，始终声明 `original_engine_bitwise_unmodified:false`，也不声称音乐/BASS 或完整游戏确定性已验证。实现和实机门槛见 [silent-audio.md](silent-audio.md)。离线专项可运行 `python -m unittest discover -s tests -p test_sound_effects.py -v`；模拟器通过不代替新模式真实冷启动验收。
+
+`initial_app_update_anchor_v1` 是独立的初始化合同，不修改上述音效 v1 规格。只有 hello/game 明确声明 `app_update_anchor`、两个对应 capability 都为 true、recipe 保存同配置与目标计数时才启用。旧音效来源没有该声明时继续按原语义读入，不能自动升级或删去 App 计数差异。原来的 `clock_restore` 和三项 `CaptureClocks` 格式保持不变。
+
+源和冷启动都在实际播种后、首个 warm 前调用一次 `app_update_anchor`；目标范围是 `0..2147483647`。成功原生事件 `app_update_anchored` 保存完整 before/after 游戏状态、真实原计数、请求目标、实际读回值和相邻 revision。读取器独立核验：只允许 `/sound_effects/app_update_count` 变化，RNG 必须仍与该原生 `rng_seeded` 事件完整相符，历史/参数/分配数及其余字段不能变化。暖机必须使用紧邻下一 revision；B0 观察必须确认 `app_update_anchored:true`，其实际 App 计数与配方目标一致。缺失、重复、晚到、失败事件，或者锚定后再改 seed/clocks，都会使严格轨迹失败。
+
+原版 demo 的录制/播放标志（`+0x510/+0x511`）必须实际为零。回执保留这两个 byte、`+0x578/+0x49c` 的 uint32 和 `+0x4a0` 的 byte 原值，前后必须相同；不会为这些关联字段添加偏移。完整回执留在已绑定的原生事件及 SessionTrace 中。跨运行允许实际校准前 App 计数不同，例如源 1295、冷启动 1294，但各自必须真实写入并读回共同目标 1295。比较锚定后的完整状态、原始 demo 字段、请求值及映射后的版本；报告另列双方真实 before，不把它们伪称相等。所有 B0 和后续 pre/post 状态仍逐项比较真实原始 App 计数。
+
+`test_app_update_anchor.py` 用模拟器覆盖完整回放、seek 0/2、原始 before 旁证、状态外溢修改、demo 守卫、缺/重复/晚事件及旧能力兼容。这些离线检查不代替新构建的真实冷启动验证，也不修改已失败的旧来源归档。
