@@ -92,3 +92,5 @@
 修复后`public-fp-preflight-003`真实通过：3 tick源加2个并行cold加独立recovery，3/3 cold starts verified、0 failed cases，除smoke专门排除的`full_cycle`/`ten_cold_starts`/`strict_suite_not_requested`外全部门槛为pass。两个cold都`equal=true`，完成完整B0与3个正时钟更新边界的逐项比较，各自6条原始FP边界与关闭health通过，实测正推进RPC交叠20.89ms，窗口最大间隔26–76ms（门槛250ms）。逐文件身份与全部门槛明细见[固定浮点模式首次真实公开短程](headless-validation.md#固定浮点模式的首次真实公开短程051)。
 
 这只验收该新模式、种子42、3 tick公共入口的短程与并行管线，`experiment_ready=false`。公开5000 tick、自然终局、完整两旗与十次冷启动仍待完成；047/048以及本次001/002的失败不得升级为通过。
+
+同一新模式、同一集成树的公开5000 tick烟测随后通过（`public-fp-smoke-001`）：源真实到达 `game_clock=8151`（起点3151+5000）并以 `tick_budget_exhausted` 结束，两个并行cold各自完成246条请求、5000次原生调用与时钟步、153次受控出生、695,940次粒子调用，`equal=true`，浮点激活回执比较、10,000条原始边界与关闭health全部通过，实测正推进RPC交叠44.98ms。除smoke专门排除的 `full_cycle`/`ten_cold_starts` 外全部门槛pass，`experiment_ready=false`。源的运行期窗口最大间隔241.07ms贴近250ms门槛，本轮通过不构成余量保证。明细见[固定浮点模式的5000 tick公开烟测](headless-validation.md#固定浮点模式的5000-tick公开烟测)。

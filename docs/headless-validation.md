@@ -283,3 +283,29 @@ B0实测110组历史、880个Foley槽及32个声道均为空，保留原始变�
 三个进程的激活回执都是：`before.x87_control=127`、`after.x87_control=639`、`after.mxcsr_control=8064`、`activation_count=1`、`game_ui=1`、`board_address=0`、实际线程等于owner线程；关闭health均为`healthy=true`、`first_fault=null`、`wrong_thread_checks=0`、`last_raw`仍在目标控制位。每个进程的owner线程ID、loop/snapshot检查次数和sticky flags保持为本机原始旁证，不参与跨进程比较；`state`逐字段严格比较、不做容差。两个cold各自完整执行源请求并`equal=true`，实测正推进RPC交叠20.89ms（仅表示区间交叠，不表示CPU指令同时执行）。recovery按原已接受请求ID解析、失败动作推进0 tick、随后恢复推进1 tick，窗口最大间隔75.90ms（启动段）/26.01ms（运行段）。
 
 完整身份、逐文件哈希、窗口与门槛明细见本机报告 `work/public-fp-preflight-003-review.json`；原始归档位于 `work/public-cold-integration-tree/experiments/runs/public-fp-preflight-003*`，按公开仓库规则不上传。该结果只验收这一新模式、种子42、3 tick公共入口的短程与并行管线，`experiment_ready` 仍为false；完整5000 tick、自然终局、两旗胜利与十次冷启动仍待完成，047/048及本次001/002的失败结论保持不变。
+
+## 固定浮点模式的5000 tick公开烟测
+
+短程通过后，root用同一公开入口和同一集成树执行 `work/public-fp-smoke-5000.json`（SHA256 `c928730068a5bb09f828290947bc1b090f73960a63fc32715da8a1e9d199b745`），输出 `experiments/runs/public-fp-smoke-001`：1个5000 tick源录制、2个并行cold、1个独立recovery，策略为公开 `examples/liangyi_baseline.py`，chunk为100 tick，途中在B1000等待1秒、B2500等待5秒。
+
+结果：`cold_starts_attempted=3`、`verified=3`、`failed_cases=0`，唯一未满足的门槛是smoke专门排除的 `strict_suite_not_requested`、`full_cycle`、`ten_cold_starts`；`experiment_ready` 仍为false。整轮墙钟2572.6秒，源实验自身785.8秒。
+
+| 项目 | 实际值 |
+|---|---:|
+| 源实际终点 | `game_clock=8151`（起点3151+5000受控tick），`wave=2`，`completed_rounds=1011` |
+| 源outcome | `tick_budget_exhausted`，失败动作0 |
+| 暂停点 | B1000等1秒、B2500等5秒，均完成模拟状态不变检查 |
+| 每局重放请求 | 246条，精确展开为5000次时钟步 |
+| 原生调用比较 | `returned_calls_compared=5000`、`clock_steps_compared=5000`，源与实际的末次调用ID都是5000 |
+| 受控出生 | 153次，双方初始化出生历史各12次 |
+| 粒子调用 | 语义种子调用695,940次 |
+| 浮点原始边界 | 每个cold 10,000条，全部核验 |
+| 浮点激活回执 | 比较通过，关闭health通过 |
+| `equal` | 两个cold都为true |
+| 正推进RPC交叠 | 44.98ms（区间交叠，不表示CPU同时执行） |
+
+窗口覆盖：源启动期最大间隔26.88ms、运行期241.07ms（31,404样本）；cold 1为27.82/117.65ms（37,283样本）；cold 2为28.03/89.82ms（37,213样本）；recovery为28.59/25.60ms。四局的启动期与运行期观察都判定为pass且始终隐藏窗口，但**源的运行期最大间隔241.07ms逼近250ms门槛**：它发生在两个cold并行期间，本轮通过不等于该余量可靠，后续长局必须继续按实际间隔判定，不能用通过结论掩盖这次接近门槛的实测。recovery按原已接受请求ID解析到tick 2，非法动作推进0 tick，随后恢复推进1 tick。
+
+公开入口在本轮重新构建了产物，因此本轮 `recorder.dll` 的SHA256（`170b7456c6c0ddf6512ca7497f01db06a513415f0e50e2cd67988c90bd61f814`）与3 tick短程不同；每轮的实现与产物身份由该轮自己的构建日志、run内实现归档与宿主来源比对确定，不声称两个suite使用了完全相同的DLL。逐文件哈希、窗口明细与两轮身份见 `work/public-fp-preflight-003-review.json` 与 `work/public-fp-smoke-001-review.json`；原始归档在 `work/public-cold-integration-tree/experiments/runs/public-fp-smoke-001*`，按公开仓库规则不上传。
+
+本结果只支持该新模式、种子42、公开策略、5000 tick预算与已捕获状态的确定性与并行管线。源在5000 tick时只到第2波，未完成两旗、没有自然零时钟终局，也没有十次冷启动；`experiment_ready` 与 `strict_engine_determinism_proven` 仍为false。下一步仍是新源真实完成两旗后按strict合同重放九次。
