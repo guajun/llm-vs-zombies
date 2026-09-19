@@ -75,7 +75,7 @@ lvz::determinism::Shutdown();
 
 `complete_game_rng=false`、`complete_game_state=false`、`original_engine_replay_verified=false` 为有意设置，不能由“日志比较通过”自动提升。尚未覆盖独立 MT 的运行调用和生命周期、其他线程 CRT RNG、动画轨道/效果池、完整 Challenge 状态、光标输入、部分花盆币属性及时间源。`ProbeTarget.spawn_hook` 报告 `installed`、`semantic=exact_initializer_exit` 和 `live_validated=false`；`final_spawn_after_caller=false` 表示初始化器返回后调用者进一步调整的结果尚非该 hook 的语义。暂停和隐藏窗口可能继续消耗共享随机流，必须进行扰动验收。隐藏窗口只是一种运行方式，不能由本模块宣称为纯无窗口模拟。
 
-现有捕获/恢复与状态审计已可用于定位分叉，但**不足以宣称完整确定性实验就绪**。完整验收至少包括：已确认帧边界的固定脚本，多次同初态原版运行逐帧一致，暂停时长/焦点/渲染变化不引入差异，并对覆盖缺口逐项验证。具体门槛见《原版确定性重放器提案》。禁止用下一检查点覆盖分叉后继续宣称一致。
+现有捕获/恢复与状态审计可用于定位分叉，但**不能证明原版全部内部状态和随机源均已覆盖**。[实验运行器](evaluation.md)的 `experiment_ready` 仅认证指定游戏、运行器、场景、种子和轨迹在既定捕获范围内通过完整套件；它要求真实两旗、每种子至少十次冷启动以及其余证据门槛全部通过，同时仍保持 `strict_engine_determinism_proven=false`。这一有限范围的就绪结论不要求把上述未支持能力改为 true，也不能反过来证明覆盖缺口无影响。原提案中暂停、焦点及渲染扰动等额外能力须按各自实际证据报告。禁止用下一检查点覆盖分叉后继续宣称一致。
 
 ## 验证
 
