@@ -107,3 +107,18 @@
 两局前2,687个前后边界摘要相同，首个游戏状态差为post1344。重建的pre1343完整捕获状态相同；post1344只有全局MT游标315/316和粒子controlled_digest不同。036的fast末态逐字段等于旧031来源的对应末态，delayed等于旧031失败重放的对应末态。这是新诊断DLL重现旧分叉机制的证据，DLL身份仍不同，不冒称旧档同DLL严格重放通过。最终Foley调用均212次，变体选择58/59次；日志8143/8136行，分别约3.2MB。原生12/12、主agent独立ABI fixture、读取器33/33和Python221/221通过。
 
 本机比较报告`work/031-divergence/foley-036-comparison.json`的SHA256为`ca855f8913f3beaa16c5e7ca635667bc1cd887e54f6882a0e48232899dfd4ec1`，原始因果链报告为`33c129f2c8f2c1a22c15a118276c8d2a74a74bbf2f5393abf4b6aacea7879284`，状态核对报告为`27603b5b850e0472c8067e3a0cf04aede39856f3dcf2073ef8f5278857de205a`。完整原始字节及偏移保留在私有归档。后续[#13](https://github.com/guajun/llm-vs-zombies/issues/13)采用默认关闭、显式改变实验语义的启动前空音效分配候选；仍需新轨迹的长程重放、预算及录像对照验收。
+
+
+## 显式空音效分配新源（037）
+
+#13 的 `sound_effects_allocation_none_v1` 已接通启动、初始化、完整音效状态和严格重放合同，默认仍为 `original`，不改变旧档解释。功能与修复合入后，本地完整 Python 243/243通过；[合并后CI](https://github.com/guajun/llm-vs-zombies/actions/runs/35418621031)的Linux Python与Windows原生/隔离检查全部通过。这些测试不替代实机。
+
+第一次 `headless-silent-037-baseline` 在主线程恢复前失败，原因是候选误把不含资源段的转储长度0x35e000作为PE精确映像大小；锁定EXE实际为0x394000。原失败目录与沙箱保留。修复增加直接读取锁定文件、映射section到普通字节数组并调用已编译目标校验器的离线检查；104种Foley参数的160个非空资源引用也核对到真实.data范围，没有执行游戏或放松文件SHA要求。
+
+新运行 `headless-silent-037-baseline2` 使用冻结 recorder `d4f8fd5ad612ff24432b12284c0bda3a7bfc95516e0ea4b396ea55e7e1e5b8ae`、bootstrap `b47f9466e5fd777a03d27c02ac59ee27a617254a5fe50dc0d963687096c4f519`、launcher `ad9f58276361226102f2ae777a8c1545dc3d61f481ba541fcda37196c1d9b601`。对应隔离源代码提交为 `d88b83f5126a5be68a047defdfde3c1cc4bbd14e`，归档含当时完整源快照；公共main还含默认关闭的Foley探针，不能用其不同DLL替代这些身份。
+
+B0实测110组历史、880个Foley槽及32个声道均为空，保留原始变体历史、App更新计数1295和分配调用计数12。主线程恢复前receipt调用计数0，recorder attach计数0。B0音效子树SHA256为 `5aa688476f6c5a2fbb8c49a1c49da4eba953c85823b653042aa4ac4e878b64d1`；未归一化App计数或恢复音效历史。
+
+该新来源完成5000tick、245次策略决策、零动作失败，结束第2波且核心阵型完整。严格封包10000个前后边界通过，原生调用进入/返回/写入均5000，warm1/step5000；音效分配尝试1467，错误0，补丁归属/模块固定/槽空均健康。粒子调用703886、僵尸初始化164次的关闭统计均无故障。游戏全过程采样隐藏/前台归属检查通过，自有进程正常停止，共享用户档未变。运行522.91秒，封包及归档校验380.92秒，总904.21秒。
+
+轨迹ID `9fcbba91ada3f34ce35e45022d297a2df50feefe60562b568c3b5d8ced3ed3a0`；归档manifest SHA256 `9dc9199e829d8fda72ca9bcef51890a313d2bc2d8b60aa464314130b27d04a59`。归档11341条logger记录、501个采样状态、42个校验文件已封存。当前结论只为新模式的来源录制及封包通过；冷启动重放、不同预算/录像对照、真实终局重放和完整两旗仍待后续实机验收。
