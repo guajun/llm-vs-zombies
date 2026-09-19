@@ -7,6 +7,7 @@
 #include "reanimation_audit.hpp"
 #include "particle_shake.hpp"
 #include "runtime/engine_call.hpp"
+#include "foley_trace.hpp"
 #include <array>
 #include <fstream>
 #include <set>
@@ -249,7 +250,7 @@ Json ProbeTarget() {
         {"rng_seed",ValidateTargetImage()},
         {"spawn_hook",std::move(spawn)},
         {"particle_shake",ParticleShakeManifest()},{"draw_schedule",lvz::recording::DrawGateManifest()},
-        {"engine_call_boundary",lvz::runtime::EngineCallManifest()},
+        {"engine_call_boundary",lvz::runtime::EngineCallManifest()},{"foley_trace",foleytrace::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
 }
 void Initialize(const std::filesystem::path& runDir) {
@@ -278,10 +279,12 @@ void Initialize(const std::filesystem::path& runDir) {
         if(!InstallSpawnHook(error)) throw std::runtime_error(error);
         hookInstalled=true;
         if(!InstallParticleShakeHook(error)) throw std::runtime_error(error);
+        foleytrace::Initialize(runDir);
         std::ofstream manifest(directory/"manifest.json");
         manifest<<ProbeTarget().dump(2)<<'\n';
         if(!manifest) throw std::runtime_error("Cannot write audit manifest");
     } catch(...) {
+        foleytrace::Shutdown();
         std::string particleError;
         if(!RemoveParticleShakeHook(particleError))
             throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+particleError);
@@ -415,11 +418,13 @@ Json CaptureState() {
 }
 void Audit(const std::string& kind,const Json& payload,const Json& observation) {
     RequireThread();
+    foleytrace::DrainAndCheck(kind=="recording_closed"||kind=="engine_call_closed");
     // Drain before assigning a new request/step label so menu/preview spawns
     // cannot acquire the version of a command that has not run yet.
     DrainAndCheckSpawns();
     DrainAndCheckParticleShake();
     lastObservationVersion=observation.value("version",Json::object());
+    foleytrace::Boundary(kind,payload,lastObservationVersion);
     const uint64_t engineCallId=kind=="pre_step"?payload.at("engine_call").at("engine_call_id").get<uint64_t>():0;
     if(kind=="pre_step"||kind=="request_started"||kind=="action") {
         SetObservedSpawnBoundary(lastObservationVersion,engineCallId);
@@ -489,11 +494,13 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
 }
 void Flush() {
     RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();particleSeeds.flush();engineCallRaw.flush();
+    foleytrace::Flush();
     if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds||!engineCallRaw) throw std::runtime_error("Audit output flush failed");
 }
 void Shutdown() {
     if(!initialized) return;
     RequireThread();DrainAndCheckSpawns();DrainAndCheckParticleShake();
+    foleytrace::Shutdown();
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","draw_schedule_closed"},
         {"version",lastObservationVersion},{"payload",lvz::recording::DrawGateStatus()}});
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_closed"},

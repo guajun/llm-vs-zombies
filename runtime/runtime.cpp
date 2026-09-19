@@ -7,6 +7,7 @@
 #include "recording/native_capture.hpp"
 #include "recording/frame_cache.hpp"
 #include "determinism/model.hpp"
+#include "determinism/foley_trace.hpp"
 #include <avz.h>
 #include <wincrypt.h>
 #include <cmath>
@@ -164,7 +165,8 @@ public:
         const auto beforeClocks=lvz::determinism::CaptureClocks();
         const auto board=BoardIdentity();
         frameCache_.Invalidate("render_in_progress");
-        auto frame=lvz::recording::CaptureOriginalFrame(ownerThread);
+        auto frame=[&]{lvz::determinism::foleytrace::Phase phase(warm);
+            return lvz::recording::CaptureOriginalFrame(ownerThread);}();
         if(!frame.ok)throw std::runtime_error(frame.error);
         const auto afterClocks=lvz::determinism::CaptureClocks();
         if(beforeClocks!=afterClocks||board!=BoardIdentity()||!Ready())
