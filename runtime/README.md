@@ -1,8 +1,10 @@
 # Resident runtime
 
-`recorder.dll` now contains the AvZ adapter, local named-pipe server, single-threaded
-controller, logger and deterministic audit adapter. The entry point is
-`\\.\pipe\llm-vs-zombies-<pid>`. See `docs/runtime-protocol.md` for the JSON envelope.
+`recorder.dll` contains the AvZ adapter, local named-pipe server, single-threaded
+controller, logger, deterministic audit adapter and controlled original-frame
+capture. The entry point is `\\.\pipe\llm-vs-zombies-<pid>`. See the
+[runtime protocol](../docs/runtime-protocol.md) for the JSON envelope and exact
+capability contracts.
 
 Only the game thread calls AvZ or reads game memory. A dedicated accept thread and
 up to eight connection workers handle overlapped I/O, with a 4 MiB frame limit.
@@ -15,18 +17,58 @@ Mutating requests carry an exact `expect` version. `pause` and `cancel` may omit
 so a second connection can stop a running request. `commit` stops at the first
 failed action, retains earlier successes, and performs no requested advancement
 after a failure. Responses to `commit` and `advance` describe completed execution.
-Deduplication retains responses for the current epoch; there is no cross-process
-exactly-once claim. The cache rejects new mutations at 100,000 entries or roughly
-64 MiB rather than evicting IDs and risking duplicate actions.
 
-Each actual game update is surrounded by `pre_step` and `post_step` audit calls.
-The generated AvZ overlay bypasses both AvZ scheduling and `GameTotalLoop` while
-waiting in a fight. It does not use advanced pause. An unexpected native
-`GameClock` delta stops the budget with `no_game_tick` or `step_count_mismatch` and
-returns `ok:false` with the observed result under `error.details` (including any
-unexpected overshoot). `exact_step_live_validated` and `strict_determinism`
-remain false until independent acceptance. Hidden-window update pumping is a
-separate launcher concern, and must be checked on the real engine.
+Completed mutation requests and their exact responses are stored in the
+append-only `decisions/runtime-requests.bin` journal. Its in-memory index is
+512 KiB; the ordinary limits are **262,144 admitted IDs per epoch** and **64 GiB
+of journal bytes**, advertised by `hello.limits`. Lookup checks record integrity;
+corruption or I/O failure freezes advancement instead of executing an old ID
+again. Ordinary quota exhaustion returns `dedup_capacity` before admitting a new
+action. These are capacity bounds, not a guarantee that a full disk can accept
+every response.
+
+A physically allocated **32 MiB** reserve supports up to **128 additional control
+IDs** and failed completion writes. Its final ID slot and **12 MiB + 16 KiB** are
+reserved for closing and outstanding results. If both disk paths fail after an
+action, bounded live memory retains the actual result for retry/status while
+advancement stays frozen. `stop_recording` must persist outstanding results,
+seal both files and remove `runtime-requests.bin.lock` before acknowledging
+success; `recording_close_incomplete` leaves failure evidence and the lock.
+
+Exact retries and `status` recover current-epoch results, including after close.
+An epoch change resets the ordinary lookup namespace, preserving the old file
+evidence; the single verified terminal completion additionally has a bounded
+recovery slot across that transition. Changed content with a reused ID is
+rejected. Capture pixels use a separate four-response cache: older capture IDs
+retain tombstones and return `request_result_expired`, never a fresh capture.
+The journal is process/session scoped; it does not implement crash restart or
+cross-process exactly-once execution. See the protocol's
+[journal contract](../docs/runtime-protocol.md#long-session-mutation-deduplication).
+
+The `controlled_engine_call_v1` wrapper measures entry and return of each original
+update and binds its `pre_step/post_step`, hooks and raw Board evidence to a
+monotonic call ID. Ordinary steps require the same Board and native `GameClock`
+delta one. A verified same-Board terminal delta one remains one tick; a completed
+same-Board UI3-to-UI4 terminal call with delta zero is recorded separately without
+inventing a tick. Results distinguish `executed_ticks` from
+`executed_engine_calls`. Other unverified transitions, clock changes or invocation
+faults stop execution with the actual evidence retained. Missing post boundaries
+are not fabricated. Terminal execution freezes until a permitted initialization.
+
+The AvZ overlay bypasses scheduling and `GameTotalLoop` while waiting in a fight;
+it does not use advanced pause. In `deterministic_draw_schedule_v1`, an explicit
+warm draw precedes B(0), each verified ordinary update has one original draw,
+and pause/closure deny autonomous fight drawing. Terminal calls have an explicit
+skipped-draw receipt. `capture_frame` reads only the current version's cache and
+does not render or advance the game. See [video](../docs/video.md) and
+[engine replay](../docs/engine-replay.md) for evidence and replay rules.
+
+The broad `exact_step_live_validated`, `strict_determinism` and `checkpoints`
+capability flags remain false in the current hello response. Independent live
+evidence now includes the 044 5,000-tick cold replay, but full two-flag and ten
+cold-start acceptance is incomplete. Hidden-window pumping and observation are
+launcher concerns, not a pure windowless-server claim; the measured scope and
+remaining gates are in [live validation](../docs/headless-validation.md).
 
 The overlay also removes AvZ's recursive script-lifetime wait and makes card
 selection non-blocking. The upstream submodule is untouched; CMake checks SHA-256
@@ -34,34 +76,53 @@ for every transformed source. The deterministic adapter verifies target image
 signatures before installing AvZ's update hook. Runtime startup pins the DLL, so
 hot unloading is deliberately unavailable. Workers stop on the game thread via
 explicit shutdown; no worker join is performed by this project's DllMain code.
-AvZ's default modal diagnostics are redirected to `build/runtime-diagnostics.log`.
+AvZ's default modal diagnostics are redirected to `runtime-diagnostics.log`
+beside the loaded DLL (normally in the run's private module directory).
 
 Additional negotiated methods:
 
-- `initialize`: `{game_mode: 13, cards: [...]}`, exact expect, main menu only.
+- `initialize`: `{game_mode: 13, cards: [...]}`, exact expect, supported title/main
+  menu without a Board only.
   Completes applying configuration and returns `state: initializing`; this does
   **not** mean loading is finished. Poll `observe.initialization.state` for
   `ready`/`error`. Every card slot must be specified; random autofill is refused.
   Existing saves are loaded through AvZ's normal enter-game path.
-- `audit_snapshot`: returns `{state, version}` with the audit adapter's state and
-  known RNG representations. This is a diagnostic snapshot, not a restorable
-  complete checkpoint.
-- `rng_restore`: `{snapshot: ...}`, exact expect, paused fight only. Restores only
-  the RNG state recognized by the audit adapter; changes revision. It does not
-  rewind the Board or restore all independent RNG objects.
+- `audit_snapshot`: returns `state` and `version`, plus negotiated original-call
+  tracker evidence. This captures the adapter's known state and RNG, not a
+  restorable complete process checkpoint.
+- `rng_seed`, `rng_restore`, `clock_restore`: explicit paused-fight initialization
+  operations with exact expect and revision changes. They affect only declared
+  RNG instances or clock fields, not the whole Board. The explicit sound-counter
+  origin/App anchor seals further RNG/clock initialization in that mode.
+- `sound_counter_origin` and `app_update_anchor`: negotiated only with the
+  explicit allocation-none sound mode. The first binds the native diagnostic
+  counter's experiment origin while preserving absolute raw evidence; the second
+  sets the actual initial App update count. Both are guarded one-shot prewarm
+  operations with full before/after receipts. Use the shared
+  [initialization helper](../src/llm_vs_zombies/initialization.py) for their required
+  order; contracts are in [counter origin](../docs/sound-counter-origin-native.md)
+  and [App anchor](../docs/app-update-anchor-native.md).
+- `prepare_render`: exact expect, seeded ready fight at tick zero; verifies RNG
+  and performs the one warm draw. Capture B(0) after this succeeds. Actions and
+  advancement before preparation are rejected.
+- `capture_frame`: exact expect, paused ready fight, open recording and no pending
+  advancement; copies the matching cached original BGR24 frame. Mutations can
+  invalidate that cache, so an action-only request does not guarantee a new image.
 - `stop_recording`: exact expect and no active advancement. Flushes/closes logs,
-  removes `capture.lock`, writes `capture.closed`, and leaves IPC observations
-  available. Further mutations are rejected. Terminate this isolated process and
+  removes `capture.lock`, writes `capture.closed`, then completes and seals the
+  request journal. IPC observations and existing result lookups remain available;
+  new mutations and captures are rejected. Terminate this isolated process and
   start a new run before further experiments.
 
 Build: `tools/build-avz.ps1`. Native verification:
 `ctest --test-dir build/cmake --output-on-failure`. Tests cover actual fragmented
 Windows-pipe transfers and disconnect cancellation, deduplication, stale
 observations, partial action failures, epoch changes, one-vs-many step budgets,
-native clock mismatches, event stops, and closing the recording. These tests use
-a fake game backend and do not substitute for live-engine acceptance.
+native clock mismatches, measured terminal calls, draw scheduling, storage failure,
+event stops and closing the recording. Controller tests use fake game backends;
+these and the native fixtures do not substitute for live-engine acceptance.
 
-JSON parsing uses nlohmann/json v3.12.0, vendored under `vendor/nlohmann` with its
-MIT license. Upstream source:
+JSON parsing uses nlohmann/json v3.12.0, vendored under
+[runtime/vendor/nlohmann](vendor/nlohmann) with its MIT license. Upstream source:
 https://github.com/nlohmann/json/tree/v3.12.0 ; json.hpp SHA-256:
 `aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63`.
