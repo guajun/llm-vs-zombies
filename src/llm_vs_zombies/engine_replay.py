@@ -7,6 +7,7 @@ from __future__ import annotations
 from . import sound_effects
 from . import app_update_anchor
 from . import sound_counter
+from . import fp_environment
 
 import argparse
 import base64
@@ -62,6 +63,7 @@ def identity_from_launcher(hello: dict, launcher: dict) -> dict:
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
+    fp_environment.negotiate(hello)
     return {"build": copy.deepcopy(hello["build"]), "game": copy.deepcopy(hello["game"]),
             "artifacts": copy.deepcopy(artifacts)}
 
@@ -77,6 +79,7 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
+    fp_environment.negotiate(hello)
     _validate_identity(identity)
     if hello.get("build") != identity["build"] or hello.get("game") != identity["game"]:
         raise EvidenceError("launcher/runtime identity mismatch")
@@ -91,6 +94,9 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
               "state": snapshot["state"]}
     if engine_call_mode(identity["game"]):
         marker["engine_call_origin"] = copy.deepcopy(snapshot.get("engine_call"))
+    fp_evidence = fp_environment.evidence(snapshot, identity["game"])
+    if fp_evidence is not None:
+        marker["fixed_fp_origin"] = copy.deepcopy(fp_evidence)
     _validate_initial(marker)
     client.trace.emit("replay_initial", marker)
     return marker
@@ -110,6 +116,7 @@ def _validate_identity(identity: dict) -> None:
     sound_effects.artifacts(game, identity["artifacts"])
     app_update_anchor.mode(game)
     sound_counter.mode(game)
+    fp_environment.mode(game)
 
 
 def _validate_initial(initial: dict) -> None:
@@ -145,6 +152,7 @@ def _validate_initial(initial: dict) -> None:
     sound_effects.initial(initial)
     app_update_anchor.initial(initial)
     sound_counter.initial(initial)
+    fp_environment.initial(initial)
     digests(initial["state"])
 
 
@@ -394,6 +402,7 @@ def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
     audit.validate_audio_initial(initial)
     audit.validate_app_anchor_initial(initial)
     audit.validate_sound_counter_initial(initial)
+    audit.validate_fp_initial(initial)
     mode = draw_mode(audit.manifest)
     call_mode = engine_call_mode(audit.manifest)
     if _native_steps(audit) != [step for step in steps if step["request"]["method"] in STEP_METHODS]:
@@ -653,6 +662,11 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     audio_mode = sound_effects.mode(trajectory.audit.manifest)
     anchor_mode = app_update_anchor.mode(trajectory.audit.manifest)
     counter_mode = sound_counter.mode(trajectory.audit.manifest)
+    fp_mode = fp_environment.mode(trajectory.audit.manifest)
+    report["fixed_fp"] = {"mode": fp_mode or "not_declared", "activation_compared": False,
+        "raw_boundaries_verified": 0, "final_health_verified": False,
+        "source_health": trajectory.audit.fp_health, "state_normalized": False,
+        "raw_status_thread_and_initial_input_compared": False}
     report["sound_counter"] = {"mode": counter_mode or "bootstrap_lifetime", "receipt_compared": False,
         "native_state_compared": False, "raw_origins_compared": False, "state_normalized_by_comparator": False}
     report["app_update_anchor"] = {"mode": anchor_mode or "not_declared", "receipt_compared": False,
@@ -714,6 +728,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             sound_effects.negotiate(hello)
             app_update_anchor.negotiate(hello)
             sound_counter.negotiate(hello)
+            fp_environment.negotiate(hello)
             require_equal(session.identity["build"], hello.get("build"), "live_build")
             require_equal(session.identity["game"], hello.get("game"), "live_game")
             required = {"observe", "audit_snapshot"} | {step["request"]["method"] for step in trajectory.steps if step["request"]["method"] in STEP_METHODS}
@@ -727,6 +742,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 required.update({app_update_anchor.MODE, app_update_anchor.METHOD})
             if counter_mode:
                 required.update({sound_counter.MODE, sound_counter.METHOD})
+            if fp_mode:
+                required.add(fp_environment.MODE)
             if report["pause_controls"]["recorded"]:
                 # Protocol v1 implements these controller methods, but historic
                 # hello manifests omit their capability keys. Probe status and
@@ -779,6 +796,9 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                            "epoch_mapping": copy.deepcopy(report["epoch_mapping"])}}
             if controlled_calls:
                 actual_marker["engine_call_origin"] = copy.deepcopy(snapshot["engine_call"])
+            fp_evidence = fp_environment.evidence(snapshot, session.identity["game"])
+            if fp_evidence is not None:
+                actual_marker["fixed_fp_origin"] = copy.deepcopy(fp_evidence)
             client.trace.emit("replay_initial", actual_marker)
             actual_ids = {}
             reached_version = client.version
@@ -798,6 +818,11 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 report["draw_schedule"]["warm_receipts_compared"] = 1
             actual_audit.validate_app_anchor_initial(actual_marker)
             actual_audit.validate_sound_counter_initial(actual_marker)
+            actual_audit.validate_fp_initial(actual_marker)
+            if fp_mode:
+                require_equal(fp_environment.semantics(trajectory.audit.fp_activation),
+                              fp_environment.semantics(actual_audit.fp_activation), "initial_fixed_fp")
+                report["fixed_fp"]["activation_compared"] = True
             if counter_mode:
                 expected_counter, actual_counter = trajectory.audit.sound_counter_receipt, actual_audit.sound_counter_receipt
                 require_equal(sound_counter.semantics(expected_counter, map_version=mapped_version),
@@ -978,6 +1003,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     # digest. Compare the bytes themselves, not only FNV hashes.
                     if left.canonical_state != right.canonical_state:
                         require_equal(left.state, right.state, f"audit[{ordinal}:{index}].state")
+                    if fp_mode:
+                        report["fixed_fp"]["raw_boundaries_verified"] += 1
                     last_source_frame = left
                 require_equal(source_count, actual_count, f"request[{ordinal}].frame_count")
                 _validate_native_details(actual_audit, actual_request, actual)
@@ -1037,12 +1064,14 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 on_takeover(session, copy.deepcopy(report["takeover"]))
         particle_required = trajectory.audit.manifest.get("particle_shake") is not None
         spawn_required = report["spawn_comparison"]["hook_declared"] or trajectory.audit.birth_counts["controlled"] > 0
-        if particle_required or spawn_required or controlled_draw or audio_mode:
+        if particle_required or spawn_required or controlled_draw or audio_mode or fp_mode:
             if on_takeover is None:
                 actual_audit.verify_closed()
                 closed_audit = actual_audit
             else:
                 closed_audit = AuditLog(session.audit_directory, require_closed=True)
+                if fp_mode:
+                    closed_audit.validate_fp_initial(actual_marker)
             report["particle_shake"]["final_health_verified"] = particle_required
             report["spawn_comparison"]["final_health_verified"] = spawn_required
             if controlled_draw:
@@ -1051,6 +1080,12 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             if controlled_calls:
                 report["engine_calls"].update(final_health_verified=True, actual_health=closed_audit.engine_call_health,
                     health_scope="full_branch" if on_takeover else "executed_prefix")
+            if fp_mode:
+                report["fixed_fp"].update(final_health_verified=True, actual_health=closed_audit.fp_health,
+                    health_scope="full_branch" if on_takeover else "executed_prefix")
+                if on_takeover is None:
+                    require_equal(report["fixed_fp"]["raw_boundaries_verified"], closed_audit.fp_health["raw_frames"],
+                                  "fixed_fp.uncompared_closed_boundaries")
             if audio_mode:
                 report["sound_effects"].update(final_health_verified=True, actual_health=closed_audit.sound_effects_health,
                     health_scope="full_branch" if on_takeover else "executed_prefix")

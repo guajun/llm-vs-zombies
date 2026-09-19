@@ -263,20 +263,28 @@ class SessionTests(unittest.TestCase):
 class SuiteTests(unittest.TestCase):
     """Small orchestrator model; replay/native evidence are explicitly fixture-only."""
     def test_lifecycle_fixture_cannot_pass_production_suite_or_start_colds(self):
-        report = self.run_fixture(fixture_runtime=True)
-        self.assertEqual(self.roles, ["source"])
-        self.assertFalse(report["readiness"]["experiment_ready"])
-        self.assertIn("test_fixture runtime", report["cases"][0]["error"]["message"])
+        from llm_vs_zombies import cold_workers
+        for workers in (1, 2):
+            with self.subTest(workers=workers), \
+                 patch.object(cold_workers, 'run_parallel_colds') as pool:
+                report = self.run_fixture(fixture_runtime=True, cold_workers=workers)
+            pool.assert_not_called()
+            self.assertEqual(self.roles, ["source"])
+            self.assertEqual(self.closed, ["source"])
+            self.assertFalse(report["readiness"]["experiment_ready"])
+            self.assertIn("test_fixture runtime", report["cases"][0]["error"]["message"])
 
     def run_fixture(self, *, strict=False, win=False, runtime_failure=None, strategy_error=False,
-                    cold_error=False, disk_stop=False, fixture_runtime=False):
+                    cold_error=False, disk_stop=False, fixture_runtime=False, cold_workers=1,
+                    rewrite_initial=False):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name); (root/'experiments/runs').mkdir(parents=True)
         policy = root/'policy.py'; policy.write_text('def decide(observation, context):\n'
             "    return {'actions': [], 'advance_ticks': min(1, context['remaining_ticks'])}\n")
         plan = ev.Plan(tier='strict' if strict else 'smoke', seeds=(42,), tick_budget=3, chunk_ticks=1,
-            cold_starts=10 if strict else 1, strategy=str(policy), pause_points=(), min_free_bytes=1)
+            cold_starts=10 if strict else 1, cold_workers=cold_workers,
+            strategy=str(policy), pause_points=(), min_free_bytes=1)
         initial = {'observation':observation(0), 'state':{'fixture':1},
                    'initialization':{'clock_anchor':{}}, 'identity':{}}
         self.roles=[]; self.closed=[]; self.tail_checked=False
@@ -308,7 +316,8 @@ class SuiteTests(unittest.TestCase):
             write_json(run/'evaluation-windows.json',{'foreground_check_status':'pass'})
             state={'scenario_verified':True,'isolation_ready':True,'pid':123}
             try:
-                yield run,state,FakeClient(),Mock()
+                client=FakeClient(); client._initialization_run=run
+                yield run,state,client,Mock()
             finally:
                 self.closed.append(role)
                 write_json(run/'evaluation-runtime-windows.json',{'schema':'lvz.launch-windows.v3',
@@ -349,7 +358,17 @@ class SuiteTests(unittest.TestCase):
             stack.enter_context(patch.object(ev,'os',SimpleNamespace(name='nt')))
             stack.enter_context(patch.object(ev,'profile_fingerprint',return_value={}))
             stack.enter_context(patch.object(ev,'live_session',session))
-            stack.enter_context(patch.object(ev,'apply_recipe',return_value={'clock_anchor':{}}))
+            if rewrite_initial:
+                # The real apply_recipe persists the B0-bound observation into
+                # observations/initial.json, which is exactly what a gate
+                # recorded before that rewrite would hash incorrectly.
+                def apply(client,seed,*args,**kwargs):
+                    write_json(Path(client._initialization_run)/'observations/initial.json',
+                               {'b0':observation(client.tick)})
+                    return {'clock_anchor':{}}
+                stack.enter_context(patch.object(ev,'apply_recipe',side_effect=apply))
+            else:
+                stack.enter_context(patch.object(ev,'apply_recipe',return_value={'clock_anchor':{}}))
             stack.enter_context(patch.object(ev,'target_from_recipe',return_value=None))
             stack.enter_context(patch.object(ev,'_pause_probe',return_value={'fixture':True}))
             stack.enter_context(patch.object(ev,'finalize_run',side_effect=finalized))
@@ -381,6 +400,28 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(report['statistics']['cold_starts_verified'],2)
         self.assertNotIn('archive_integrity',report['readiness']['unmet_gates'])
         self.assertNotIn('session_cleanup',report['readiness']['unmet_gates'])
+
+    def test_scenario_gate_hashes_the_observation_written_by_the_recipe(self):
+        report=self.run_fixture(rewrite_initial=True)
+        self.assertEqual(self.roles,['source','cold','recovery'])
+        self.assertEqual(report['cases'][0]['status'],'completed')
+        run=Path(report['cases'][0]['run'])
+        self.assertEqual(json.loads((run/'observations/initial.json').read_text())['b0'],observation(0))
+        for name in ev.LIVE_GATES:
+            for artifact in report['checks'][name].get('artifacts',[]):
+                path=Path(artifact['path'])
+                if path.is_relative_to(run):
+                    self.assertEqual(ev.sha256(path),artifact['sha256'],name)
+
+    def test_run_local_gate_artifact_is_rejected_after_a_rewrite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run=Path(temporary)/'run'; run.mkdir()
+            target=run/'evidence.json'; write_json(target,{'a':1})
+            item={'artifacts':[{'path':str(target),'sha256':ev.sha256(target)}]}
+            ev.verify_run_artifacts([item],run)
+            write_json(target,{'a':2})
+            with self.assertRaisesRegex(RuntimeError,'gate artifact changed'):
+                ev.verify_run_artifacts([item],run)
 
     def test_cold_window_failure_does_not_skip_native_tail_or_seal(self):
         report=self.run_fixture(runtime_failure='cold')

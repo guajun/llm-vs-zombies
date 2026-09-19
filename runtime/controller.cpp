@@ -304,7 +304,11 @@ void Controller::Request(const Json& req,Reply reply) {
             reply(Success(id,std::move(result))); return;
         }
         if(method=="observe") { reply(Success(id,Observe())); return; }
-        if(method=="audit_snapshot") { reply(Success(id,{{"state",backend_.AuditSnapshot()},{"version",Version()},{"engine_call",engineCalls_.Health()}}));return; }
+        if(method=="audit_snapshot") {
+            Json result={{"state",backend_.AuditSnapshot()},{"version",Version()},{"engine_call",engineCalls_.Health()}};
+            auto fp=backend_.FloatingPointEvidence();if(!fp.is_null())result["fixed_fp"]=std::move(fp);
+            reply(Success(id,std::move(result)));return;
+        }
         if(method=="status") {
             if(params.contains("request_id")) {
                 std::string wanted=params["request_id"].get<std::string>();
@@ -536,7 +540,7 @@ void Controller::Request(const Json& req,Reply reply) {
             Complete(id,Success(id,std::move(result)));return;
         }
         if(method=="initialize") {
-            auto result=backend_.Initialize(params);
+            auto result=backend_.Initialize(params,{{"request_id",id},{"version",Version()}});
             if(!result.value("ok",false)) { Complete(id,Error(id,"initialization_rejected",result.value("error",std::string("initialization rejected")))); return; }
             terminalFrozen_=false;
             ++revision_;result["observation"]=Observe();

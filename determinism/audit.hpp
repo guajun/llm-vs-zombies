@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <string>
 #include <nlohmann/json.hpp>
+#include "fp_environment.hpp"
 
 // Every API except ValidateTargetImage must run on the runtime's game thread,
 // at a stable boundary. This module never installs the AvZ update hook;
@@ -11,6 +12,9 @@ namespace lvz::determinism {
 bool ValidateTargetImage() noexcept;
 void Initialize(const std::filesystem::path& runDir);
 nlohmann::json ProbeTarget();
+nlohmann::json ActivateFloatingPoint(int ui,uintptr_t board,const nlohmann::json& context);
+void CheckFloatingPoint(fpenv::Phase phase,bool required=false);
+nlohmann::json FloatingPointEvidence();
 // Comparable scalar state + verified semantic animation references, not raw
 // opaque animation handles. Per-step raw evidence is persisted separately.
 nlohmann::json CaptureState();

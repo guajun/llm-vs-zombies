@@ -2,6 +2,16 @@
 
 Implementation contract for the native runtime, Python client, replay and tests.
 
+Runtimes declaring `game.fixed_fp.mode=fixed_owner_fp_v1` activate the declared
+owner-thread floating-point controls exactly once during `initialize`, after
+parameter/title validation and before scenario seeding/entry. The successful
+initialize result includes `fixed_fp` activation evidence; `audit_snapshot`
+adds a top-level `fixed_fp` activation/health block without altering comparable
+game state. Persistent drift stops updates while retaining control/close IPC.
+The mode requires native activation, same-sample per-boundary raw evidence and
+closed health. Older undeclared records keep their existing contract; see
+[fixed owner FP mode](fixed-owner-fp.md) for scope and failure semantics.
+
 - Endpoint: local named pipe `\\.\pipe\llm-vs-zombies-<pid>`.
 - Frame: 4-byte little-endian unsigned payload byte length, then UTF-8 JSON; maximum 4 MiB. One request/response per connection at a time. Partial reads/writes must be handled.
 - Request: `{ "protocol": 1, "request_id": "unique-string", "method": "observe", "params": {} }`. Mutating methods also send `expect: {"epoch": 1, "tick": 0, "revision": 0}` at the top level.

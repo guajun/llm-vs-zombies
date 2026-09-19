@@ -90,8 +90,9 @@ class ReplayBoundaryClient:
     replay uses request() for controlled calls. Cleanup owns the original Client,
     so a resource stop cannot prevent stop_recording or replace a failed request.
     """
-    def __init__(self, client, budget, after_step):
+    def __init__(self, client, budget, after_step, *, on_rpc=None):
         self.client, self.budget, self.after_step = client, budget, after_step
+        self.on_rpc = on_rpc
 
     def __getattr__(self, name):
         return getattr(self.client, name)
@@ -100,7 +101,13 @@ class ReplayBoundaryClient:
         controlled = method in {"advance", "commit"}
         if controlled:
             self.budget.check(self.client.version)
+        started = time.monotonic_ns() if controlled and self.on_rpc else None
         result = self.client.request(method, *args, **kwargs)
+        ended = time.monotonic_ns() if started is not None else None
+        if started is not None:
+            self.on_rpc({"request_id": kwargs.get("request_id"), "method": method,
+                "start_ns": started, "end_ns": ended, "version": result["observation"]["version"],
+                "executed_ticks": result.get("executed_ticks"), "executed_engine_calls": result.get("executed_engine_calls")})
         if controlled:
             self.budget.check(result["observation"]["version"], enforce=False)
             self.after_step(result["observation"])
@@ -199,7 +206,7 @@ def host_sources(run: Path, previous: dict | None = None) -> dict:
     imported = {}
     for name, module in tuple(sys.modules.items()):
         spec_name = getattr(getattr(module, "__spec__", None), "name", "") or ""
-        if name == "llm_vs_zombies" or name.startswith("llm_vs_zombies.") or spec_name == "llm_vs_zombies.evaluation":
+        if name == "llm_vs_zombies" or name.startswith("llm_vs_zombies.") or spec_name in {"llm_vs_zombies.evaluation", "llm_vs_zombies.cold_workers"}:
             filename = getattr(module, "__file__", None)
             if filename:
                 path = Path(filename).resolve()

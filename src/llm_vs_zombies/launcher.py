@@ -160,6 +160,7 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
           defer_preparation: bool = False, audio_mode: str = "original") -> dict:
     from .client import connect
     from .session import SessionTrace
+    from . import fp_environment
     if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
         raise ValueError("seed must be uint32")
     if type(defer_preparation) is not bool:
@@ -182,6 +183,7 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
         with SessionTrace(run / "decisions/launcher.jsonl") as trace, connect(pid=state["pid"], trace=trace, timeout=timeout) as client:
             state["hello"] = client.hello_result
             verify_audio_activation(state, client.hello_result)
+            fp_mode = fp_environment.negotiate(client.hello_result)
             observation = client.observe()
             if initialize:
                 deadline = time.monotonic() + timeout
@@ -191,7 +193,12 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
                         raise TimeoutError(f"game did not reach the main menu: game_ui={observation['game_ui']}")
                     time.sleep(0.1)
                     observation = client.observe()
-                client.request("initialize", {"game_mode": 13, "cards": DEFAULT_CARDS, "seed": seed}, expect=observation["version"])
+                configured = client.request("initialize", {"game_mode": 13, "cards": DEFAULT_CARDS, "seed": seed}, expect=observation["version"])
+                if fp_mode:
+                    activation = fp_environment.activation(configured.get("fixed_fp"), client.hello_result["game"])
+                    if activation["version"] != observation["version"]:
+                        raise ValueError("fixed FP activation is not bound to this initialize request boundary")
+                    state["fixed_fp_activation"] = activation
                 while True:
                     observation = client.observe()
                     initialization = observation.get("initialization", {})
@@ -203,6 +210,11 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
                         raise TimeoutError(f"scenario initialization timed out: {initialization}")
                     time.sleep(0.1)
                 verify_scenario(observation)
+                if fp_mode:
+                    ready_fp = fp_environment.evidence(client.request("audit_snapshot"), client.hello_result["game"])
+                    if ready_fp["activation"] != state["fixed_fp_activation"]:
+                        raise ValueError("fixed FP activation changed during asynchronous scene initialization")
+                    state["fixed_fp_ready"] = ready_fp
                 state["scenario_verified"] = True
                 if not defer_preparation:
                     from .initialization import apply_recipe

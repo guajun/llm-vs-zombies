@@ -25,6 +25,7 @@ from typing import Any, Iterator
 from . import sound_effects
 from . import app_update_anchor
 from . import sound_counter
+from . import fp_environment
 
 SCHEMA = "lvz.audit.v1"
 RAW_ANIMATIONS = "reanimation-handles.jsonl"
@@ -301,6 +302,7 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     draw_mode(manifest)
     app_update_anchor.mode(manifest)
     counter_mode = sound_counter.mode(manifest)
+    fp_mode = fp_environment.mode(manifest)
     coverage = manifest.get("coverage", {})
     if not isinstance(coverage, dict):
         raise EvidenceError("invalid native audit coverage")
@@ -356,6 +358,13 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
         result += (sound_counter.RAW_FILE,)
     elif counter_file:
         raise EvidenceError("raw sound counter evidence lacks an explicit mode")
+    fp_file = (directory / fp_environment.RAW_FILE).is_file()
+    if fp_mode:
+        if not fp_file:
+            raise EvidenceError("required raw FP evidence is missing")
+        result += (fp_environment.RAW_FILE,)
+    elif fp_file:
+        raise EvidenceError("raw FP evidence lacks an explicit mode")
     return result
 
 
@@ -685,7 +694,7 @@ class _DrawEvidence:
         if self.preparing is not None and self.warm is None and kind != "render_prepared":
             if kind not in {"zombie_initialized", "particle_shake_seed"} or event.get("phase") != "initialization":
                 raise EvidenceError("warm drawing contains an unexpected controlled mutation")
-        if self.terminal_completed and kind not in {"recording_closed", "engine_call_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if self.terminal_completed and kind not in {"recording_closed", "engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("simulation event follows terminal completion")
         if kind == "render_preparing":
             if (self.preparing is not None or self.warm is not None or self.seen_frame
@@ -827,7 +836,7 @@ class _EngineCallEvidence:
 
     def event(self, event, raw=None):
         kind, payload = event["kind"], event["payload"]
-        footer = {"recording_closed", "engine_call_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}
+        footer = {"recording_closed", "engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}
         if self.terminal_completed and kind not in footer:
             raise EvidenceError("engine event follows terminal completion")
         if kind in {"particle_shake_seed", "zombie_initialized"}:
@@ -1029,7 +1038,7 @@ class _ParticleEvidence:
 
 class _EventSummary:
     def __init__(self):
-        self.tail = deque(maxlen=6)
+        self.tail = deque(maxlen=7)
         self.birth_count = 0
         self.controlled_birth_count = 0
         self.initialization_birth_count = 0
@@ -1043,9 +1052,9 @@ class _EventSummary:
             raise EvidenceError("native animation link fault invalidates strict evidence")
         if event["seq"] < self.last_seq:
             raise EvidenceError("audit event sequence moved backwards")
-        if self.recording_closed and event["kind"] not in {"engine_call_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if self.recording_closed and event["kind"] not in {"engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("native event after recording close")
-        if not self.recording_closed and event["kind"] in {"engine_call_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if not self.recording_closed and event["kind"] in {"engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
             raise EvidenceError("native hook close precedes recording close")
         self.last_seq = event["seq"]
         if event["kind"] == "zombie_initialized":
@@ -1061,7 +1070,7 @@ class _EventSummary:
         self.count += 1
 
 
-def _closed_events(summary, *, particle=None, draw=None, calls=None, audio=None, spawn_required=False):
+def _closed_events(summary, *, particle=None, draw=None, calls=None, audio=None, fp=None, spawn_required=False):
     """Validate the declared close sequence and all hook health summaries."""
     final = list(summary.tail)
     if spawn_required and (not final or final[-1]["kind"] != "spawn_hook_closed"):
@@ -1101,6 +1110,15 @@ def _closed_events(summary, *, particle=None, draw=None, calls=None, audio=None,
         final = final[:-1]
     elif any(event["kind"] == "sound_effects_closed" for event in final):
         raise EvidenceError("sound effects close lacks an explicit mode")
+    if fp is not None and fp.enabled:
+        if not final or final[-1]["kind"] != fp_environment.CLOSED or fp.health is None:
+            raise EvidenceError("required fixed FP close health is missing")
+        if len(final) < 2 or final[-1]["version"] != final[-2]["version"]:
+            raise EvidenceError("FP close boundary differs from recording close")
+        fp.close(draw)
+        final = final[:-1]
+    elif any(event["kind"] == fp_environment.CLOSED for event in final):
+        raise EvidenceError("FP close lacks an explicit mode")
     if calls is not None:
         if not final or final[-1]["kind"] != "engine_call_closed":
             raise EvidenceError("required engine call close health is missing")
@@ -1366,6 +1384,7 @@ class _AuditStreamDecoder:
     def __init__(self, manifest, files, *, reuse_state, audio_activation=None):
         self.audio = sound_effects.Evidence(manifest, audio_activation)
         self.sound_counter = sound_counter.Evidence(manifest, audio_activation)
+        self.fp = fp_environment.Evidence(manifest)
         self.app_anchor = app_update_anchor.Evidence(manifest)
         self.calls = _EngineCallEvidence() if engine_call_mode(manifest) else None
         self.frames = _FrameDecoder(reuse_state=reuse_state, engine_calls=self.calls is not None)
@@ -1386,6 +1405,7 @@ class _AuditStreamDecoder:
         self.summary.accept(event)
         self.audio.event(event)
         self.sound_counter.event(event)
+        self.fp.event(event)
         self.app_anchor.event(event)
         if self.calls:
             self.calls.event(event, raw)
@@ -1434,6 +1454,8 @@ class _AuditStreamDecoder:
         engine_raw_index = 2 + int(self.animation is not None)
         counter_raw = records[engine_raw_index + int(self.calls is not None)] if self.sound_counter.enabled else None
         self.sound_counter.frame_with_audio(self.audio, frame, counter_raw)
+        fp_raw_index = engine_raw_index + int(self.calls is not None) + int(self.sound_counter.enabled)
+        self.fp.frame(frame, records[fp_raw_index] if self.fp.enabled else None)
         self.app_anchor.frame(frame)
         if self.calls:
             self.calls.frame(frame, records[engine_raw_index])
@@ -1499,6 +1521,8 @@ def _walk_audit(decoder, read, *, retain_event=None, request_id=None, constrain_
         names.append(ENGINE_CALL_RAW)
     if decoder.sound_counter.enabled:
         names.append(sound_counter.RAW_FILE)
+    if decoder.fp.enabled:
+        names.append(fp_environment.RAW_FILE)
     frame_readers = [iter(read(name)) for name in names]
     rows = zip_longest(*frame_readers)
     raw = iter(read(PARTICLE_SHAKE_RAW)) if decoder.particle else iter(())
@@ -1623,10 +1647,11 @@ class AuditLog:
         self._audio = decoder.audio
         self._app_anchor = decoder.app_anchor
         self._sound_counter = decoder.sound_counter
+        self._fp = decoder.fp
         self.peak_pending_particle_calls = decoder.peak_pending
         self.frames = FrameSelection(self)
         if require_closed:
-            _closed_events(self._summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio,
+            _closed_events(self._summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio, fp=self._fp,
                            spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
 
     def _retain_event(self, event):
@@ -1658,6 +1683,17 @@ class AuditLog:
     @property
     def app_anchor_receipt(self):
         return copy.deepcopy(self._app_anchor.anchor)
+
+    def validate_fp_initial(self, initial):
+        self._fp.initial(initial)
+
+    @property
+    def fp_activation(self):
+        return copy.deepcopy(self._fp.activation)
+
+    @property
+    def fp_health(self):
+        return copy.deepcopy(self._fp.health)
 
     def validate_sound_counter_initial(self, initial):
         self._sound_counter.initial(initial)
@@ -1694,7 +1730,7 @@ class AuditLog:
             raise EvidenceError("invalid native audit schema/sequence")
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
-        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed", "sound_counter_origin_failed"}:
+        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed", "sound_counter_origin_failed", "fp_environment_fault"}:
             raise EvidenceError("native hook fault invalidates strict evidence")
         if record["kind"] == "particle_shake_seed":
             if record.get("native_phase") != "before_srand" or record.get("phase") not in {"controlled_boundary", "initialization"}:
@@ -1784,6 +1820,7 @@ class AuditTail:
         self._audio = self._stream.audio
         self._app_anchor = self._stream.app_anchor
         self._sound_counter = self._stream.sound_counter
+        self._fp = self._stream.fp
         self._identities = {}
         self._requests, self._request_frames = {}, {}
         self.events = _ConsumedEventStream(self)
@@ -1810,6 +1847,17 @@ class AuditTail:
     @property
     def app_anchor_receipt(self):
         return copy.deepcopy(self._app_anchor.anchor)
+
+    def validate_fp_initial(self, initial):
+        self._fp.initial(initial)
+
+    @property
+    def fp_activation(self):
+        return copy.deepcopy(self._fp.activation)
+
+    @property
+    def fp_health(self):
+        return copy.deepcopy(self._fp.health)
 
     def validate_sound_counter_initial(self, initial):
         self._sound_counter.initial(initial)
@@ -1925,7 +1973,7 @@ class AuditTail:
         for _ in self.read_request(None):
             raise EvidenceError("unexpected unconsumed frames at recording close")
         self._stream.finish(final=True)
-        _closed_events(self._stream.summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio,
+        _closed_events(self._stream.summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio, fp=self._fp,
                        spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
         for name, position in self._positions.items():
             if self._check_file(name).st_size != position:

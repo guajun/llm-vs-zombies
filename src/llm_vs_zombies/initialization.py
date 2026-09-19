@@ -12,6 +12,7 @@ from pathlib import Path
 from . import sound_effects
 from . import app_update_anchor
 from . import sound_counter
+from . import fp_environment
 
 DRAW_MODE = "deterministic_draw_schedule_v1"
 LEGACY_DRAW_MODE = "legacy_autonomous_draw_schedule"
@@ -99,6 +100,7 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     sound_mode = sound_effects.negotiate(hello)
     app_anchor_mode = app_update_anchor.negotiate(hello)
     counter_mode = sound_counter.negotiate(hello)
+    fp_mode = fp_environment.negotiate(hello)
     if app_update_count is not None and app_anchor_mode is None:
         raise RuntimeError("runtime has no declared initial App update anchor capability")
     if (anchor is not None or mode == DRAW_MODE) and capabilities.get("clock_restore") is not True:
@@ -119,13 +121,18 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     if mode == DRAW_MODE:
         # Both source and cold replay execute the same mutation sequence. A
         # source restores its own captured anchor once, not zero times.
-        captured_anchor = clock_anchor(client.request("audit_snapshot"))
+        captured = client.request("audit_snapshot")
+        if fp_mode:
+            fp_environment.evidence(captured, hello["game"])
+        captured_anchor = clock_anchor(captured)
         if anchor is None:
             anchor = captured_anchor
     client.request("rng_seed", {"seed": seed}, expect=observation["version"])
     if anchor is not None:
         client.request("clock_restore", {"snapshot": anchor}, expect=client.version)
     seeded = client.request("audit_snapshot")
+    if fp_mode:
+        fp_environment.evidence(seeded, hello["game"])
     verify_seeded_rng(seeded, seed)
     sound_effects.state(seeded["state"], hello.get("game", {}))
     before_clock = clock_anchor(seeded)
@@ -228,6 +235,9 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         "seeded_version": seeded.get("version"), "seeded_rng_sha256": _rng_sha256(seeded),
         "postwarm_rng_sha256": _rng_sha256(snapshot), "prepare_render": prepared,
         "initial_version": observation["version"], "final_draw_health": "pending_native_close" if mode == DRAW_MODE else "not_supported"}
+    if fp_mode:
+        recipe["fixed_fp"] = copy.deepcopy(hello["game"]["fixed_fp"])
+        evidence["fixed_fp"] = copy.deepcopy(fp_environment.evidence(snapshot, hello["game"]))
     if app_receipt is not None:
         evidence["app_update_anchor"] = app_receipt
     if counter_receipt is not None:
@@ -247,6 +257,7 @@ def ensure_render_prepared(client, seed: int = 0) -> dict | None:
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
+    fp_environment.negotiate(hello)
     if draw_mode(hello) != DRAW_MODE:
         return None
     observation = client.observe()
