@@ -480,10 +480,18 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
             "resources": budget.report(), "pause_probes": pauses.finish()}
 
 
+def _require_production_runtime(client):
+    """A lifecycle test DLL can be recorded/replayed, never certify readiness."""
+    game = client.hello_result.get("game", {})
+    if "test_fixture" in game:
+        raise ValueError("test_fixture runtime cannot certify production experiment readiness")
+
+
 def _recovery_probe(root: Path, name: str, plan: Plan, seed: int, *, lifecycle=None) -> tuple[Path, dict]:
     """Disconnect after a fully written mutation, then resolve its original ID."""
     from .client import WindowsNamedPipeStream, connect
     with live_session(root, name, plan, seed, lifecycle=lifecycle) as (run, launcher, client, trace):
+        _require_production_runtime(client)
         recipe = apply_recipe(client, seed)
         before = client.observe()
         budget = BoundaryBudget(root, plan, report_path=run / "evaluation-resources.json")
@@ -663,6 +671,7 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
             try:
                 try:
                     with live_session(root, source_run.name, plan, seed, lifecycle=source_lifecycle) as (run, launcher, client, trace):
+                        _require_production_runtime(client)
                         case["run"] = str(run)
                         add("scenario", launcher.get("scenario_verified") is True, "actual Scene 3/layout/card verification", run / "observations/initial.json")
                         recipe = apply_recipe(client, seed)
@@ -723,6 +732,7 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                     def initializer(expected, destination):
                         nonlocal cold_budget
                         with live_session(root, cold_run.name, plan, seed, lifecycle=cold_lifecycle) as (replay_run, state, replay_client, replay_trace):
+                            _require_production_runtime(replay_client)
                             add("scenario", state.get("scenario_verified") is True, {"repeat": repeat}, replay_run / "observations/initial.json")
                             apply_recipe(replay_client, seed, anchor,
                                          app_update_count=target_from_recipe(expected.initial["initialization"]))

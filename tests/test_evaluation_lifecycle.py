@@ -262,8 +262,14 @@ class SessionTests(unittest.TestCase):
 
 class SuiteTests(unittest.TestCase):
     """Small orchestrator model; replay/native evidence are explicitly fixture-only."""
+    def test_lifecycle_fixture_cannot_pass_production_suite_or_start_colds(self):
+        report = self.run_fixture(fixture_runtime=True)
+        self.assertEqual(self.roles, ["source"])
+        self.assertFalse(report["readiness"]["experiment_ready"])
+        self.assertIn("test_fixture runtime", report["cases"][0]["error"]["message"])
+
     def run_fixture(self, *, strict=False, win=False, runtime_failure=None, strategy_error=False,
-                    cold_error=False, disk_stop=False):
+                    cold_error=False, disk_stop=False, fixture_runtime=False):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name); (root/'experiments/runs').mkdir(parents=True)
@@ -277,7 +283,7 @@ class SuiteTests(unittest.TestCase):
         outer=self
 
         class FakeClient:
-            def __init__(self): self.tick=0; self.trace=Mock(); self.hello_result={}
+            def __init__(self): self.tick=0; self.trace=Mock(); self.hello_result={"game":{"test_fixture":{"mode":"test_flag_drop_v1"}}} if fixture_runtime else {}
             @property
             def version(self): return version(self.tick)
             def observe(self): return observation(self.tick,completed=win and self.tick>=3,ui=2 if win and self.tick>=3 else 3)

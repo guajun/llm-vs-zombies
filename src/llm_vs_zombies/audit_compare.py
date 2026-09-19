@@ -37,6 +37,7 @@ AUDIT_FILES = ("manifest.json", "events.jsonl", "checksums.jsonl", "state-deltas
 _POINTER_CACHE_SIZE = 16384
 _POINTER_CACHE_MAX_CHARS = 512
 _OWNER_RETIREMENT_RULES = ["owner_dead", "plant_squished_remove_effects"]
+_FLAG_RETIREMENT_RULES = _OWNER_RETIREMENT_RULES + ["zombie_flag_dropped"]
 _PARTICLE_BOUNDARY_LIMIT = 8192
 _SPAWN_BOUNDARY_LIMIT = 1024
 _JSONL_MAX_RECORD_BYTES = 32 << 20
@@ -306,7 +307,8 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     animations = coverage.get("reanimations", {})
     if not isinstance(animations, dict):
         raise EvidenceError("invalid animation coverage")
-    if "owner_retirement_rules" in animations and animations["owner_retirement_rules"] != _OWNER_RETIREMENT_RULES:
+    if "owner_retirement_rules" in animations and animations["owner_retirement_rules"] not in (
+            _OWNER_RETIREMENT_RULES, _FLAG_RETIREMENT_RULES):
         raise EvidenceError("unsupported animation owner retirement rules")
     descriptor = animations.get("raw_handle_evidence")
     required = coverage.get("animation_normalization") is True or manifest.get("animation_normalization") is True
@@ -1137,7 +1139,9 @@ class _AnimationDecoder:
     """
     def __init__(self, manifest=None):
         self.state = None
-        self.owner_retirement_rules = (manifest or {}).get("coverage", {}).get("reanimations", {}).get("owner_retirement_rules") == _OWNER_RETIREMENT_RULES
+        rules = (manifest or {}).get("coverage", {}).get("reanimations", {}).get("owner_retirement_rules")
+        self.owner_retirement_rules = rules in (_OWNER_RETIREMENT_RULES, _FLAG_RETIREMENT_RULES)
+        self.flag_retirement_rule = rules == _FLAG_RETIREMENT_RULES
 
     def accept(self, record, frame):
         AuditLog._envelope(record)
@@ -1204,6 +1208,23 @@ class _AnimationDecoder:
                 raise EvidenceError("raw animation reference differs from comparable state")
             owner_squished = False
             plant_path = bool(tokens and tokens[0] == "plants")
+            flag_path = (len(tokens) == 5 and tokens[0] == "zombies" and tokens[1] == "slots"
+                         and tokens[3:] == ("fields", "00000144"))
+            flag_dropped = False
+            flag_fields_present = "owner_zombie_type" in link or "owner_has_object" in link
+            if flag_fields_present and not (self.flag_retirement_rule and flag_path):
+                raise EvidenceError("flag retirement evidence requires its declared zombie role")
+            if self.flag_retirement_rule and flag_path:
+                flags = frame.state["zombies"]["slots"][tokens[2]]["fields"]
+                zombie_type, has_object = flags.get("00000024"), flags.get("000000bc")
+                if (not uint(zombie_type) or type(has_object) is not int or has_object not in (0, 1)
+                        or type(link.get("owner_zombie_type")) is not int
+                        or link["owner_zombie_type"] != zombie_type
+                        or type(link.get("owner_has_object")) is not bool
+                        or link["owner_has_object"] != bool(has_object)):
+                    raise EvidenceError("raw flag owner fields differ from actual captured fields")
+                flag_dropped = (zombie_type == 1 and has_object == 0 and handle >> 16 != 0
+                                and link["slot"] < pool["used"])
             if "owner_squished" in link and (not plant_path or not self.owner_retirement_rules):
                 raise EvidenceError("owner_squished requires a plant owner and declared retirement rules")
             if self.owner_retirement_rules:
@@ -1236,10 +1257,11 @@ class _AnimationDecoder:
             elif not matches:
                 reason = "out_of_range" if link["slot"] >= pool["capacity"] else (
                     "not_allocated" if actual is None else "generation_mismatch")
-                if not (link["owner_dead"] or owner_squished) or reference != {"status": "expired"} or link.get("lookup_failure") != reason:
+                if not (link["owner_dead"] or owner_squished or flag_dropped) or reference != {"status": "expired"} or link.get("lookup_failure") != reason:
                     raise EvidenceError("invalid or dangling live animation link")
                 if self.owner_retirement_rules:
-                    retirement = "owner_dead" if link["owner_dead"] else "plant_squished_remove_effects"
+                    retirement = ("owner_dead" if link["owner_dead"] else
+                                  "plant_squished_remove_effects" if owner_squished else "zombie_flag_dropped")
                     if link.get("retirement_reason") != retirement:
                         raise EvidenceError("animation retirement reason differs from actual lifecycle flags")
             else:

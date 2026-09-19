@@ -5,6 +5,7 @@
 #include <array>
 #include <vector>
 #include <utility>
+#include <string_view>
 
 namespace lvz::determinism {
 namespace {
@@ -20,6 +21,9 @@ struct Binding {
     bool ownerDead;
     bool plantOwner=false;
     bool ownerSquished=false;
+    bool zombieSpecialHead=false;
+    uint32_t zombieType=0;
+    bool ownerHasObject=false;
 };
 uint32_t U32(const Json& value) {
     if(!value.is_number_integer() || (value.is_number_integer()&&!value.is_number_unsigned()&&value.get<int64_t>()<0)
@@ -44,9 +48,17 @@ template<size_t N> void OwnerBindings(std::vector<Binding>& bindings,const Json&
         for(const auto& role:roles) {
             auto key=Hex(role.offset);
             if(!fields.contains(key)) continue;
-            bindings.push_back({std::string("/")+pool+"/slots/"+item.key()+"/fields/"+key,
+            Binding binding{std::string("/")+pool+"/slots/"+item.key()+"/fields/"+key,
                 std::string(pool)+"/"+Hex(id)+"/"+role.name,U32(fields.at(key)),dead,
-                squishedOffset!=0,squished});
+                squishedOffset!=0,squished};
+            if(std::string_view(pool)=="zombies"&&role.offset==0x144) {
+                binding.zombieSpecialHead=true;
+                binding.zombieType=U32(fields.at(Hex(0x24)));
+                const auto hasObject=U32(fields.at(Hex(0xbc)));
+                if(hasObject>1) throw std::runtime_error("Invalid zombie mHasObject byte");
+                binding.ownerHasObject=hasObject!=0;
+            }
+            bindings.push_back(std::move(binding));
         }
     }
 }
@@ -78,12 +90,38 @@ bool ValidateReanimationTarget() noexcept {
     static constexpr uint8_t squish[]={0xc6,0x85,0x42,0x01,0x00,0x00,0x01,
         0xc7,0x45,0x4c,0xf4,0x01,0x00,0x00};
     static constexpr uint8_t retireEffects[]={0x8b,0xf5,0xe8,0x5c,0xfd,0xff,0xff};
+    // Flag initialization: AddReanimation(REANIM_FLAG=0x8e), then persist the
+    // returned animation's full +9c generation ID in zombie+144.
+    static constexpr uint8_t flagType[]={0xbb,0x8e,0x00,0x00,0x00,0xe8,0x07,0x0a,0xf3,0xff};
+    static constexpr uint8_t flagIdentity[]={0x8b,0x86,0x9c,0x00,0x00,0x00,0x8b,0x4d,
+        0x08,0x68,0x48,0xeb,0x66,0x00,0x8b,0xdf,0x89,0x81,0x44,0x01,0x00,0x00};
+    // DropFlag: only ZOMBIE_FLAG with mHasObject; retire +144 by complete
+    // generation lookup, then clear mHasObject without zeroing that handle.
+    static constexpr uint8_t dropFlagGuard[]={0x83,0x7b,0x24,0x01,0x56,0x57,
+        0x0f,0x85,0xe7,0x00,0x00,0x00,0x80,0xbb,0xbc,0x00,0x00,0x00,0x00,
+        0x0f,0x84,0xda,0x00,0x00,0x00};
+    static constexpr uint8_t dropFlagLookup[]={0x8b,0x83,0x44,0x01,0x00,0x00,
+        0x85,0xc0,0x8b,0x91,0x20,0x08,0x00,0x00,0x8b,0x52,0x08,0x74,0x1d,
+        0x0f,0xb7,0xc8,0x3b,0x4a,0x08,0x73,0x15,0x8d,0x0c,0x89,0xc1,0xe1,
+        0x05,0x03,0x0a,0x39,0x81,0x9c,0x00,0x00,0x00,0x75,0x05,
+        0xe8,0x32,0x9b,0xf4,0xff};
+    static constexpr uint8_t dropFlagRetired[]={0xc6,0x83,0xbc,0x00,0x00,0x00,0x00};
     return Accessible(0x471a71,sizeof(bytes))
         &&std::memcmp(reinterpret_cast<const void*>(0x471a71),bytes,sizeof(bytes))==0
         &&Accessible(0x462c2d,sizeof(squish))
         &&std::memcmp(reinterpret_cast<const void*>(0x462c2d),squish,sizeof(squish))==0
         &&Accessible(0x462c8d,sizeof(retireEffects))
-        &&std::memcmp(reinterpret_cast<const void*>(0x462c8d),retireEffects,sizeof(retireEffects))==0;
+        &&std::memcmp(reinterpret_cast<const void*>(0x462c8d),retireEffects,sizeof(retireEffects))==0
+        &&Accessible(0x52321f,sizeof(flagType))
+        &&std::memcmp(reinterpret_cast<const void*>(0x52321f),flagType,sizeof(flagType))==0
+        &&Accessible(0x523243,sizeof(flagIdentity))
+        &&std::memcmp(reinterpret_cast<const void*>(0x523243),flagIdentity,sizeof(flagIdentity))==0
+        &&Accessible(0x529873,sizeof(dropFlagGuard))
+        &&std::memcmp(reinterpret_cast<const void*>(0x529873),dropFlagGuard,sizeof(dropFlagGuard))==0
+        &&Accessible(0x52988e,sizeof(dropFlagLookup))
+        &&std::memcmp(reinterpret_cast<const void*>(0x52988e),dropFlagLookup,sizeof(dropFlagLookup))==0
+        &&Accessible(0x5298f4,sizeof(dropFlagRetired))
+        &&std::memcmp(reinterpret_cast<const void*>(0x5298f4),dropFlagRetired,sizeof(dropFlagRetired))==0;
 }
 Json ReanimationCoverage() {
     return {{"schema","lvz.reanimation-links.v1"},{"complete_animation_state",false},
@@ -91,7 +129,7 @@ Json ReanimationCoverage() {
         {"raw_handle_evidence",{{"path","audit/reanimation-handles.jsonl"},
             {"encoding","initial_plus_json_patch"},{"binding",{"seq","kind","version"}},{"required",true}}},
         {"normalization","verified generation lookup plus persistent owner/role identity and alias graph"},
-        {"owner_retirement_rules",{"owner_dead","plant_squished_remove_effects"}},
+        {"owner_retirement_rules",{"owner_dead","plant_squished_remove_effects","zombie_flag_dropped"}},
         {"covered",{"type","anim_time_bits","anim_rate_bits","loop_type","dead","frame_start","frame_count",
             "frame_base_pose","loop_count","last_frame_time_bits","overlay_matrix_bits","track_blend_and_shake_scalars",
             "zombie_plant_mower_grid_board_fwoosh_links"}},
@@ -181,14 +219,23 @@ ReanimationAudit ReanimationAuditor::Normalize(Json ownerState,const Reanimation
             {"slot",slot},{"owner_dead",binding.ownerDead},{"lookup_matches",validHandle},
             {"actual_slot_id",found==pool.slots.end()?Json(nullptr):Json(found->second.id)}};
         if(binding.plantOwner) evidence["owner_squished"]=binding.ownerSquished;
-        const bool ownerEffectsRetired=binding.ownerDead||binding.ownerSquished;
+        if(binding.zombieSpecialHead) {
+            evidence["owner_zombie_type"]=binding.zombieType;
+            evidence["owner_has_object"]=binding.ownerHasObject;
+        }
+        // This is a role retirement, not death of the zombie or its body.
+        // A normal-format old generation in an observed slot may have been
+        // freed/reused; malformed/out-of-range handles gain no new exemption.
+        const bool flagDropped=binding.zombieSpecialHead&&binding.zombieType==1
+            &&!binding.ownerHasObject&&(binding.handle&0xffff0000u)&&slot<pool.used;
+        const bool ownerEffectsRetired=binding.ownerDead||binding.ownerSquished||flagDropped;
         if(!binding.handle) reference={{"status","null"}};
         else if(!validHandle) {
             const char* reason=slot>=pool.capacity?"out_of_range":(found==pool.slots.end()?"not_allocated":"generation_mismatch");
             reference={{"status",ownerEffectsRetired?"expired":"dangling"}};
             evidence["lookup_failure"]=reason;
             if(ownerEffectsRetired) evidence["retirement_reason"]=binding.ownerDead?
-                "owner_dead":"plant_squished_remove_effects";
+                "owner_dead":(binding.ownerSquished?"plant_squished_remove_effects":"zombie_flag_dropped");
             if(!ownerEffectsRetired) {
                 // Keep the raw bad generation in the comparable state: two
                 // invalid handles must not become equal through normalization.

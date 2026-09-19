@@ -11,6 +11,9 @@
 #include "particle_shake.hpp"
 #include "runtime/engine_call.hpp"
 #include "foley_trace.hpp"
+#ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
+#include "tests/flag_drop_live.hpp"
+#endif
 #include <array>
 #include <fstream>
 #include <set>
@@ -258,6 +261,9 @@ Json ProbeTarget() {
         {"engine_call_boundary",lvz::runtime::EngineCallManifest()},{"foley_trace",foleytrace::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
     if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();result["sound_counter"]=SoundCounterManifest();}
+#ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
+    result["test_fixture"]=lvz::flagfixture::Manifest();
+#endif
     return result;
 }
 void Initialize(const std::filesystem::path& runDir) {

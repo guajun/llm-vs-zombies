@@ -12,13 +12,29 @@ template<class F> void Reject(F fn) {
 }
 Json Owner(uint32_t body,bool dead=false,uint32_t head=0) {
     return {{"zombies",{{"slots",{{"0",{{"id_or_free_next",0x10000u},
-        {"fields",{{Hex(0xec),dead?1u:0u},{Hex(0x118),body},{Hex(0x144),head}}}}}}}}}};
+        {"fields",{{Hex(0x24),0u},{Hex(0xbc),0u},{Hex(0xec),dead?1u:0u},
+            {Hex(0x118),body},{Hex(0x144),head}}}}}}}}}};
 }
 Json PlantOwner(uint32_t handle,bool dead=false,bool squished=false) {
     Json fields={{Hex(0x24),8},{Hex(0x3c),0},{Hex(0x4c),squished?500:200},
         {Hex(0x134),0},{Hex(0x141),dead?1u:0u},{Hex(0x142),squished?1u:0u},{Hex(0x143),0}};
     for(unsigned at=0x94;at<=0xac;at+=4) fields[Hex(at)]=handle;
     return {{"plants",{{"slots",{{"0",{{"id_or_free_next",0x10000u},{"fields",fields}}}}}}}};
+}
+Json FlagOwner(uint32_t body,uint32_t flag,bool hasObject=false,uint32_t type=1) {
+    auto result=Owner(body,false,flag);
+    auto entry=std::move(result["zombies"]["slots"]["0"]);
+    result["zombies"]["slots"].erase("0");
+    entry["id_or_free_next"]=3832741926u; // actual rejected 045 owner, slot 38
+    auto& fields=entry["fields"];
+    fields[Hex(0x24)]=type;fields[Hex(0xbc)]=hasObject?1u:0u;
+    fields[Hex(0xba)]=0;fields[Hex(0xbb)]=0;fields[Hex(0xbd)]=1;
+    fields[Hex(0xc8)]=70; // evidence, not an admission condition
+    result["zombies"]["slots"]["38"]=std::move(entry);
+    return result;
+}
+const Json& FlagRef(const ReanimationAudit& out,unsigned offset=0x144) {
+    return out.comparable.at("zombies").at("slots").at("38").at("fields").at(Hex(offset));
 }
 ReanimationSample Sample(uint32_t id) {
     return {id,false,true,{{"type",2},{"anim_time_bits",0x3e800000u},
@@ -129,6 +145,58 @@ int main() {
             "Squished expiry lost actual slot-reuse evidence");
         inactivePlant=PlantOwner(a);inactivePlant["plants"]["slots"]["0"]["fields"].erase(Hex(0x142));
         Reject([&]{left.Normalize(inactivePlant,Pool(a));});
+
+        // Real 045 fault: live flag zombie, +BC=0, old 0xE8190007 flag
+        // already freed. Only that role retires; body and owner stay live.
+        constexpr uint32_t body=0x10002u,flag=3893952519u;
+        auto flagPool=Pool(body,flag);
+        flagPool.slots[flag&0xffffu].semantic["type"]=0x8e;
+        left.Reset();right.Reset();
+        auto carried=left.Normalize(FlagOwner(body,flag,true),flagPool);
+        Check(carried.valid&&FlagRef(carried)["status"]=="live","Carried flag not live");
+        flagPool.slots[flag&0xffffu].dead=true;
+        flagPool.slots[flag&0xffffu].semantic["dead"]=true;
+        auto droppedRetiring=left.Normalize(FlagOwner(body,flag),flagPool);
+        Check(droppedRetiring.valid&&FlagRef(droppedRetiring)["status"]=="retiring"
+            &&droppedRetiring.comparable["reanimations"]["nodes"].size()==2,
+            "Dropped allocated flag lost its full animation node");
+        auto dropped=left.Normalize(FlagOwner(body,flag),Pool(body));
+        Check(dropped.valid&&FlagRef(dropped)["status"]=="expired"
+            &&FlagRef(dropped,0x118)["status"]=="live","Flag expiry killed body association");
+        const auto& droppedRaw=dropped.raw["links"][1];
+        Check(droppedRaw["raw_handle"]==flag&&droppedRaw["owner_dead"]==false
+            &&droppedRaw["owner_has_object"]==false&&droppedRaw["owner_zombie_type"]==1
+            &&droppedRaw["retirement_reason"]=="zombie_flag_dropped"
+            &&droppedRaw["lookup_failure"]=="not_allocated"&&droppedRaw["actual_slot_id"].is_null(),
+            "Flag retirement lost original owner/generation/lookup evidence");
+        auto otherFlag=right.Normalize(FlagOwner(body,flag+0x10000u),Pool(body));
+        Check(otherFlag.valid&&otherFlag.comparable==dropped.comparable&&otherFlag.raw!=dropped.raw,
+            "Retired flag generations not kept separately as raw evidence");
+        auto reused=left.Normalize(FlagOwner(body,flag),Pool(body,flag+0x10000u));
+        Check(reused.valid&&reused.comparable==dropped.comparable
+            &&reused.raw["links"][1]["lookup_failure"]=="generation_mismatch",
+            "Dropped flag slot reuse hid generation evidence");
+        Check(!left.Normalize(FlagOwner(body,flag,true),Pool(body)).valid,"Carried dangling flag accepted");
+        Check(!left.Normalize(FlagOwner(body,flag,false,0),Pool(body)).valid,"Nonflag special head gained exemption");
+        Check(!left.Normalize(FlagOwner(flag,0),Pool(body)).valid,"Live flag zombie body gained exemption");
+        for(unsigned role:{0x140u,0x150u}) {
+            auto wrongRole=FlagOwner(body,0);wrongRole["zombies"]["slots"]["38"]["fields"][Hex(role)]=flag;
+            Check(!left.Normalize(wrongRole,Pool(body)).valid,"Unrelated zombie role gained flag exemption");
+        }
+        Check(!left.Normalize(FlagOwner(body,0xe8190040u),Pool(body)).valid,"Out-of-range flag handle accepted");
+        Check(!left.Normalize(FlagOwner(body,7u),Pool(body)).valid,"Zero-generation flag handle accepted");
+        auto shortPool=Pool(body);shortPool.used=3;
+        Check(!left.Normalize(FlagOwner(body,flag),shortPool).valid,"Never-used flag slot accepted");
+        auto aliveHead=FlagOwner(body,flag);aliveHead["zombies"]["slots"]["38"]["fields"][Hex(0xba)]=1;
+        aliveHead["zombies"]["slots"]["38"]["fields"][Hex(0xc8)]=270;
+        Check(left.Normalize(aliveHead,Pool(body)).valid,"Flag rule incorrectly requires lost head or low health");
+        auto missingFlag=FlagOwner(body,flag);missingFlag["zombies"]["slots"]["38"]["fields"].erase(Hex(0xbc));
+        Reject([&]{left.Normalize(missingFlag,Pool(body));});
+        missingFlag=FlagOwner(body,flag);missingFlag["zombies"]["slots"]["38"]["fields"][Hex(0xbc)]=2;
+        Reject([&]{left.Normalize(missingFlag,Pool(body));});
+        auto deadFlag=FlagOwner(body,flag);deadFlag["zombies"]["slots"]["38"]["fields"][Hex(0xec)]=1;
+        Check(left.Normalize(deadFlag,Pool(body)).raw["links"][1]["retirement_reason"]=="owner_dead",
+            "Actual owner death lost priority over flag retirement");
 
         // Equal payloads do not make aliasing or swapping existing objects equal.
         constexpr uint32_t x=0x10001u,y=0x20002u;

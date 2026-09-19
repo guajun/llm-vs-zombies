@@ -10,6 +10,9 @@
 #include "recording/frame_cache.hpp"
 #include "determinism/model.hpp"
 #include "determinism/foley_trace.hpp"
+#ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
+#include "tests/flag_drop_live.hpp"
+#endif
 #include <avz.h>
 #include <wincrypt.h>
 #include <cmath>
@@ -251,7 +254,13 @@ public:
         std::string error;bool ok=lvz::determinism::RestoreClocks(snapshot,"paused_at_boundary",error);
         return {{"ok",ok},{"error",error}};
     }
-    void CloseRecording() override { lvz::recording::SealDrawGate();lvz::determinism::Shutdown();lvz::CloseRecording(); }
+    void CloseRecording() override {
+        lvz::recording::SealDrawGate();lvz::determinism::Shutdown();
+#ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
+        lvz::flagfixture::Close();
+#endif
+        lvz::CloseRecording();
+    }
     Json Initialize(const Json& params) override {
         auto reject=[](const char* reason){return Json{{"ok",false},{"error",reason}};};
         int ui=AGetPvzBase()->GameUi();
@@ -301,6 +310,9 @@ void Start(const std::filesystem::path& directory) {
     std::string drawError;
     if(!lvz::recording::InstallDrawGate(ownerThread,&DrawReady,drawError))throw std::runtime_error(drawError);
     lvz::determinism::Initialize(directory);
+#ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
+    lvz::flagfixture::Initialize(directory,ownerThread);
+#endif
     JournalOptions journal;journal.path=directory/"decisions/runtime-requests.bin";
     controller=std::make_unique<Controller>(backend,std::move(journal));controller->Boundary();
     server=new PipeServer();server->Start();
@@ -310,7 +322,11 @@ void Shutdown() {
     if(!controller) return;
     CheckThread();controller->Stop("runtime_shutdown");
     server->Stop();delete server;server=nullptr;
-    lvz::recording::SealDrawGate();lvz::determinism::Shutdown();controller.reset();
+    lvz::recording::SealDrawGate();lvz::determinism::Shutdown();
+#ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
+    lvz::flagfixture::Close();
+#endif
+    controller.reset();
 }
 bool BeforeFrameImpl() {
     if(!controller) return true;
@@ -346,7 +362,15 @@ bool BeforeFrame() {
 bool RunOneEngineFrame() {
     if(!controller) {AAsm::GameTotalLoop();return true;}
     try {
-        CheckThread();return controller->RunEngineFrame([] {AAsm::GameTotalLoop();});
+        CheckThread();return controller->RunEngineFrame([] {
+#ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
+            lvz::flagfixture::BeforeOriginalUpdate(controller->EngineCallHealth(),controller->Version(),backend.Ready());
+#endif
+            AAsm::GameTotalLoop();
+#ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
+            lvz::flagfixture::AfterOriginalUpdate(controller->EngineCallHealth(),controller->Version(),backend.Ready());
+#endif
+        });
     } catch(const std::exception& error) { controller->Fail(error.what());return false; }
 }
 void RecordEnvironmentCollect(uint32_t itemId,int type,int x,int y) {
