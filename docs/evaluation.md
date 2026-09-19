@@ -31,11 +31,13 @@ python -m llm_vs_zombies.evaluation plan work/strict-plan.json --tier strict --s
 python -m llm_vs_zombies.evaluation run work/strict-plan.json --output experiments/runs/eval-strict-001
 ```
 
-strict 默认每个种子要求 10 次冷启动：一次录制策略轨迹，九次冷启动后重算同一轨迹，**不是让 LLM 再回答九次**。另有恢复测试专用进程，不能拿它凑十次完整重放。默认上限 200000 tick，达到上限仍未完成两旗即不满足通关门槛。源未完成两旗时封存真实结果并跳过九次重放；smoke 的正常来源仍运行一次真实 cold 和恢复探针。首个 cold 失败后停止该种子后续重放，保留失败报告。这里的 baseline 是公开候选策略，命令可执行并不证明它已能赢完整两旗。
+strict 默认每个种子要求 10 次冷启动：一次录制策略轨迹，九次冷启动后重算同一轨迹，**不是让 LLM 再回答九次**。另有恢复测试专用进程，不能拿它凑十次完整重放。默认上限 200000 tick，达到上限仍未完成两旗即不满足通关门槛。源未完成两旗时封存真实结果并跳过九次重放；smoke 的正常来源仍运行一次真实 cold 和恢复探针。首个 cold 失败后停止派发该种子尚未开始的重放，已运行的 cold 完成正常关闭和证据保留。这里的 baseline 是公开候选策略，命令可执行并不证明它已能赢完整两旗。
 
-`plan` 支持 `--seeds 0,1,42`、`--tick-budget`、`--cold-starts`、`--timeout-seconds`、`--wall-budget-seconds`、`--cold-wall-budget-seconds`、`--min-free-bytes`、`--packaging-reserve-bytes`、`--disk-check-ticks` 和 `--pause-points '[[1000,1],[2500,5]]'`。strict 生成默认单请求超时600秒、源墙钟预算86400秒、每次cold墙钟预算86400秒；smoke 单请求/源默认仍为90/3600秒。已有计划保持其显式值，不自动延长。strict 不能降低十次冷启动要求。策略相对路径相对于计划文件所在目录；生成命令会保存当时解析的绝对路径。
+`plan` 支持 `--seeds 0,1,42`、`--tick-budget`、`--cold-starts`、`--cold-workers 1|2`、`--timeout-seconds`、`--wall-budget-seconds`、`--cold-wall-budget-seconds`、`--min-free-bytes`、`--packaging-reserve-bytes`、`--disk-check-ticks` 和 `--pause-points '[[1000,1],[2500,5]]'`。strict 生成默认单请求超时600秒、源墙钟预算86400秒、每次cold墙钟预算86400秒；smoke 单请求/源默认仍为90/3600秒。已有计划保持其显式值，不自动延长。strict 不能降低十次冷启动要求。策略相对路径相对于计划文件所在目录；生成命令会保存当时解析的绝对路径。
 
-墙钟预算从各局初始化完成的真实B0开始，在完成的请求边界检查，包含策略调用/暂停/在线读取的等待；不等于整个suite总时限，也不强行中断正在执行的原版请求。单请求超时另行限制IPC。cold的最后请求若已超预算，先完成实际结果和关闭health验证，再让资源门槛失败；不会为了及时报告预算而跳过尾部。无限阻塞的受信任策略函数仍需自己设置外部调用超时。
+`cold_workers` 默认 `1`，仅接受整数 `1` 或 `2`；旧计划缺失此字段时仍串行。`2` 在 Windows 上最多同时运行两个独立冷重放宿主，source、不同种子和 recovery 仍顺序执行。默认 smoke 只有一次 cold；若要两次 cold，可同时设置 `--cold-starts 3`。每个 worker 都独立对源轨迹执行完整核验并保留原请求预算；其窗口、关闭、宿主、资源及归档门槛各自进入总报告。并发不会降低 strict 条件。配置、资源边界和回执见[并行冷重放](parallel-cold.md)。
+
+source/recovery 墙钟预算从初始化完成的真实B0开始；cold 从该 attempt 实际开始计算，包含读取源轨迹、初始化和重放，排队时间不计。在完成的原请求边界检查预算，包含策略调用/暂停/在线读取的等待；不等于整个suite总时限，也不强行中断正在执行的原版请求。单请求超时另行限制IPC。cold的最后请求若已超预算，先完成实际结果和关闭health验证，再让资源门槛失败；不会为了及时报告预算而跳过尾部。无限阻塞的受信任策略函数仍需自己设置外部调用超时。
 
 比较不同策略时，用相同计划种子、场景和预算分别创建 suite，并比较每个 seed 的结果、动作与耗时。各自的 replay 验证各自记录的轨迹。相同种子不自动保证不同策略面对逐只完全相同的随机事件：不同动作可能改变 RNG 消耗；需要固定外生出怪事件的评测是另一项实验模式，不能由本运行器的 replay 通过结果推出。
 
@@ -61,13 +63,15 @@ launcher 在进入游戏前应用 seed，源实验在真实两仪初态暂停后
 
 当前显式静音 runtime 还声明两项独立初始化能力：[App 更新计数锚定](app-update-anchor-native.md)与[诊断音效计数起点](sound-counter-origin-native.md)。顺序为种子/三时钟读回、绑定本进程诊断计数起点、写入记录的真实 App 计数、warm 绘制、B0。原始 App 写入保留完整前后回执；bootstrap 的绝对计数不重置，每个更新边界另存原始累计旁证，实验内计数包含 warm。完整游戏状态直接比较，允许不同的启动诊断累计值不等于允许游戏字段分叉。旧档没有这些声明时仍按原合同读取，不能自动升级为新模式。
 
-在 `capture_initial` 前执行暂停扰动：保存完整 audit snapshot 与观察，等待指定墙钟时间，再确认两者都不变。随后记录单帧推进，再执行策略：**公开runner首个策略决策在B1**，与私有045在B0决策不同；当前公开源自行记录真实初始锚点，不继承私有041的B0。每个cold使用自己的实际进程及源recipe，从完整B0重新执行包括这次advance1在内的相同请求。
+在 `capture_initial` 前执行暂停扰动：保存 audit snapshot 与观察，等待指定墙钟时间，再确认**已捕获模拟状态与version逐字段不变**。暂停证明的冻结对象是模拟状态与版本，不是整份 snapshot 字节：声明固定 owner 浮点模式时，每次读取 snapshot 都会新增一次 monitor 检查，两次读取必然不同；探针改为显式核验该模式的激活回执未变，且 after 侧 monitor 仍健康、控制位仍在目标值，并把实际比较的字段写入probe记录，不静默丢弃这段证据。随后记录单帧推进，再执行策略：**公开runner首个策略决策在B1**，与私有045在B0决策不同；当前公开源自行记录真实初始锚点，不继承私有041的B0。每个cold使用自己的实际进程及源recipe，从完整B0重新执行包括这次advance1在内的相同请求。
 
-source及cold还按 `pause_points`，在首次达到指定tick的已完成战斗请求边界等待。默认为≥1000时1秒、≥2500时5秒；保存请求目标、实际版本和完整状态不变证明。一次请求跨过多个点就在同一实际边界逐个检查，不拆预算、不新增推进、不重试动作。末请求恰好停在B1000且仍在战斗时照常探测。报告分别列出configured、completed、已达阈值却无法执行的unexecuted_reached和尚未到达终点的not_reached。直接到终局或资源停止导致已达点无法合法探测时，coverage为unverified，不能用B0暂停通过来遮盖；超出真实终点的点明确not applicable。记录在 `pause-probes-during-play.json` 和客户端trace中。
+source及cold还按 `pause_points`，在首次达到指定tick的已完成战斗请求边界等待。默认为≥1000时1秒、≥2500时5秒；保存请求目标、实际版本和同样的模拟状态不变证明（比较范围与B0暂停探针一致）。一次请求跨过多个点就在同一实际边界逐个检查，不拆预算、不新增推进、不重试动作。末请求恰好停在B1000且仍在战斗时照常探测。报告分别列出configured、completed、已达阈值却无法执行的unexecuted_reached和尚未到达终点的not_reached。直接到终局或资源停止导致已达点无法合法探测时，coverage为unverified，不能用B0暂停通过来遮盖；超出真实终点的点明确not applicable。记录在 `pause-probes-during-play.json` 和客户端trace中。
 
 完整两旗要求同时满足：实际观察到至少第 20 波、`completed_rounds` 比初值增加、结束时场景仍是 3。正常返回选卡允许短于请求预算，GameOver则是可正常录制的策略失败。仅到第 20 波、计时器归零、僵尸短暂为空或策略自报成功都不算通过。实际零时钟终局仍是一笔原生调用，前后完整state可能变化；公开runner不把同tick当作没有执行，严格reader继续核验所有原生调用、终局和原始旁证。
 
 录制关闭后，engine replay 会读取真实客户端轨迹和原生 audit、核验记录完整性，再在新进程执行相同动作。任何初态差异、帧数差异、动作结果差异或捕获状态分叉均保留首个失败位置。终局跨 epoch 只有在 runtime 与 replay 都提供并核验对应终局边界证据时才可通过。
+
+公共runner在source、每个cold和recovery自己的实际会话中检查runtime身份；任何声明 `test_fixture` 的DLL都在实验初始化前被拒绝，并正常清理自有录制和进程。独立生命周期夹具可由专用工具录制及重放，其证据不能认证生产实验就绪。
 
 恢复测试使用另一局：发送完整的 100 tick 请求，通过另一连接确认游戏线程已接受，再主动断开原连接而不读取响应；重连后按**原请求 ID** 查询执行结果，不重新发送动作。断线可以取消尚未执行的预算，结果必须准确报告实际 0..100 tick 与 `client_disconnected`；若已执行完，则必须为 100 tick 与 `budget_exhausted`。观察时钟必须与该实际数量一致，重复查询必须返回同一个结果。再发送一个不支持的动作，确认零推进且明确 action_failed，随后验证合法单帧请求恢复正常。它与策略轨迹分开，避免把故障注入步骤混成策略操作。
 

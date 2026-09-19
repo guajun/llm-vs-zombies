@@ -16,6 +16,7 @@
 #endif
 #include <array>
 #include <fstream>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -26,7 +27,10 @@ constexpr uintptr_t kAppPointer = 0x6a9ec0;
 DWORD ownerThread = 0;
 bool initialized = false;
 uint64_t sequence = 0;
-std::ofstream checksums, changes, events, reanimationHandles, particleSeeds, engineCallRaw, soundCounterRaw;
+std::ofstream checksums, changes, events, reanimationHandles, particleSeeds, engineCallRaw, soundCounterRaw, fpRaw;
+std::unique_ptr<fpenv::Monitor> fpMonitor;
+fpenv::Sample capturedFp;
+bool fpFaultWritten=false;
 Json previous;
 ReanimationAuditor reanimationAuditor;
 Json reanimationEvidence;
@@ -259,6 +263,7 @@ Json ProbeTarget() {
         {"spawn_hook",std::move(spawn)},
         {"particle_shake",ParticleShakeManifest()},{"draw_schedule",lvz::recording::DrawGateManifest()},
         {"engine_call_boundary",lvz::runtime::EngineCallManifest()},{"foley_trace",foleytrace::Manifest()},
+        {"fixed_fp",fpenv::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
     if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();result["sound_counter"]=SoundCounterManifest();}
 #ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
@@ -273,7 +278,7 @@ void Initialize(const std::filesystem::path& runDir) {
     if(!ValidateTargetImage()) throw std::runtime_error("Unsupported PvZ engine image: deterministic adapter rejected");
     const auto directory=runDir/"audit";
     std::filesystem::create_directories(directory);
-    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl","engine-call-raw.jsonl","sound-counter-raw.jsonl"})
+    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl","engine-call-raw.jsonl","sound-counter-raw.jsonl","fp-environment-raw.jsonl"})
         if(std::filesystem::exists(directory/file) && std::filesystem::file_size(directory/file))
             throw std::runtime_error("Audit output already exists; create a fresh run");
     checksums.open(directory/"checksums.jsonl",std::ios::out|std::ios::binary);
@@ -282,8 +287,10 @@ void Initialize(const std::filesystem::path& runDir) {
     reanimationHandles.open(directory/"reanimation-handles.jsonl",std::ios::out|std::ios::binary);
     particleSeeds.open(directory/"particle-shake-seeds.jsonl",std::ios::out|std::ios::binary);
     engineCallRaw.open(directory/"engine-call-raw.jsonl",std::ios::out|std::ios::binary);
-    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds||!engineCallRaw) throw std::runtime_error("Cannot open audit outputs");
+    fpRaw.open(directory/"fp-environment-raw.jsonl",std::ios::out|std::ios::binary);
+    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds||!engineCallRaw||!fpRaw) throw std::runtime_error("Cannot open audit outputs");
     ownerThread=GetCurrentThreadId(); initialized=true; sequence=0;
+    fpMonitor=std::make_unique<fpenv::Monitor>(ownerThread);fpFaultWritten=false;
     previous=nullptr; previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
     bool hookInstalled=false;
@@ -311,10 +318,30 @@ void Initialize(const std::filesystem::path& runDir) {
             if(!RemoveSpawnHook(removeError))
                 throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
         }
-        checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();initialized=false;
+        checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();fpRaw.close();initialized=false;
         throw;
     }
 }
+Json ActivateFloatingPoint(int ui,uintptr_t board,const Json& context) {
+    RequireThread();
+    auto receipt=fpMonitor->Activate(ui,board,context);
+    Audit(receipt.value("ok",false)?"fp_environment_activated":"fp_environment_fault",receipt,{{"version",context.at("version")}});
+    Flush();return receipt;
+}
+void CheckFloatingPoint(fpenv::Phase phase,bool required) {
+    if(!initialized)return; // Closed recordings remain frozen by Controller.
+    if(fpMonitor->Check(phase,required))return;
+    if(!fpFaultWritten) {
+        fpFaultWritten=true;
+        // Write directly: preserve the active pre_step hook label through the
+        // actual returned original call. No Audit()/hook-boundary reset here.
+        Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","fp_environment_fault"},
+            {"version",lastObservationVersion},{"payload",fpMonitor->Evidence()}});
+        Flush();
+    }
+    throw std::runtime_error("Fixed owner FP mode failed; controls were not repaired");
+}
+Json FloatingPointEvidence(){return fpMonitor?fpMonitor->Evidence():Json(nullptr);}
 Json CaptureRng() {
     RequireThread();
     if(!TargetSignatures()) throw std::runtime_error("RNG code changed since initialization");
@@ -402,10 +429,8 @@ Json CaptureState() {
         {"app",{{"game_mode",Read<int32_t>(app+0x7f8)},{"ui",Read<int32_t>(app+0x7fc)},
             {"mj_clock",Read<uint32_t>(app+0x838)}}}};
     if(silentaudio::Enabled())state["sound_effects"]=silentaudio::Snapshot();
-    uint16_t x87=0; uint32_t mxcsr=0;
-    __asm__ volatile("fnstcw %0":"=m"(x87));
-    __asm__ volatile("stmxcsr %0":"=m"(mxcsr));
-    state["fp_environment"]={{"x87_control",x87},{"mxcsr_control",mxcsr&~0x3fu}};
+    capturedFp=fpMonitor->Capture();
+    state["fp_environment"]={{"x87_control",capturedFp.x87},{"mxcsr_control",capturedFp.mxcsr&fpenv::MxcsrControlMask}};
     if(!board) {
         state["board"]=nullptr;reanimationEvidence=nullptr;reanimationLinksValid=true;
         return state;
@@ -469,6 +494,7 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
         return;
     }
     Json state=CaptureState();
+    Write(fpRaw,fpMonitor->Boundary(envelope,capturedFp));
     if(silentaudio::Enabled())Write(soundCounterRaw,silentaudio::CounterBoundary(envelope,state));
     // Exactly the same capture as this checksum/delta, with the same seq and
     // version. Read-only audit_snapshot calls only refresh the in-memory cache.
@@ -514,15 +540,17 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
     if(sequence%100==0) Flush();
 }
 void Flush() {
-    RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();particleSeeds.flush();engineCallRaw.flush();
+    RequireThread(); checksums.flush();changes.flush();events.flush();reanimationHandles.flush();particleSeeds.flush();engineCallRaw.flush();fpRaw.flush();
     if(soundCounterRaw.is_open()){soundCounterRaw.flush();if(!soundCounterRaw)throw std::runtime_error("Sound counter raw evidence flush failed");}
     foleytrace::Flush();
-    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds||!engineCallRaw) throw std::runtime_error("Audit output flush failed");
+    if(!checksums||!changes||!events||!reanimationHandles||!particleSeeds||!engineCallRaw||!fpRaw) throw std::runtime_error("Audit output flush failed");
 }
 void Shutdown() {
     if(!initialized) return;
     RequireThread();DrainAndCheckSpawns();DrainAndCheckParticleShake();
     foleytrace::Shutdown();
+    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","fp_environment_closed"},
+        {"version",lastObservationVersion},{"payload",fpMonitor->Close()}});
     if(silentaudio::Enabled())Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","sound_effects_closed"},
         {"version",lastObservationVersion},{"payload",silentaudio::Health()}});
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","draw_schedule_closed"},
@@ -535,9 +563,9 @@ void Shutdown() {
     std::string error;
     if(!RemoveParticleShakeHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
     if(!RemoveSpawnHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
-    Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();
+    Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();fpRaw.close();
     if(soundCounterRaw.is_open()){soundCounterRaw.close();if(soundCounterRaw.fail())throw std::runtime_error("Sound counter raw evidence close failed");}
-    if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()) throw std::runtime_error("Audit output close failed");
+    if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()||fpRaw.fail()) throw std::runtime_error("Audit output close failed");
     initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
 }

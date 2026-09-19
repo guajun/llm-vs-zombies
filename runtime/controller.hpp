@@ -25,7 +25,9 @@ struct Backend {
     virtual Json Execute(const Json& action) = 0;
     virtual Json Hello() = 0;
     virtual Json Initialize(const Json&) { return {{"ok",false},{"error","unsupported"}}; }
+    virtual Json Initialize(const Json& params,const Json&) {return Initialize(params);}
     virtual Json AuditSnapshot() { throw std::runtime_error("audit snapshots are unsupported"); }
+    virtual Json FloatingPointEvidence() {return nullptr;}
     virtual Json RestoreRng(const Json&) { return {{"ok",false},{"error","unsupported"}}; }
     virtual Json SeedRng(uint32_t) { return {{"ok",false},{"error","unsupported"}}; }
     virtual Json RestoreClocks(const Json&) { return {{"ok",false},{"error","unsupported"}}; }

@@ -24,6 +24,7 @@ from typing import Any
 from .records import finish, read_json, sha256, write_json
 from .initialization import apply_recipe, clock_anchor
 from . import sound_effects
+from . import fp_environment
 from .app_update_anchor import target_from_recipe
 from .window_observer import LaunchWindowMonitor, launch_window_evidence, window_probe
 from .evaluation_support import (BoundaryBudget, BoundaryStop, ReplayBoundaryClient,
@@ -35,6 +36,8 @@ LIVE_GATES = ("private_launch", "runtime_windows", "session_cleanup", "archive_i
               "scenario", "fixed_rng", "initial_state", "single_step",
               "pause_invariance", "disconnect_recovery", "failure_recovery", "recording",
               "full_cycle", "engine_replay", "ten_cold_starts", "shared_profile_unchanged")
+COLD_GATES = {"private_launch", "runtime_windows", "session_cleanup", "archive_integrity", "host_identity", "resource_limits",
+              "scenario", "initial_state", "pause_invariance", "engine_replay"}
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,7 @@ class Plan:
     tier: str = "smoke"
     seeds: tuple[int, ...] = (0, 1, 42)
     cold_starts: int = 1
+    cold_workers: int = 1
     tick_budget: int = 1000
     chunk_ticks: int = 100
     pause_seconds: float = 1.0
@@ -68,6 +72,8 @@ class Plan:
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be an integer in 1..{maximum}")
+        if type(self.cold_workers) is not int or self.cold_workers not in (1, 2):
+            raise ValueError("cold_workers must be 1 or 2")
         if self.chunk_ticks > self.tick_budget:
             raise ValueError("chunk_ticks exceeds tick_budget")
         for name, lower, upper in (("pause_seconds", 0.05, 10), ("timeout_seconds", 1, 600),
@@ -371,10 +377,43 @@ def _pause_probe(client, seconds: float) -> dict:
     observation = client.observe()
     time.sleep(seconds)
     after = client.request("audit_snapshot")
-    if before != after or observation != client.observe():
+    # The frozen subject is the captured simulation state and version. A declared
+    # fixed-owner FP mode records one monitor check per snapshot read, so two
+    # consecutive snapshots are never byte-identical; that bookkeeping is checked
+    # through its own contract below instead of being dropped from the probe.
+    if (before.get("version") != after.get("version") or before.get("state") != after.get("state")
+            or observation != client.observe()):
         raise RuntimeError("paused wall time changed the captured simulation state")
+    game = (client.hello_result or {}).get("game", {})
+    fp_mode = fp_environment.mode(game)
+    compared = ["state", "version"]
+    if fp_mode:
+        fp_environment.evidence(before, game)
+        if fp_environment.evidence(after, game)["activation"] != before["fixed_fp"]["activation"]:
+            raise RuntimeError("paused wall time changed the fixed FP activation receipt")
+        compared += ["fixed_fp.activation", "fixed_fp.health"]
+    frozen = json.dumps({"state": before["state"], "version": before["version"]}, sort_keys=True).encode()
     return {"wall_seconds": seconds, "version": observation["version"],
-            "state_sha256": hashlib.sha256(json.dumps(before, sort_keys=True).encode()).hexdigest()}
+            "state_sha256": hashlib.sha256(frozen).hexdigest(),
+            "compared_snapshot_fields": compared, "fixed_fp": fp_mode or "not_declared"}
+
+
+def verify_run_artifacts(items, run) -> None:
+    """A gate must still point at the recorded bytes of its own run.
+
+    Artifacts outside the run (retention receipts, seed cases, replay reports)
+    are owned by their own writers; this checks the files a gate claims inside
+    the session directory, so a later rewrite cannot leave a stale hash behind.
+    """
+    from .records import sha256
+    resolved = Path(run).resolve()
+    for item in items:
+        for artifact in item.get("artifacts", []):
+            path = Path(artifact["path"]).resolve()
+            if not path.is_relative_to(resolved):
+                continue
+            if not path.is_file() or sha256(path) != artifact["sha256"]:
+                raise RuntimeError(f"gate artifact changed after it was recorded: {path}")
 
 
 class PauseSchedule:
@@ -560,6 +599,150 @@ def _recovery_probe(root: Path, name: str, plan: Plan, seed: int, *, lifecycle=N
     return run, result
 
 
+def _retain_session(plan, output, case, add, run, role, lifecycle, *, primary=None, package=False, outcome="failed"):
+    def read_optional(path):
+        try:
+            return read_json(path)
+        except Exception:
+            return None
+    item = {"run": str(run), "role": role, "primary_error": primary}
+    trajectory = None
+    if lifecycle.get("created_run") == str(run):
+        try:
+            final, trajectory = finalize_run(run, plan, outcome, package=package, primary_error=primary)
+            item.update(final)
+        except Exception as error:
+            item.update(passed_recording=False, archive_sealed=False,
+                        secondary_errors=[{"stage": "finalize", **error_detail(error)}])
+    else:
+        item.update(passed_recording=False, archive_sealed=False, secondary_errors=[],
+                    not_created=True)
+    runtime_cleanup = lifecycle.get("cleanup")
+    if isinstance(runtime_cleanup, dict):
+        item["cleanup_runtime_receipt"] = runtime_cleanup
+        runtime_errors = {key: value for key, value in runtime_cleanup.items() if key.endswith("_error")}
+        if runtime_errors:
+            item.setdefault("secondary_errors", []).append({"stage": "runtime_cleanup", "errors": runtime_errors})
+            item["cleanup_passed"] = item["passed_recording"] = False
+    receipt_path = output / (run.name + "-retention.json")
+    write_json(receipt_path, item)
+    case["sessions"].append(item)
+    launcher = read_optional(run / "launcher.json") or {}
+    windows = read_optional(run / "evaluation-windows.json") or {}
+    launcher["evaluation_windows"] = windows
+    add("private_launch", private_launch_passed(launcher), {"role": role, "windows": windows},
+        run / "evaluation-windows.json", *sorted((run / "decisions/window-observer-launch").glob("*")))
+    runtime = read_optional(run / "evaluation-runtime-windows.json") or {}
+    status = runtime.get("foreground_check_status") if runtime.get("schema") == "lvz.launch-windows.v3" else None
+    passed = True if status == "pass" else False if status == "fail" else None
+    add("runtime_windows", passed, {"role": role, "windows": runtime},
+        run / "evaluation-runtime-windows.json", *sorted((run / "decisions/window-observer-runtime").glob("*")))
+    add("session_cleanup", item.get("cleanup_passed") is True, {"role": role, "cleanup": item.get("cleanup")}, receipt_path)
+    add("archive_integrity", item.get("archive_sealed") is True and not item.get("secondary_errors"),
+        {"role": role, "retention": item}, receipt_path, run / "manifest.json")
+    host = read_optional(run / "evaluation-host-final.json") or {}
+    add("host_identity", host.get("matches_archive") is True and host.get("unchanged") is True,
+        {"role": role, "host": host}, run / "evaluation-host-final.json", run / "inputs/implementation.zip")
+    resource = read_optional(run / "evaluation-resources.json")
+    add("resource_limits", isinstance(resource, dict) and resource.get("stop") is None,
+        {"role": role, "resources": resource}, run / "evaluation-resources.json")
+    item["infrastructure_passed"] = (item.get("passed_recording") is True and passed is True
+        and private_launch_passed(launcher) is True and host.get("matches_archive") is True
+        and host.get("unchanged") is True and isinstance(resource, dict) and resource.get("stop") is None)
+    # The external receipt and sealed run stay immutable after their hashes
+    # are attached to gates. The aggregate also appears in the seed case.
+    return item, trajectory
+
+
+def run_cold_attempt(root, plan, output, seed, repeat, trajectory):
+    """One complete cold attempt; used by serial and process-worker execution."""
+    from .audit_compare import first_difference
+    from .engine_replay import ReplaySession, identity_from_launcher, replay
+    root, output = Path(root), Path(output)
+    case = {"sessions": [], "cold_starts": []}
+    gates = {name: [] for name in LIVE_GATES}
+    started = time.monotonic()
+    rpc_intervals = []
+
+    def add(name, passed, detail, *artifacts):
+        item = evidence("unverified" if passed is None else "pass" if passed else "fail",
+                        source="live_engine", detail=detail, artifacts=list(artifacts))
+        item["seed"] = seed
+        gates[name].append(item)
+
+    cold_run = root / "experiments/runs" / f"{output.name}-s{seed}-c{repeat}"
+    destination = output / f"seed-{seed}-replay-{repeat}"
+    cold_error, replay_result, cold_budget = None, None, None
+    cold_lifecycle = {}
+
+    @contextmanager
+    def initializer(expected, destination):
+        nonlocal cold_budget
+        with live_session(root, cold_run.name, plan, seed, lifecycle=cold_lifecycle) as (replay_run, state, replay_client, replay_trace):
+            _require_production_runtime(replay_client)
+            apply_recipe(replay_client, seed, expected.initial["initialization"]["clock_anchor"],
+                         app_update_count=target_from_recipe(expected.initial["initialization"]))
+            # apply_recipe rewrites observations/initial.json with the B0-bound
+            # observation, so the scenario gate has to record it afterwards.
+            add("scenario", state.get("scenario_verified") is True, {"repeat": repeat}, replay_run / "observations/initial.json")
+            actual_initial = replay_client.request("audit_snapshot")["state"]
+            difference = first_difference(expected.initial["state"], actual_initial)
+            write_json(replay_run / "initial-comparison.json", {"equal": difference is None, "difference": difference})
+            add("initial_state", difference is None, difference, replay_run / "initial-comparison.json")
+            cold_budget = BoundaryBudget(root, plan, cold=True, report_path=replay_run / "evaluation-resources.json")
+            cold_budget.started = started  # This attempt only; queued time is excluded.
+            cold_budget.check(replay_client.version, force=True)
+            probe = _pause_probe(replay_client, plan.pause_seconds)
+            write_json(replay_run / "pause-probe.json", probe)
+            add("pause_invariance", True, probe, replay_run / "pause-probe.json")
+            schedule = PauseSchedule(replay_client, replay_run, plan.pause_points)
+            def timed_rpc(value):
+                replay_trace.emit("cold_rpc_interval", value)
+                rpc_intervals.append(value)
+            wrapped = ReplayBoundaryClient(replay_client, cold_budget,
+                lambda obs: schedule.after_step(obs, skip_reason=cold_budget.stop["reason"] if cold_budget.stop else None),
+                on_rpc=timed_rpc)
+            yield ReplaySession(wrapped, identity_from_launcher(replay_client.hello_result, state), replay_run / "audit")
+            pause_coverage = schedule.finish()
+            add("pause_invariance", _coverage_passed(pause_coverage), pause_coverage, replay_run / "pause-probes-during-play.json")
+            # This records a final over-budget boundary without throwing
+            # before replay performs its authoritative close-health checks.
+            cold_budget.check(replay_client.version, enforce=False)
+
+    try:
+        replay_result = replay(trajectory, initializer, destination)
+        if cold_budget is not None:
+            # Include completed native tail verification in the
+            # cold wall bound, without interrupting that evidence.
+            cold_budget.check(cold_budget.last_version, enforce=False)
+    except Exception as error:
+        cold_error = error_detail(error, prefer_report=True)
+        case.setdefault("error", cold_error)
+    finally:
+        try:
+            cold_retained, _ = _retain_session(plan, output, case, add, cold_run, "cold", cold_lifecycle, primary=cold_error,
+                outcome="engine_replay_completed" if replay_result and replay_result.get("equal") else "engine_replay_failed")
+        except Exception as error:
+            detail = {"stage": "cold_retention", **error_detail(error, prefer_report=True)}
+            case.setdefault("secondary_errors", []).append(detail)
+            cold_error = cold_error or detail
+            case.setdefault("error", cold_error)
+            cold_retained = {"infrastructure_passed": False}
+    equal = replay_result is not None and replay_result.get("equal") is True
+    passed = equal and cold_retained["infrastructure_passed"] and cold_error is None
+    case["cold_starts"].append({"kind": "replay", "run": str(cold_run),
+        "report": str(destination / "replay-report.json"), "passed": passed, "error": cold_error})
+    add("engine_replay", equal, {"seed": seed, "repeat": repeat}, destination / "replay-report.json")
+    case["cold_starts"][0]["passed"] = passed and all(
+        gates[name] and all(item["status"] == "pass" for item in gates[name]) for name in COLD_GATES)
+    verify_run_artifacts([item for name in gates for item in gates[name]], cold_run)
+
+    return {"seed": seed, "repeat": repeat, "attempt": case["cold_starts"][0],
+            "sessions": case["sessions"], "gates": gates, "error": case.get("error"),
+            "wall_seconds": time.monotonic() - started, "rpc_intervals": rpc_intervals,
+            "secondary_errors": case.get("secondary_errors", [])}
+
+
 def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) -> dict:
     """Run owned processes; each session is retained before evaluating its gates."""
     from .audit_compare import AuditLog, first_difference
@@ -610,53 +793,8 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
             return None
 
     def retain_session(run, role, lifecycle, *, primary=None, package=False, outcome="failed"):
-        item = {"run": str(run), "role": role, "primary_error": primary}
-        trajectory = None
-        if lifecycle.get("created_run") == str(run):
-            try:
-                final, trajectory = finalize_run(run, plan, outcome, package=package, primary_error=primary)
-                item.update(final)
-            except Exception as error:
-                item.update(passed_recording=False, archive_sealed=False,
-                            secondary_errors=[{"stage": "finalize", **error_detail(error)}])
-        else:
-            item.update(passed_recording=False, archive_sealed=False, secondary_errors=[],
-                        not_created=True)
-        runtime_cleanup = lifecycle.get("cleanup")
-        if isinstance(runtime_cleanup, dict):
-            item["cleanup_runtime_receipt"] = runtime_cleanup
-            runtime_errors = {key: value for key, value in runtime_cleanup.items() if key.endswith("_error")}
-            if runtime_errors:
-                item.setdefault("secondary_errors", []).append({"stage": "runtime_cleanup", "errors": runtime_errors})
-                item["cleanup_passed"] = item["passed_recording"] = False
-        receipt_path = output / (run.name + "-retention.json")
-        write_json(receipt_path, item)
-        case["sessions"].append(item)
-        launcher = read_optional(run / "launcher.json") or {}
-        windows = read_optional(run / "evaluation-windows.json") or {}
-        launcher["evaluation_windows"] = windows
-        add("private_launch", private_launch_passed(launcher), {"role": role, "windows": windows},
-            run / "evaluation-windows.json", *sorted((run / "decisions/window-observer-launch").glob("*")))
-        runtime = read_optional(run / "evaluation-runtime-windows.json") or {}
-        status = runtime.get("foreground_check_status") if runtime.get("schema") == "lvz.launch-windows.v3" else None
-        passed = True if status == "pass" else False if status == "fail" else None
-        add("runtime_windows", passed, {"role": role, "windows": runtime},
-            run / "evaluation-runtime-windows.json", *sorted((run / "decisions/window-observer-runtime").glob("*")))
-        add("session_cleanup", item.get("cleanup_passed") is True, {"role": role, "cleanup": item.get("cleanup")}, receipt_path)
-        add("archive_integrity", item.get("archive_sealed") is True and not item.get("secondary_errors"),
-            {"role": role, "retention": item}, receipt_path, run / "manifest.json")
-        host = read_optional(run / "evaluation-host-final.json") or {}
-        add("host_identity", host.get("matches_archive") is True and host.get("unchanged") is True,
-            {"role": role, "host": host}, run / "evaluation-host-final.json", run / "inputs/implementation.zip")
-        resource = read_optional(run / "evaluation-resources.json")
-        add("resource_limits", isinstance(resource, dict) and resource.get("stop") is None,
-            {"role": role, "resources": resource}, run / "evaluation-resources.json")
-        item["infrastructure_passed"] = (item.get("passed_recording") is True and passed is True
-            and private_launch_passed(launcher) is True and host.get("matches_archive") is True
-            and host.get("unchanged") is True and isinstance(resource, dict) and resource.get("stop") is None)
-        # The external receipt and sealed run stay immutable after their hashes
-        # are attached to gates. The aggregate also appears in the seed case.
-        return item, trajectory
+        return _retain_session(plan, output, case, add, run, role, lifecycle,
+            primary=primary, package=package, outcome=outcome)
 
     try:
         for seed in plan.seeds:
@@ -673,8 +811,11 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                     with live_session(root, source_run.name, plan, seed, lifecycle=source_lifecycle) as (run, launcher, client, trace):
                         _require_production_runtime(client)
                         case["run"] = str(run)
-                        add("scenario", launcher.get("scenario_verified") is True, "actual Scene 3/layout/card verification", run / "observations/initial.json")
                         recipe = apply_recipe(client, seed)
+                        # apply_recipe rewrites observations/initial.json with the
+                        # B0-bound observation; the scenario gate follows it so the
+                        # recorded hash cannot go stale.
+                        add("scenario", launcher.get("scenario_verified") is True, "actual Scene 3/layout/card verification", run / "observations/initial.json")
                         write_json(run / "initialization-recipe.json", recipe)
                         add("fixed_rng", True, recipe, run / "initialization-recipe.json")
                         budget = BoundaryBudget(root, plan, report_path=run / "evaluation-resources.json")
@@ -711,6 +852,8 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                         package=source_run.exists(), outcome=case.get("outcome", "source_failed"))
                     add("recording", retained.get("passed_recording") is True and retained.get("trajectory_verified") is True,
                         retained, output / (source_run.name + "-retention.json"))
+                verify_run_artifacts([item for name in LIVE_GATES for item in gate_results[name]
+                                      if item.get("seed") == seed], source_run)
                 source_passed = source_completed and retained["infrastructure_passed"] and trajectory is not None
                 case["cold_starts"].append({"run": str(source_run), "kind": "source", "passed": source_passed})
                 if not source_passed:
@@ -720,62 +863,30 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                 if plan.tier == "strict" and case.get("full_cycle") is not True:
                     case.update(status="incomplete", replays_skipped="strict source did not complete two flags")
                     continue
-                anchor = trajectory.initial["initialization"]["clock_anchor"]
                 all_cold = True
-                for repeat in range(1, max(2, plan.cold_starts)):
-                    cold_run = root / "experiments/runs" / f"{output.name}-s{seed}-c{repeat}"
-                    destination = output / f"seed-{seed}-replay-{repeat}"
-                    cold_error, replay_result, cold_budget = None, None, None
-                    cold_lifecycle = {}
-
-                    @contextmanager
-                    def initializer(expected, destination):
-                        nonlocal cold_budget
-                        with live_session(root, cold_run.name, plan, seed, lifecycle=cold_lifecycle) as (replay_run, state, replay_client, replay_trace):
-                            _require_production_runtime(replay_client)
-                            add("scenario", state.get("scenario_verified") is True, {"repeat": repeat}, replay_run / "observations/initial.json")
-                            apply_recipe(replay_client, seed, anchor,
-                                         app_update_count=target_from_recipe(expected.initial["initialization"]))
-                            actual_initial = replay_client.request("audit_snapshot")["state"]
-                            difference = first_difference(expected.initial["state"], actual_initial)
-                            write_json(replay_run / "initial-comparison.json", {"equal": difference is None, "difference": difference})
-                            add("initial_state", difference is None, difference, replay_run / "initial-comparison.json")
-                            cold_budget = BoundaryBudget(root, plan, cold=True, report_path=replay_run / "evaluation-resources.json")
-                            cold_budget.check(replay_client.version, force=True)
-                            probe = _pause_probe(replay_client, plan.pause_seconds)
-                            write_json(replay_run / "pause-probe.json", probe)
-                            add("pause_invariance", True, probe, replay_run / "pause-probe.json")
-                            schedule = PauseSchedule(replay_client, replay_run, plan.pause_points)
-                            wrapped = ReplayBoundaryClient(replay_client, cold_budget,
-                                lambda obs: schedule.after_step(obs, skip_reason=cold_budget.stop["reason"] if cold_budget.stop else None))
-                            yield ReplaySession(wrapped, identity_from_launcher(replay_client.hello_result, state), replay_run / "audit")
-                            pause_coverage = schedule.finish()
-                            add("pause_invariance", _coverage_passed(pause_coverage), pause_coverage, replay_run / "pause-probes-during-play.json")
-                            # This records a final over-budget boundary without throwing
-                            # before replay performs its authoritative close-health checks.
-                            cold_budget.check(replay_client.version, enforce=False)
-
-                    try:
-                        replay_result = replay(trajectory, initializer, destination)
-                        if cold_budget is not None:
-                            # Include completed native tail verification in the
-                            # cold wall bound, without interrupting that evidence.
-                            cold_budget.check(cold_budget.last_version, enforce=False)
-                    except Exception as error:
-                        cold_error = error_detail(error, prefer_report=True)
-                        case.setdefault("error", cold_error)
-                    finally:
-                        cold_retained, _ = retain_session(cold_run, "cold", cold_lifecycle, primary=cold_error,
-                            outcome="engine_replay_completed" if replay_result and replay_result.get("equal") else "engine_replay_failed")
-                    equal = replay_result is not None and replay_result.get("equal") is True
-                    passed = equal and cold_retained["infrastructure_passed"] and cold_error is None
-                    case["cold_starts"].append({"kind": "replay", "run": str(cold_run),
-                        "report": str(destination / "replay-report.json"), "passed": passed, "error": cold_error})
-                    add("engine_replay", equal, {"seed": seed, "repeat": repeat}, destination / "replay-report.json")
-                    if not passed:
+                if plan.cold_workers == 1:
+                    def serial_results():
+                        for repeat in range(1, max(2, plan.cold_starts)):
+                            result = run_cold_attempt(root, plan, output, seed, repeat, trajectory)
+                            yield result
+                            if not result["attempt"]["passed"]:
+                                break
+                    results = serial_results()
+                else:
+                    from .cold_workers import run_parallel_colds
+                    results = run_parallel_colds(root, plan, output, seed, source_run, trajectory)
+                for result in results:
+                    if result.get("scheduling"):
+                        case["cold_scheduling"] = result["scheduling"]
+                    case["sessions"].extend(result["sessions"])
+                    case["cold_starts"].append(result["attempt"])
+                    for name, items in result["gates"].items():
+                        gate_results[name].extend(items)
+                    if result.get("error"):
+                        case.setdefault("error", result["error"])
+                    if not result["attempt"]["passed"]:
                         all_cold = False
-                        case["replays_skipped"] = "stopped after first failed cold; existing attempts retained"
-                        break
+                        case["replays_skipped"] = "stopped scheduling after failed cold; all in-flight attempts retained"
                 if not all_cold:
                     case["status"] = "failed"
                     continue
@@ -857,6 +968,7 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("--seeds", default="0,1,42", help="ordered comma-separated uint32 seeds")
     sample.add_argument("--tick-budget", type=int)
     sample.add_argument("--cold-starts", type=int)
+    sample.add_argument("--cold-workers", type=int, choices=(1, 2), default=1)
     sample.add_argument("--timeout-seconds", type=float)
     sample.add_argument("--wall-budget-seconds", type=float)
     sample.add_argument("--cold-wall-budget-seconds", type=float, default=86400)
@@ -878,6 +990,7 @@ def main(argv: list[str] | None = None) -> int:
             strict = args.tier == "strict"
             plan = Plan(tier=args.tier, seeds=tuple(int(seed) for seed in args.seeds.split(',')),
                         cold_starts=args.cold_starts if args.cold_starts is not None else 10 if strict else 1,
+                        cold_workers=args.cold_workers,
                         tick_budget=args.tick_budget if args.tick_budget is not None else 200000 if strict else 1000,
                         timeout_seconds=args.timeout_seconds if args.timeout_seconds is not None else 600 if strict else 90,
                         wall_budget_seconds=args.wall_budget_seconds if args.wall_budget_seconds is not None else 86400 if strict else 3600,

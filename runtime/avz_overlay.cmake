@@ -25,7 +25,7 @@ string(REPLACE "    __APublicAfterScriptHook::RunAll();\n\n    RunTotal();"
   "    __APublicAfterScriptHook::RunAll();\n\n    if (lvz::runtime::Started()) { RunScript(); return; } // Resident runtime must not enter AvZ's recursive lifetime loop.\n    RunTotal();"
   script_source "${script_source}")
 string(REPLACE "void __AScriptManager::ScriptHook() {\n    RunTotal();"
-  "void __AScriptManager::ScriptHook() {\n    if (!lvz::runtime::BeforeFrame()) return;\n    RunTotal();"
+  "void __AScriptManager::ScriptHook() {\n    if (!lvz::runtime::BeforeFrame()) return;\n    RunTotal();\n    if (!lvz::runtime::AfterAvzRunTotal()) return;"
   script_source "${script_source}")
 set(controlled_call_needle "    AAsm::GameTotalLoop();\n    while (__aGameControllor.isSkipTick()")
 string(FIND "${script_source}" "${controlled_call_needle}" controlled_call_position)

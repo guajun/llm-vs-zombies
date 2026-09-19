@@ -4,6 +4,7 @@
 #include "runtime.hpp"
 #include "pipe_server.hpp"
 #include "pump_guard.hpp"
+#include "fp_guard.hpp"
 #include "recorder.hpp"
 #include "determinism/audit.hpp"
 #include "recording/native_capture.hpp"
@@ -148,6 +149,7 @@ public:
                 {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false},
                 {"app_update_anchor",lvz::determinism::silentaudio::Enabled()},{"initial_app_update_anchor_v1",lvz::determinism::silentaudio::Enabled()},
                 {"sound_counter_origin",lvz::determinism::silentaudio::Enabled()},{"sound_effects_counter_origin_v1",lvz::determinism::silentaudio::Enabled()},
+                {"fixed_owner_fp_v1",true},
                 {"sound_effects_allocation_none_v1",lvz::determinism::silentaudio::Enabled()},{"prepare_render",true},{"deterministic_draw_schedule_v1",true},{"controlled_engine_call_v1",true}}}};
     }
     bool RequiresRenderPreparation()const override {return true;}
@@ -175,6 +177,7 @@ public:
     void InvalidateFrame(const std::string& reason)override {frameCache_.Invalidate(reason);}
     void ResetRenderPreparation()override {appAnchor_.Reset();renderPrepared_=seededAtBoundary_=false;frameCache_.Invalidate("epoch_changed");}
     Json RenderFrame(const Json& version,bool warm)override {
+        lvz::determinism::CheckFloatingPoint(warm?lvz::determinism::fpenv::Phase::BeforeWarm:lvz::determinism::fpenv::Phase::BeforeDraw,true);
         lvz::recording::CheckDrawGate();
         if(!Ready()||warm==renderPrepared_)throw std::runtime_error("Controlled drawing preparation/order mismatch");
         const auto beforeRng=lvz::determinism::CaptureRng();
@@ -197,6 +200,7 @@ public:
         frameCache_.Invalidate("render_in_progress");
         auto frame=[&]{lvz::determinism::foleytrace::Phase phase(warm);
             return lvz::recording::CaptureOriginalFrame(ownerThread);}();
+        lvz::determinism::CheckFloatingPoint(warm?lvz::determinism::fpenv::Phase::AfterWarm:lvz::determinism::fpenv::Phase::AfterDraw,true);
         if(!frame.ok)throw std::runtime_error(frame.error);
         const auto afterClocks=lvz::determinism::CaptureClocks();
         if(beforeClocks!=afterClocks||board!=BoardIdentity()||!Ready())
@@ -240,6 +244,7 @@ public:
         return result;
     }
     Json AuditSnapshot() override { return lvz::determinism::CaptureState(); }
+    Json FloatingPointEvidence()override{return lvz::determinism::FloatingPointEvidence();}
     Json RestoreRng(const Json& snapshot) override {
         std::string error;
         bool ok=lvz::determinism::RestoreRng(snapshot,"paused_at_boundary",error);
@@ -261,7 +266,7 @@ public:
 #endif
         lvz::CloseRecording();
     }
-    Json Initialize(const Json& params) override {
+    Json Initialize(const Json& params,const Json& context) override {
         auto reject=[](const char* reason){return Json{{"ok",false},{"error",reason}};};
         int ui=AGetPvzBase()->GameUi();
         if((ui!=0&&ui!=1)||AGetMainObject()) return reject("initialize requires a loaded title screen or the main menu without a Board");
@@ -277,15 +282,21 @@ public:
             if(type>=49&&++imitators>1) return reject("only one imitator card may be selected");
             cards.push_back(type);
         }
-        if(ui==0&&!FinishTitle()) return reject("title screen is still loading or does not match the verified target");
         if(params.contains("seed")) {
             const auto& seed=params.at("seed");
             if(!seed.is_number_integer()||seed.get<int64_t>()<0||seed.get<uint64_t>()>UINT32_MAX) return reject("seed must be uint32");
+        }
+        if(ui==0&&!FinishTitle()) return reject("title screen is still loading or does not match the verified target");
+        auto fp=lvz::determinism::ActivateFloatingPoint(AGetPvzBase()->GameUi(),BoardIdentity(),context);
+        if(!fp.value("ok",false))return {{"ok",false},{"error","Fixed owner FP activation failed"},{"fixed_fp",fp}};
+        if(params.contains("seed")) {
+            const auto& seed=params.at("seed");
             auto seeded=SeedRng(seed.get<uint32_t>());if(!seeded.value("ok",false)) return seeded;
         }
         pendingCards=std::move(cards);cardsSubmitted=false;initializationState="initializing";initializationError.clear();
         AEnterGame(mode,false);
-        return {{"ok",true},{"state","initializing"},{"completion","configuration_applied; poll observation.initialization for fight readiness"}};
+        return {{"ok",true},{"state","initializing"},{"fixed_fp",std::move(fp)},
+            {"completion","configuration_applied; poll observation.initialization for fight readiness"}};
     }
     void Audit(const std::string& kind,const Json& payload,const Json& observation) override {
         if(payload.contains("_engine_call_raw")) {auto semantic=payload;semantic.erase("_engine_call_raw");lvz::RecordRuntime(kind,semantic.dump());}
@@ -334,8 +345,12 @@ bool BeforeFrameImpl() {
     // mutate/complete the outer call. The outer wrapper reports this fault.
     if(!controller->GuardEngineEntry())return false;
     CheckThread();
-    if(!CheckPumpGate(*controller,[]{controller->CheckEngineGuard();lvz::recording::CheckDrawGate();},[]{server->Drain(*controller);}))return false;
-    if(initializationState=="initializing") FinishContinueDialog();
+    if(!CheckPumpGate(*controller,[]{controller->CheckEngineGuard();lvz::recording::CheckDrawGate();
+        lvz::determinism::CheckFloatingPoint(lvz::determinism::fpenv::Phase::Loop);},[]{server->Drain(*controller);}))return false;
+    if(initializationState=="initializing") {
+        FinishContinueDialog();
+        lvz::determinism::CheckFloatingPoint(lvz::determinism::fpenv::Phase::Initialization,true);
+    }
     bool fight=backend.Ready();
     if(wasFight&&!fight) {
         __APublicExitFightHook::RunAll();
@@ -344,13 +359,15 @@ bool BeforeFrameImpl() {
     if(!wasFight&&fight) {
         // Populate AvZ's card index and EnterFight hooks before the first paused observation.
         __aScriptManager.RunTotal();
+        lvz::determinism::CheckFloatingPoint(lvz::determinism::fpenv::Phase::Ready,true);
         if(initializationState=="initializing") initializationState="ready";
     }
     wasFight=fight;
     if(initializationState=="initializing"&&!cardsSubmitted&&AGetPvzBase()->GameUi()==2&&AGetMainObject()&&__aScriptManager.isLoaded) {
         if(static_cast<int>(pendingCards.size())!=AGetMainObject()->SeedArray()->Count()) {
             initializationState="error";initializationError="cards count must exactly equal available slots; random autofill is forbidden";
-        } else { ASelectCards(pendingCards,1);cardsSubmitted=true; }
+        } else { ASelectCards(pendingCards,1);cardsSubmitted=true;
+            lvz::determinism::CheckFloatingPoint(lvz::determinism::fpenv::Phase::Initialization,true); }
     }
     controller->Boundary();server->Drain(*controller);
     return controller->ShouldStep();
@@ -359,14 +376,25 @@ bool BeforeFrame() {
     try { return BeforeFrameImpl(); }
     catch(const std::exception& error) { if(controller) controller->Fail(error.what());return false; }
 }
+bool AfterAvzRunTotal() {
+    if(!controller)return true;
+    return CheckPumpGate(*controller,[]{lvz::determinism::CheckFloatingPoint(lvz::determinism::fpenv::Phase::Initialization);},
+        []{server->Drain(*controller);});
+}
 bool RunOneEngineFrame() {
     if(!controller) {AAsm::GameTotalLoop();return true;}
     try {
-        CheckThread();return controller->RunEngineFrame([] {
+        CheckThread();
+        lvz::determinism::CheckFloatingPoint(lvz::determinism::fpenv::Phase::BeforeUpdate);
+        return controller->RunEngineFrame([] {
 #ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
             lvz::flagfixture::BeforeOriginalUpdate(controller->EngineCallHealth(),controller->Version(),backend.Ready());
 #endif
             AAsm::GameTotalLoop();
+            // The original call has returned. Record a drift while the wrapper
+            // still marks it in-flight, then return normally so AfterStep keeps
+            // its actual entered/returned call and measured clock count.
+            CheckReturnedFloatingPoint(*controller,[]{lvz::determinism::CheckFloatingPoint(lvz::determinism::fpenv::Phase::AfterUpdate);});
 #ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
             lvz::flagfixture::AfterOriginalUpdate(controller->EngineCallHealth(),controller->Version(),backend.Ready());
 #endif
