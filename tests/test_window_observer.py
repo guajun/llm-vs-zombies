@@ -168,19 +168,42 @@ class ObserverTests(unittest.TestCase):
                   'sys.path.insert(0,sys.argv[2]); '
                   'from llm_vs_zombies.window_observer import LaunchWindowMonitor; '
                   'm=LaunchWindowMonitor(pid=os.getpid(),evidence_directory=Path(sys.argv[1])); '
-                  'm.__enter__(); os._exit(23)')
-        parent = subprocess.run([sys.executable, '-c', script, str(directory),
-            str(Path(observer.__file__).resolve().parents[1])], stdin=subprocess.DEVNULL,
-            capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
-        self.assertEqual(parent.returncode, 23, parent.stderr)
-        deadline = time.monotonic() + 3
-        while not (directory / 'sealed.json').exists() and time.monotonic() < deadline:
-            time.sleep(.01)
-        seal = observer._read(directory / 'sealed.json')
-        self.assertEqual(seal['stop_reason'], 'parent_exited')
-        self.assertGreaterEqual(seal['samples'], 1)
-        self.assertFalse((directory / 'observer.lock').exists())
-        self.assertTrue((directory / 'samples.jsonl').is_file())
+                  'm.__enter__(); sys.stdin.buffer.read(1); os._exit(23)')
+        with subprocess.Popen([sys.executable, '-c', script, str(directory),
+            str(Path(observer.__file__).resolve().parents[1])], stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW) as parent:
+            worker = None
+            try:
+                deadline = time.monotonic() + 8
+                while not (directory / 'ready.json').exists():
+                    self.assertIsNone(parent.poll(), 'fixture parent exited before observer readiness')
+                    self.assertLess(time.monotonic(), deadline, 'fixture observer startup timed out')
+                    time.sleep(.01)
+                ready = observer._read(directory / 'ready.json')
+                # Keep this exact process object alive while the fixture parent
+                # waits. A PID-only lookup after parent death could race exit.
+                worker = observer.ProcessIdentity(ready['owner']['pid'])
+                self.assertEqual(worker.value, ready['owner'])
+                self.assertEqual(ready['parent']['pid'], parent.pid)
+                _, stderr = parent.communicate(input=b'x', timeout=8)
+                self.assertEqual(parent.returncode, 23, stderr)
+                # The worker seals evidence before interpreter/stdio shutdown.
+                # Wait for real exit, not sealed.json, before deleting stderr.log.
+                self.assertEqual(worker.api.WaitForSingleObject(worker.handle, 3000), 0,
+                    'owned observer did not exit within 3 seconds after parent death')
+                seal = observer._read(directory / 'sealed.json')
+                self.assertEqual(seal['owner'], worker.value)
+                self.assertEqual(seal['stop_reason'], 'parent_exited')
+                self.assertGreaterEqual(seal['samples'], 1)
+                self.assertFalse((directory / 'observer.lock').exists())
+                self.assertTrue((directory / 'samples.jsonl').is_file())
+            finally:
+                if parent.poll() is None:
+                    parent.kill()
+                    parent.wait(timeout=3)
+                if worker is not None:
+                    worker.close()
 
 
 if __name__ == '__main__': unittest.main()
