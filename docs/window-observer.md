@@ -93,8 +93,8 @@ Old seals without these diagnostics remain readable. This fix does not explain
 or excuse the separate slow probes retained in run047.
 
 `tests/test_window_control_io.py` exercises actual Windows held-reader
-replacement,400 publications with three concurrent readers (each publication
-acknowledged by at least one reader), recovery from a short exclusive lock,
+replacement, 400 publications delivered to each of three readers (all three
+acknowledge before the next publication, without busy polling), recovery from a short exclusive lock,
 permanent lock/missing-file failures, retained failed-publication bytes, and
 a failed worker seal after a real raw prefix. An unbounded tight publisher
 flood can exhaust the retry budget and correctly remains failure. These are
