@@ -6,6 +6,7 @@ All sampling evidence is retained; errors and gaps never become successful proof
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -114,11 +115,97 @@ SCHEMA = "lvz.window-observer.v1"
 MAX_SAMPLES = 4_000_000
 MAX_BYTES = 2 * 1024**3
 MAX_DURATION = 86400.0
+CONTROL_READ_ATTEMPTS = 8
+CONTROL_READ_RETRY_SECONDS = 0.050
+CONTROL_READ_RETRY_INTERVAL = 0.005
 
 
 def _read(path):
     with Path(path).open(encoding="utf-8") as stream:
         return json.load(stream)
+
+
+@lru_cache(maxsize=1)
+def _control_file_api():
+    import ctypes
+    from ctypes import wintypes
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                               wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.ReplaceFileW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID]
+    api.ReplaceFileW.restype = wintypes.BOOL
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    return api
+
+
+def _open_control(path):
+    """Read one atomic old/new file while allowing the parent to replace it."""
+    if os.name != "nt":
+        return Path(path).open(encoding="utf-8")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    api = _control_file_api()
+    # Python's ordinary CRT open does not share deletion on Windows. Holding
+    # that read handle can make a simultaneous os.replace fail, and opening a
+    # destination being replaced can itself hit a transient sharing error.
+    handle = api.CreateFileW(str(Path(path)), 0x80000000, 0x1 | 0x2 | 0x4,
+                             None, 3, 0x80, None)  # READ; share READ/WRITE/DELETE; OPEN_EXISTING
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+    try:
+        return os.fdopen(fd, "r", encoding="utf-8")
+    except BaseException:
+        os.close(fd)  # fd owns the Win32 handle after open_osfhandle succeeds.
+        raise
+
+
+def _read_control(path, evidence):
+    """Bound transient Win32 retries without changing any sampling timestamp."""
+    started = time.monotonic()
+    failures = 0
+    while True:
+        evidence["attempts"] += 1
+        try:
+            with _open_control(path) as stream:
+                value = json.load(stream)
+        except OSError as error:
+            # ReplaceFileW can also expose a brief name-lookup gap. Retry only
+            # these native Windows codes; permanent missing/denied files still
+            # fail within the same bound. Bad JSON and other errors stop now.
+            if getattr(error, "winerror", None) not in (2, 5, 32, 33):
+                raise
+            failures += 1
+            evidence["transient_failures"] += 1
+            elapsed = time.monotonic() - started
+            evidence["maximum_retry_duration_seconds"] = max(
+                evidence["maximum_retry_duration_seconds"], elapsed)
+            if len(evidence["failures"]) < 32:
+                evidence["failures"].append({"monotonic_seconds": time.monotonic(),
+                    "attempt": failures, "winerror": error.winerror,
+                    "errno": error.errno, "error": f"{type(error).__name__}: {error}"})
+            if failures >= CONTROL_READ_ATTEMPTS or elapsed >= CONTROL_READ_RETRY_SECONDS:
+                raise  # The worker seals the real error and cannot pass.
+            time.sleep(min(CONTROL_READ_RETRY_INTERVAL, CONTROL_READ_RETRY_SECONDS - elapsed))
+            elapsed = time.monotonic() - started
+            evidence["maximum_retry_duration_seconds"] = max(
+                evidence["maximum_retry_duration_seconds"], elapsed)
+            if elapsed >= CONTROL_READ_RETRY_SECONDS:
+                raise
+        else:
+            if failures:
+                evidence["recovered_reads"] += 1
+                evidence["maximum_retry_duration_seconds"] = max(
+                    evidence["maximum_retry_duration_seconds"], time.monotonic() - started)
+            return value
 
 
 def _write(path, value):
@@ -128,6 +215,28 @@ def _write(path, value):
         json.dump(value, stream, ensure_ascii=False, allow_nan=False)
         stream.write("\n")
     os.replace(temporary, path)
+
+
+def _write_control(path, value):
+    """Publish only the owned mutable control file; other evidence is unchanged."""
+    path = Path(path)
+    if path.name != "control.json":
+        raise ValueError("control publisher requires control.json")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, ensure_ascii=False, allow_nan=False)
+        stream.write("\n")
+    if os.name == "nt" and path.is_file():
+        # MoveFileEx (os.replace) can deny replacement of an open destination
+        # even when its reader shares deletion. ReplaceFile preserves the old
+        # handle's snapshot while publishing the complete replacement by name.
+        # On failure retain the temporary file and original OS error; never
+        # delete/recreate the destination or fall back to non-atomic writes.
+        import ctypes
+        if not _control_file_api().ReplaceFileW(str(path), str(temporary), None, 0, None, None):
+            raise ctypes.WinError(ctypes.get_last_error())
+    else:
+        os.replace(temporary, path)
 
 
 def _hash(path):
@@ -183,8 +292,10 @@ def _worker(directory, token):
     started, last_seq = time.monotonic(), -1
     first_sample = last_sample = None
     source_hash = _hash(Path(__file__))
+    control_reads = {"attempts": 0, "transient_failures": 0, "recovered_reads": 0,
+                     "maximum_retry_duration_seconds": 0.0, "failures": []}
     try:
-        control = _read(directory / "control.json")
+        control = _read_control(directory / "control.json", control_reads)
         if control.get("token") != token or control.get("schema") != SCHEMA:
             raise ValueError("observer control identity mismatch")
         parent = ProcessIdentity(control["parent"]["pid"])
@@ -197,7 +308,7 @@ def _worker(directory, token):
         next_sample = started
         with (directory / "samples.jsonl").open("xb") as output:
             while True:
-                control = _read(directory / "control.json")
+                control = _read_control(directory / "control.json", control_reads)
                 if (control.get("schema") != SCHEMA or control.get("token") != token
                         or control.get("parent") != parent.value or control.get("interval_seconds") != interval
                         or type(control.get("seq")) is not int or control["seq"] < last_seq
@@ -264,6 +375,7 @@ def _worker(directory, token):
             "target": target_identity, "source_sha256": source_hash,
             "stop_reason": reason, "samples": count, "bytes": byte_count, "sha256": digest.hexdigest(),
             "errors": errors, "error_count": error_count,
+            "control_reads": control_reads,
             "first_sample_seconds": first_sample["monotonic_seconds"] if first_sample else None,
             "last_sample_finished_seconds": last_sample["probe_finished_seconds"] if last_sample else None}
         for process in (target, owner, parent):
@@ -316,7 +428,7 @@ class LaunchWindowMonitor:
             raise RuntimeError("game process identity cannot change")
         self.pid = pid
         self.control.update(target=target, seq=self.control["seq"] + 1)
-        _write(self.directory / "control.json", self.control)
+        _write_control(self.directory / "control.json", self.control)
 
     def __enter__(self):
         try:
@@ -347,7 +459,7 @@ class LaunchWindowMonitor:
                 "seq": 0, "target": None, "stop": False, "interval_seconds": self.interval_seconds}
         finally:
             parent.close()
-        _write(self.directory / "control.json", self.control)
+        _write_control(self.directory / "control.json", self.control)
         if self.pid is not None:
             self.bind_pid(self.pid)
         (self.directory / "observer.lock").write_text(self.control["token"], encoding="ascii")
@@ -390,7 +502,7 @@ class LaunchWindowMonitor:
             if self.process is not None:
                 try:
                     self.control.update(stop=True, seq=self.control["seq"] + 1)
-                    _write(self.directory / "control.json", self.control)
+                    _write_control(self.directory / "control.json", self.control)
                 except Exception as error:
                     self.errors.append(f"observer stop command: {error}")
                 try:

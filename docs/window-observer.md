@@ -65,6 +65,44 @@ final sample. Samples cannot be reordered to hide bad chronology. System-wide
 scheduling or disk stalls can still exceed 250ms and remain unverified. Finite
 sampling remains unable to exclude activation between reads.
 
+Windows control-file publication now has a separate path from immutable ready
+and sealed evidence. The worker opens `control.json` with read/write/delete
+sharing; the parent publishes a completed temporary file with `ReplaceFileW`
+when the destination already exists. Its initial creation still uses
+`os.replace`. Existing read handles retain the old complete document. The
+ordinary `_write` used for ready/sealed evidence is unchanged. A publication
+error is propagated, and any complete temporary file is retained; there is no
+delete/recreate or partial-write fallback.
+
+A simultaneous name lookup can still fail transiently during replacement.
+Only native Windows errors 2, 5, 32 and 33 are retried, with at most eight
+attempts and a 50ms retry budget, waiting at most 5ms between attempts. There
+is no retry of malformed JSON or unrelated errors. A permanent missing or
+inaccessible control file stops the worker and preserves a failed seal and
+the original sample prefix. OS calls themselves cannot be forcibly bounded by
+this retry budget; their real elapsed time is still subject to the existing
+sample/probe checks.
+
+The seal's additive `control_reads` diagnostics retain attempt count, transient
+failure count, recovered-read count, maximum retry duration and the first32
+error records (time, attempt, Win32/errno code and original message). Later
+errors still contribute to the full count. Recovery does not create a sample,
+reuse an old control document, change timestamps or reset the sampling clock.
+The25ms interval and250ms maximum actual gap/probe duration remain unchanged.
+Old seals without these diagnostics remain readable. This fix does not explain
+or excuse the separate slow probes retained in run047.
+
+`tests/test_window_control_io.py` exercises actual Windows held-reader
+replacement,400 publications with three concurrent readers (each publication
+acknowledged by at least one reader), recovery from a short exclusive lock,
+permanent lock/missing-file failures, retained failed-publication bytes, and
+a failed worker seal after a real raw prefix. An unbounded tight publisher
+flood can exhaust the retry budget and correctly remains failure. These are
+file-I/O fixtures, not game acceptance. The choice of replacement API follows
+the documented distinction between
+[moving and replacing files](https://learn.microsoft.com/en-us/windows/win32/fileio/moving-and-replacing-files)
+and is tested against this Windows host rather than inferred from flags alone.
+
 `tests/test_window_observer.py` includes an actual Windows observer while its
 parent runs CPU work with a long Python thread-switch interval, parent/body
 failure cleanup, and reader/startup/shutdown/corrupt-output fixtures. These tests
