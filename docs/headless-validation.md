@@ -258,3 +258,28 @@ B0实测110组历史、880个Foley槽及32个声道均为空，保留原始变�
 锁定二进制证实`Board+0x5D0`为雾偏移的x87运算写入，`Zombie+0x124`为原始动画速率；控制字差异对应53位与24位运算精度。原版图形初始化存在未指定FPU保存标志的调用，但这只是候选机制，不是DirectDraw或新宿主造成本次差异的实证。提取报告 `work/048-fp-evidence/summary.json` SHA256为 `9ec09959571b4f4c2596bbf1fb22a3982102fc50043f2fb7f9ebb5b6601fef80`，静态复核 `work/048-fp-independent/analysis.md` 为 `738a59410ecdcc0b95004da0cfa91584525d515b0a8171f5ab6325704485fe25`。这些是本机私有报告的身份引用；不发布游戏二进制或完整审计数据。
 
 [#22](https://github.com/guajun/llm-vs-zombies/issues/22)的最小候选是在无Board的游戏主线程上，完成标题处理后、场景seed和`AEnterGame`前固定x87为`0x027f`、MXCSR控制位为`0x1f80`，记录真实激活前后值，并在异步加载、ready、warm、受控更新和绘制边界持续验证。上述对象随后才创建或由原版存档恢复，未发现这七项中有必须更早修复且不会重建的已捕获字段。此前加载的全局定义、缓存及PoolEffect仍未证明受此模式覆盖；不据此扩称完整内存确定性。该方案尚未实现或实机通过，须以明确新模式录制新来源、严格比较完整B0及后续重放；不在B0补改已计算值、不删除浮点字段、不升级048或其他旧失败档。
+
+## 固定浮点模式的首次真实公开短程（051）
+
+#22实现与#19公开并行cold worker在`work/public-cold-integration-tree`（基线`4228e62`）合并后，root执行了公开runner的真实短程。本轮不追加私有驱动，只使用公开`llm_vs_zombies.evaluation run`入口，计划为`work/public-fp-preflight-3ticks.json`（SHA256 `5310ba1d732fef0c2a377d214d56519e1927b1c893517f9937cb124e9a2aae0d`）：1个3 tick源录制、2个并行cold、1个独立recovery。离线部分为374项Python测试（56.594秒）与17项CTest（71.21秒）全部通过。
+
+前两次真实运行分别暴露两个配对缺陷，均原档保留、不追改旧档：
+
+- `public-fp-preflight-001`：源实验在B0暂停扰动处真实失败。原因是新模式的`audit_snapshot`每次读取都会新增一条monitor检查、主循环检查也随宿主墙钟推进，整份snapshot字节相等不再可能成立。修复后暂停探针逐字段比较已捕获模拟`state`与`version`，再单独核验激活回执未变、after侧monitor健康且`last_raw`仍在目标控制位；比较范围写入probe记录。该次未执行任何受控更新。
+- `public-fp-preflight-002`：源实验本身通过（`tick_budget_exhausted`），但两个cold回执被父进程以`worker gate artifact changed/foreign`拒绝。原因是scenario门槛在`apply_recipe`重写同一个`observations/initial.json`之前记录哈希；source侧此前从不二次核验，所以这个过期哈希一直存在，而worker回执由父进程严格复核。修复后source与cold都在`apply_recipe`之后记录该门槛，并由`verify_run_artifacts`在source会话结束及每个cold attempt返回前复核run目录内全部门槛产物。
+
+`public-fp-preflight-003`通过：`cold_starts_attempted=3`、`cold_starts_verified=3`、`failed_cases=0`，除smoke专门排除的`full_cycle`、`ten_cold_starts`、`strict_suite_not_requested`外全部门槛为pass。关键的实测值：
+
+| 项目 | 源 | cold 1 | cold 2 |
+|---|---:|---:|---:|
+| outcome | `tick_budget_exhausted` | `engine_replay_completed` | `engine_replay_completed` |
+| `equal` | — | true | true |
+| 浮点激活回执比较 | — | true | true |
+| 已核验原始FP边界 | 6条 | 6条 | 6条 |
+| 关闭health核验 | 通过 | 通过 | 通过 |
+| 运行期窗口最大间隔 | 26.09ms | 25.95ms | 26.31ms |
+| 启动期窗口最大间隔 | 30.73ms | 30.56ms | 27.68ms |
+
+三个进程的激活回执都是：`before.x87_control=127`、`after.x87_control=639`、`after.mxcsr_control=8064`、`activation_count=1`、`game_ui=1`、`board_address=0`、实际线程等于owner线程；关闭health均为`healthy=true`、`first_fault=null`、`wrong_thread_checks=0`、`last_raw`仍在目标控制位。每个进程的owner线程ID、loop/snapshot检查次数和sticky flags保持为本机原始旁证，不参与跨进程比较；`state`逐字段严格比较、不做容差。两个cold各自完整执行源请求并`equal=true`，实测正推进RPC交叠20.89ms（仅表示区间交叠，不表示CPU指令同时执行）。recovery按原已接受请求ID解析、失败动作推进0 tick、随后恢复推进1 tick，窗口最大间隔75.90ms（启动段）/26.01ms（运行段）。
+
+完整身份、逐文件哈希、窗口与门槛明细见本机报告 `work/public-fp-preflight-003-review.json`；原始归档位于 `work/public-cold-integration-tree/experiments/runs/public-fp-preflight-003*`，按公开仓库规则不上传。该结果只验收这一新模式、种子42、3 tick公共入口的短程与并行管线，`experiment_ready` 仍为false；完整5000 tick、自然终局、两旗胜利与十次冷启动仍待完成，047/048及本次001/002的失败结论保持不变。

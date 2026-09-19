@@ -79,3 +79,16 @@
 048在worker A的B0严格比较失败，未执行受控更新，worker B未启动。同一E014模块下，041的x87控制字为`0x027f`，048为`0x007f`；另外六处原始浮点字段也不同，七处差异在首份配方前快照已全部形成。050两局都为`0x007f`且相互一致，不能证明能重放041。现有记录未捕获控制字的最初写入者，不将其归因于DirectDraw或宿主变化。
 
 #22候选是在无Board的游戏主线程上、场景初始化之前固定x87与MXCSR控制模式，记录真实激活回执并持续校验；此前加载的全局资源仍属明确的未证明范围。当前只有静态方案，尚未实现或实机通过；后续必须录制新来源并严格比较完整B0与重放，不用容差、删字段或修改旧档消除差异。精确字段、哈希及证据范围见[048浮点初态失败](headless-validation.md#浮点初态严格比较失败048)。
+
+## 051： #22与#19合并及首次公开并行短程
+
+#22固定owner浮点模式（`fixed_owner_fp_v1`）与#19公开并行cold worker两份已独立审查的草稿已在 `work/public-cold-integration-tree`（基线`4228e62`）合并，合并结果`106239f`进入main。离线为374项Python测试（56.594秒）与17项CTest（71.21秒）全部通过；原生FP fixture通过。旧档、旧失败与旧结论均未改写。
+
+首次真机运行暴露并修复两个配对缺陷，都不放宽门槛：
+
+- `audit_snapshot`在新模式下每次读取都新增一条monitor检查，整份snapshot字节相等不再成立；暂停探针改为逐字段比较已捕获模拟`state`与`version`，再单独核验激活回执未变与after侧monitor健康、控制位仍在目标值，比较范围写入probe。该缺陷使`public-fp-preflight-001`在B0暂停真实失败，原档保留。
+- scenario门槛此前在`apply_recipe`重写同一个`observations/initial.json`之前记录哈希；source侧从不二次核验，cold回执则由父进程证伪为`worker gate artifact changed/foreign`，`public-fp-preflight-002`的两个cold因此被拒。现在source与cold都在`apply_recipe`之后记录该门槛，并新增`verify_run_artifacts`在source会话结束与每个cold attempt返回前复核run目录内全部门槛产物。
+
+修复后`public-fp-preflight-003`真实通过：3 tick源加2个并行cold加独立recovery，3/3 cold starts verified、0 failed cases，除smoke专门排除的`full_cycle`/`ten_cold_starts`/`strict_suite_not_requested`外全部门槛为pass。两个cold都`equal=true`，完成完整B0与3个正时钟更新边界的逐项比较，各自6条原始FP边界与关闭health通过，实测正推进RPC交叠20.89ms，窗口最大间隔26–76ms（门槛250ms）。逐文件身份与全部门槛明细见[固定浮点模式首次真实公开短程](headless-validation.md#固定浮点模式的首次真实公开短程051)。
+
+这只验收该新模式、种子42、3 tick公共入口的短程与并行管线，`experiment_ready=false`。公开5000 tick、自然终局、完整两旗与十次冷启动仍待完成；047/048以及本次001/002的失败不得升级为通过。
