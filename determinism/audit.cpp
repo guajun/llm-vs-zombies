@@ -234,6 +234,8 @@ bool ValidateTargetImage() noexcept {
         || nt.FileHeader.Machine!=IMAGE_FILE_MACHINE_I386
         || nt.OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR32_MAGIC
         || nt.OptionalHeader.ImageBase!=0x400000
+        // Minimum extent used by this legacy scalar adapter, not an exact PE
+        // identity: the locked image is 0x394000 including its .rsrc section.
         || nt.OptionalHeader.SizeOfImage<0x35e000) return false;
     return TargetSignatures();
 }

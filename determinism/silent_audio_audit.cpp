@@ -100,7 +100,7 @@ Json SnapshotImpl(){
         if(type<count){const auto p=params+type*0x34;Json ids=Json::array(),rvas=Json::array();
             if(Read<uint32_t>(p)!=type)throw std::runtime_error("silent audio Foley type table changed");
             for(unsigned i=0;i<10;++i){auto address=Read<uint32_t>(p+8+i*4);
-                if(address&&(address<0x400000||address>=0x75dffc))throw std::runtime_error("silent audio sound resource outside target image");
+                if(address&&(address<contract::ImageBase||!contract::SoundIdRvaValid(address-contract::ImageBase)))throw std::runtime_error("silent audio sound resource outside target image");
                 rvas.push_back(address?Json(address-0x400000):Json(nullptr));ids.push_back(address?Json(Read<uint32_t>(address)):Json(nullptr));}
             parameterState.push_back({{"type",type},{"pitch_bits",Read<uint32_t>(p+4)},
                 {"flags",Read<uint32_t>(p+0x30)},{"sound_id_rvas",std::move(rvas)},{"sound_ids",std::move(ids)}});

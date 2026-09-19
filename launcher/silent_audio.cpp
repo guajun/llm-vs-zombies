@@ -58,13 +58,13 @@ bool Requested() {
 }
 bool ValidateImage(const uint8_t* base,size_t length,bool pristine,std::string& error) {
     auto fail=[&](const char* why){error=why;return false;};
-    if(!base||length<0x35e000)return fail("audio image size mismatch");
+    if(!base||length<ImageSize)return fail("audio image size mismatch");
     IMAGE_DOS_HEADER dos;std::memcpy(&dos,base,sizeof(dos));
     if(dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<64||dos.e_lfanew>0x1000)return fail("audio DOS header mismatch");
     IMAGE_NT_HEADERS32 nt;std::memcpy(&nt,base+dos.e_lfanew,sizeof(nt));
     if(nt.Signature!=IMAGE_NT_SIGNATURE||nt.FileHeader.Machine!=IMAGE_FILE_MACHINE_I386
         ||nt.OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR32_MAGIC||nt.OptionalHeader.ImageBase!=0x400000
-        ||nt.OptionalHeader.SizeOfImage!=0x35e000)return fail("audio PE identity mismatch");
+        ||nt.OptionalHeader.SizeOfImage!=ImageSize)return fail("audio PE identity mismatch");
     // Locked RVA evidence includes the complete entry, both ret-4 exits, original
     // virtual slot, and Foley's call/null branch. No guessed function address.
     constexpr uint8_t entry[]={0x55,0x8b,0xec,0x83,0xe4,0xc0,0x6a,0xff,0x68,0xd6,0xf9,0x63,0x00};
@@ -86,7 +86,7 @@ bool Install(const Activation* activation,std::string& error) {
         if(reinterpret_cast<uintptr_t>(base)!=0x400000)throw std::runtime_error("audio image relocation unsupported");
         MEMORY_BASIC_INFORMATION region{};
         if(!VirtualQuery(base,&region,sizeof(region))||region.AllocationBase!=base)throw std::runtime_error("audio image mapping unavailable");
-        if(!ValidateImage(base,0x35e000,true,error))return false;
+        if(!ValidateImage(base,ImageSize,true,error))return false;
         // LawnApp and SexyApp must not have been constructed. There is no late
         // reset/StopAllSounds fallback. Launcher still owns the suspended thread.
         uint32_t app=0,sexy=0;std::memcpy(&app,base+0x2a9ec0,4);std::memcpy(&sexy,base+0x2a9f38,4);

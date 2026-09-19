@@ -7,6 +7,13 @@ namespace lvz::silentaudio {
 inline constexpr char Mode[]="sound_effects_allocation_none_v1";
 inline constexpr wchar_t ModeW[]=L"sound_effects_allocation_none_v1";
 inline constexpr char EngineSha256[]="f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322";
+// Locked file PE SizeOfImage includes .rsrc; the earlier 0x35e000 dump
+// intentionally stopped at .rsrc and is not the full image size.
+inline constexpr uint32_t ImageBase=0x400000,ImageSize=0x394000;
+// Sound ID pointers refer to uint32 globals in .data (including its zero-fill
+// tail), not arbitrary resources/code or the entire image. End is exclusive.
+inline constexpr uint32_t SoundIdDataBeginRva=0x299000,SoundIdDataEndRva=0x35dc1c;
+inline constexpr bool SoundIdRvaValid(uint32_t rva){return rva>=SoundIdDataBeginRva&&rva<=SoundIdDataEndRva-4;}
 inline constexpr uint32_t Magic=0x41565a4c,Version=1,Target=0x5c7650;
 inline constexpr uint8_t Original[]={0x55,0x8b,0xec,0x83,0xe4,0xc0};
 struct Activation {uint32_t size=sizeof(Activation),magic=Magic,version=Version,primaryThread=0;};

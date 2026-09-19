@@ -47,7 +47,7 @@ def sound_state(tick=0):
         "active_types": 1,
         "histories": [{"last_variation": 0xffffffff, "slots": [[0, 0, 0, 800, 3] for _ in range(8)]} for _ in range(110)],
         "parameters": [{"type": 0, "pitch_bits": 0, "flags": 4,
-                        "sound_id_rvas": [0x1000, *([None] * 9)], "sound_ids": [9, *([None] * 9)]}],
+                        "sound_id_rvas": [0x2a71a0, *([None] * 9)], "sound_ids": [9, *([None] * 9)]}],
         "channels": [0] * 32, "slots_empty": True, "patch_owned": True}
 
 
@@ -108,6 +108,18 @@ class AudioTransport(CallTransport):
 
 
 class SoundEffectsTests(unittest.TestCase):
+    def test_sound_id_word_must_fit_actual_data_section(self):
+        for rva in (0x299000, 0x35dc18):
+            value = sound_state()
+            value["parameters"][0]["sound_id_rvas"][0] = rva
+            audio.state({"sound_effects": value}, {"sound_effects": SPEC})
+        for rva in (0x1000, 0x298fff, 0x35dc19, 0x35e000, 0x393ffc):
+            with self.subTest(rva=hex(rva)):
+                value = sound_state()
+                value["parameters"][0]["sound_id_rvas"][0] = rva
+                with self.assertRaises(EvidenceError):
+                    audio.state({"sound_effects": value}, {"sound_effects": SPEC})
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

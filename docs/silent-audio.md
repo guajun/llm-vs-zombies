@@ -89,7 +89,20 @@ prevent a successful recording close.
 
 Original engine SHA-256:
 `f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322`.
-All addresses below are VAs in its image at `0x400000`.
+All addresses below are VAs in its image at `0x400000`. Its real PE
+`SizeOfImage` is `0x394000`. The older private memory dump covered only
+`0x35e000` bytes, ending at the start of `.rsrc`; its length is not an exact
+PE identity. Sound ID globals are separately restricted to the actual `.data`
+RVA interval `[0x299000, 0x35dc1c)`, including zero-fill, with room for a whole
+four-byte word. The old scalar adapter's `>=0x35e000` check remains a minimum
+extent, not an exact-size check.
+
+`build/silent_audio_tests.exe --verify-pe game/local-engine/PlantsVsZombies.exe`
+verifies the locked file SHA-256, maps its sections in an ordinary byte vector
+without loading or executing the game, invokes the compiled bootstrap image
+validator, and emits the PE headers/section extents and all Foley sound-ID
+pointer range checks as JSON. This catches header/dump-length confusion that
+an invented matching PE fixture alone cannot detect.
 
 | Evidence | Address / bytes |
 | --- | --- |

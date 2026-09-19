@@ -147,7 +147,7 @@ def state(value, game):
         rvas, ids = param["sound_id_rvas"], param["sound_ids"]
         if not isinstance(rvas, list) or not isinstance(ids, list) or len(rvas) != 10 or len(ids) != 10:
             fail("sound resource parameter evidence missing")
-        if any((r is None) != (s is None) or (r is not None and (not uint(r) or r >= 0x35dffc or not uint(s))) for r, s in zip(rvas, ids)):
+        if any((r is None) != (s is None) or (r is not None and (not uint(r) or not 0x299000 <= r <= 0x35dc18 or not uint(s))) for r, s in zip(rvas, ids)):
             fail("invalid sound resource identity")
     if sound["channels"] != [0] * 32 or any(type(n) is not int for n in sound["channels"]):
         fail("manager channels are not actually empty")

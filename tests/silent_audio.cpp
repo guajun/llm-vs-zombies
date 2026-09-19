@@ -2,6 +2,8 @@
 #include "launcher/file_hash.hpp"
 #include "determinism/silent_audio_audit.hpp"
 #include <array>
+#include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <cstring>
 #include <thread>
@@ -26,7 +28,45 @@ using Json=nlohmann::json;
 unsigned failure=0;
 Json HealthSnapshot(){if(failure)throw std::runtime_error(failure==1?"audio errors/wrong-thread":"audio patch lost/unreadable");return {{"calls",12}};}
 DWORD WINAPI HealthQuery(void* value){auto& s=*static_cast<lvz::silentaudio::Status*>(value);s.calls=12;s.errors=failure==1;s.patchOwned=!failure;s.entry=0x5c7650;return 0;}
-int main(){using namespace lvz::silentaudio;try{
+int main(int argc,char** argv){using namespace lvz::silentaudio;try{
+    if(argc==3&&!std::strcmp(argv[1],"--verify-pe")){
+        const std::filesystem::path path=argv[2];const auto hash=FileSha256(path.wstring().c_str());
+        Check(hash==EngineSha256,"offline locked engine hash mismatch");
+        std::ifstream input(path,std::ios::binary);std::vector<uint8_t> file((std::istreambuf_iterator<char>(input)),{});
+        Check(file.size()>sizeof(IMAGE_DOS_HEADER),"offline truncated DOS");
+        IMAGE_DOS_HEADER dos{};std::memcpy(&dos,file.data(),sizeof(dos));
+        Check(dos.e_lfanew>=0&&size_t(dos.e_lfanew)+sizeof(IMAGE_NT_HEADERS32)<=file.size(),"offline truncated NT headers");
+        IMAGE_NT_HEADERS32 nt{};std::memcpy(&nt,file.data()+dos.e_lfanew,sizeof(nt));
+        Check(nt.OptionalHeader.SizeOfImage==ImageSize&&nt.OptionalHeader.SizeOfHeaders<=file.size(),"offline PE image extent");
+        std::vector<uint8_t> image(nt.OptionalHeader.SizeOfImage);
+        std::memcpy(image.data(),file.data(),nt.OptionalHeader.SizeOfHeaders);
+        const auto sectionOffset=dos.e_lfanew+24+nt.FileHeader.SizeOfOptionalHeader;Json sections=Json::array();
+        for(unsigned i=0;i<nt.FileHeader.NumberOfSections;++i){
+            IMAGE_SECTION_HEADER section{};const auto offset=sectionOffset+i*sizeof(section);
+            Check(offset+sizeof(section)<=file.size(),"offline section header bounds");std::memcpy(&section,file.data()+offset,sizeof(section));
+            Check(uint64_t(section.PointerToRawData)+section.SizeOfRawData<=file.size()
+                &&uint64_t(section.VirtualAddress)+section.SizeOfRawData<=image.size(),"offline section file/memory bounds");
+            std::memcpy(image.data()+section.VirtualAddress,file.data()+section.PointerToRawData,section.SizeOfRawData);
+            char name[9]{};std::memcpy(name,section.Name,8);
+            sections.push_back({{"name",name},{"rva",section.VirtualAddress},{"virtual_size",section.Misc.VirtualSize},
+                {"raw_size",section.SizeOfRawData},{"raw_offset",section.PointerToRawData}});
+        }
+        std::string error;Check(ValidateImage(image.data(),image.size(),true,error),error.c_str());
+        unsigned types=0,references=0;uint32_t minimum=UINT32_MAX,maximum=0;
+        for(;types<110;++types){const auto p=image.data()+0x29fad0+types*0x34;uint32_t kind=0;std::memcpy(&kind,p,4);if(kind!=types)break;
+            for(unsigned i=0;i<10;++i){uint32_t address=0;std::memcpy(&address,p+8+i*4,4);if(!address)continue;
+                Check(address>=ImageBase&&SoundIdRvaValid(address-ImageBase),"offline sound ID pointer not in declared data extent");
+                ++references;minimum=std::min(minimum,address);maximum=std::max(maximum,address);}}
+        std::cout<<Json{{"schema","lvz.silent-audio-pe-validation.v1"},{"engine_sha256",hash},{"file_bytes",file.size()},
+            {"header",{{"e_lfanew",dos.e_lfanew},{"signature",nt.Signature},{"machine",nt.FileHeader.Machine},
+                {"optional_magic",nt.OptionalHeader.Magic},{"image_base",nt.OptionalHeader.ImageBase},
+                {"size_of_image",nt.OptionalHeader.SizeOfImage},{"size_of_headers",nt.OptionalHeader.SizeOfHeaders}}},
+            {"sections",sections},{"compiled_validate_image",true},{"mapped_without_execution",true},
+            {"foley_parameter_types",types},{"sound_id_references",references},{"sound_id_min_va",minimum},{"sound_id_max_va",maximum},
+            {"sound_id_data_begin_rva",SoundIdDataBeginRva},{"sound_id_data_end_rva",SoundIdDataEndRva},
+            {"game_started",false}}.dump(2)<<'\n';return 0;
+    }
+    Check(argc==1,"usage: silent_audio_tests [--verify-pe FILE]");
     SetEnvironmentVariableW(L"LVZ_AUDIO_MODE",nullptr);Check(!Requested(),"default must be off");
     SetEnvironmentVariableW(L"LVZ_AUDIO_MODE",L"wrong");bool threw=false;try{Requested();}catch(...){threw=true;}Check(threw,"unknown mode accepted");
     SetEnvironmentVariableW(L"LVZ_AUDIO_MODE",std::wstring(200,L'x').c_str());threw=false;try{Requested();}catch(...){threw=true;}Check(threw,"oversized mode accepted");
@@ -37,13 +77,17 @@ int main(){using namespace lvz::silentaudio;try{
     Check(file!=INVALID_HANDLE_VALUE&&WriteFile(file,"abc",3,&written,nullptr)&&written==3,"hash fixture write");CloseHandle(file);
     Check(FileSha256(hashFile)=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","CNG SHA256 mismatch");DeleteFileW(hashFile);
     Check(!Install(nullptr,error),"missing activation accepted");Activation bad;bad.version=2;bad.primaryThread=GetCurrentThreadId()+1;Check(!Install(&bad,error),"wrong activation version accepted");Activation late;late.primaryThread=GetCurrentThreadId();Check(!Install(&late,error),"same-thread/late activation accepted");
-    std::vector<uint8_t> image(0x35e000);auto* dos=reinterpret_cast<IMAGE_DOS_HEADER*>(image.data());dos->e_magic=IMAGE_DOS_SIGNATURE;dos->e_lfanew=128;
+    std::vector<uint8_t> image(ImageSize);auto* dos=reinterpret_cast<IMAGE_DOS_HEADER*>(image.data());dos->e_magic=IMAGE_DOS_SIGNATURE;dos->e_lfanew=128;
     auto* nt=reinterpret_cast<IMAGE_NT_HEADERS32*>(image.data()+128);nt->Signature=IMAGE_NT_SIGNATURE;nt->FileHeader.Machine=IMAGE_FILE_MACHINE_I386;
-    nt->OptionalHeader.Magic=IMAGE_NT_OPTIONAL_HDR32_MAGIC;nt->OptionalHeader.ImageBase=0x400000;nt->OptionalHeader.SizeOfImage=0x35e000;
+    nt->OptionalHeader.Magic=IMAGE_NT_OPTIONAL_HDR32_MAGIC;nt->OptionalHeader.ImageBase=0x400000;nt->OptionalHeader.SizeOfImage=ImageSize;
     const uint8_t prologue[]={0x55,0x8b,0xec,0x83,0xe4,0xc0,0x6a,0xff,0x68,0xd6,0xf9,0x63,0x00},ret[]={0xc2,4,0},call[]={0xff,0xd0,0x8b,0xf0,0x85,0xf6,0x74,0x72};
     std::memcpy(image.data()+0x1c7650,prologue,13);std::memcpy(image.data()+0x1c772f,ret,3);std::memcpy(image.data()+0x1c77aa,ret,3);std::memcpy(image.data()+0x1151b3,call,8);
     uint32_t target=Target;std::memcpy(image.data()+0x275ff4,&target,4);
     Check(ValidateImage(image.data(),image.size(),true,error),"matching image fixture rejected");
+    Check(!ValidateImage(image.data(),0x35e000,true,error),"old truncated dump extent accepted as whole image");
+    nt->OptionalHeader.SizeOfImage=0x35e000;Check(!ValidateImage(image.data(),image.size(),true,error),"old incorrect SizeOfImage accepted");nt->OptionalHeader.SizeOfImage=ImageSize;
+    Check(SoundIdRvaValid(SoundIdDataBeginRva)&&SoundIdRvaValid(SoundIdDataEndRva-4),"valid data word edges rejected");
+    Check(!SoundIdRvaValid(SoundIdDataBeginRva-1)&&!SoundIdRvaValid(SoundIdDataEndRva-3)&&!SoundIdRvaValid(0x35e000),"partial data word/resource accepted");
     image[0x1c7658]^=1;Check(!ValidateImage(image.data(),image.size(),true,error),"wrong extended signature accepted");image[0x1c7658]^=1;
     nt->FileHeader.Machine=IMAGE_FILE_MACHINE_AMD64;Check(!ValidateImage(image.data(),image.size(),true,error),"wrong PE accepted");
     auto* page=static_cast<uint8_t*>(VirtualAlloc(nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE));Check(page,"fixture allocation");
