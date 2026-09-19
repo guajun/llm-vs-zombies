@@ -1409,16 +1409,15 @@ class _AuditStreamDecoder:
         if self.summary.recording_closed:
             raise EvidenceError("native frame after recording close")
         frame = self.frames.accept(records[0], records[1])
-        self.audio.frame(frame)
-        self.app_anchor.frame(frame)
         engine_raw_index = 2 + int(self.animation is not None)
+        counter_raw = records[engine_raw_index + int(self.calls is not None)] if self.sound_counter.enabled else None
+        self.sound_counter.frame_with_audio(self.audio, frame, counter_raw)
+        self.app_anchor.frame(frame)
         if self.calls:
             self.calls.frame(frame, records[engine_raw_index])
             frame = replace(frame, raw_engine_call=records[engine_raw_index])
         elif "engine_call" in frame.payload:
             raise EvidenceError("engine call frame lacks its declared mode")
-        if self.sound_counter.enabled:
-            self.sound_counter.frame(frame, records[engine_raw_index + int(self.calls is not None)])
         if self.draw:
             self.draw.frame(frame)
         elif "draw_schedule" in frame.state or "render" in frame.payload:

@@ -182,6 +182,26 @@ class Evidence:
             self.health = copy.deepcopy(payload)
 
     def frame(self, frame, raw):
+        """Standalone entry: always validate the complete current sound state."""
+        if not self.enabled:
+            return
+        self.__accept_frame(frame, raw, sound_effects.state(frame.state, self.game))
+
+    def frame_with_audio(self, audio, frame, raw):
+        """Validate audio and raw counter together, without a caller token/cache.
+
+        Only the actual audio checker for this same manifest participates. The
+        checked subtree never leaves this synchronous operation before raw
+        evidence is checked; the next frame always validates its state again.
+        """
+        if type(audio) is not sound_effects.Evidence or audio.game is not self.game:
+            fail("composed frame requires the audio checker for this manifest")
+        sound = sound_effects.Evidence.frame(audio, frame)
+        self.__accept_frame(frame, raw, sound)
+
+    def __accept_frame(self, frame, raw, sound):
+        # Private shared implementation. Both entry points above obtain sound
+        # from a full validation in this call; neither accepts caller authority.
         if not self.enabled:
             return
         expected_keys = {"schema", "seq", "kind", "version", "engine_call_id", "raw_calls", "origin_raw_calls", "experiment_calls"}
@@ -194,7 +214,6 @@ class Evidence:
                 or any(not sound_effects.uint(raw[k]) for k in ("raw_calls", "origin_raw_calls", "experiment_calls"))):
             fail("raw counter evidence lacks exact frame/call binding")
         origin = self.origin["origin_raw_calls"]
-        sound = sound_effects.state(frame.state, self.game)
         if (raw["origin_raw_calls"] != origin or raw["raw_calls"] < self.last_raw or raw["raw_calls"] < origin
                 or raw["raw_calls"] - origin != raw["experiment_calls"]
                 or raw["experiment_calls"] != sound["calls"] or sound["counter_scope"] != "experiment"):

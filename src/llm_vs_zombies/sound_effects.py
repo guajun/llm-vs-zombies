@@ -215,6 +215,11 @@ class Evidence:
             self.calls = calls
 
     def frame(self, frame):
+        """Validate this frame completely and return its checked sound subtree.
+
+        The return is for immediate synchronous composition, not a reusable
+        validation token: patch decoding may mutate the same object next frame.
+        """
         sound = state(frame.state, self.game)
         if sound is None:
             return
@@ -226,6 +231,7 @@ class Evidence:
             self.first_calls = sound["calls"]
         self.calls = sound["calls"]
         self.version = frame.version
+        return sound
 
     def event(self, event):
         if event["kind"] != "sound_effects_closed":
