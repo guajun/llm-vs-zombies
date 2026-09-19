@@ -12,6 +12,14 @@ python -m llm_vs_zombies.evaluation plan work/smoke-plan.json
 python -m llm_vs_zombies.evaluation run work/smoke-plan.json --output experiments/runs/eval-smoke-001
 ```
 
+显式的静音实验计划可加 `--audio-mode sound_effects_allocation_none_v1`，例如：
+
+```powershell
+python -m llm_vs_zombies.evaluation plan work/silent-plan.json --audio-mode sound_effects_allocation_none_v1 --strategy examples/liangyi_baseline.py
+```
+
+计划的 `audio_mode` 会传给每一个冷启动及恢复测试进程；省略时保持 `original`。两种模式必须分别录制和验收，不能将旧音频轨迹切换模式后视为同一实验。该模式仍保留音乐路径、原版音效变体选择代码和实际随机数消耗；详见[空音效分配模式](silent-audio.md)。
+
 `plan` 只写 JSON，不启动游戏。默认 smoke 固定种子为 `[0,1,42]`，每种子录制 1000 tick，然后另起一个原版进程重放这段记录，最后用第三个进程验证断线和失败恢复。默认无策略只等待，不代表两仪通关策略。每次运行使用新的输出目录；所有游戏进程、用户档和日志均由 launcher 隔离。
 
 执行阶段默认先构建 runtime/launcher，再运行 Python 与 CTest。构建或测试失败时不会启动游戏。`--skip-build` 允许开发时复用已构建文件，但会让 `build_and_tests` 保持未验证，不能据此生成严格就绪结论。

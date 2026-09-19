@@ -54,3 +54,9 @@ Python 测试覆盖固定输入拒绝、全新目录限制、合成用户档结�
 实机进一步需要核实原用户档/配置前后不变、隐藏/失焦不阻塞 IPC 与单步、两仪存档实际加载与卡序、重复冷启动初态以及完整两旗。仅有启动成功、私有路径或文件哈希一致，均不证明确定性；完整状态/随机状态的比对归入确定性与 engine replay 验收。
 
 档案格式参考固定版本的 [ProfileMgr](https://github.com/ruslan831/PlantsVsZombies-decompilation/blob/8a2d121899ba5cb4df644cd7d2e4c1aaf88dd238/Lawn/System/ProfileMgr.cpp)、[PlayerInfo](https://github.com/ruslan831/PlantsVsZombies-decompilation/blob/8a2d121899ba5cb4df644cd7d2e4c1aaf88dd238/Lawn/System/PlayerInfo.cpp) 与 [DataSync](https://github.com/ruslan831/PlantsVsZombies-decompilation/blob/8a2d121899ba5cb4df644cd7d2e4c1aaf88dd238/Lawn/System/DataSync.cpp)。这些是用于推导格式的候选反编译源码；本地实际载入结果才是当前二进制的验收证据。
+
+## 显式音效分配模式
+
+Python `start(..., audio_mode="sound_effects_allocation_none_v1")` 或 launcher CLI 的 `--audio-mode sound_effects_allocation_none_v1` 在主线程首次恢复前启用实验补丁；默认 `original` 不启用。启动器核对实际安装回执、resident hello 和复制的 bootstrap 文件哈希，任何不匹配均停止自有进程，不静默降级。该配置不是设置音量为零，语义与证据范围见[模式说明](silent-audio.md)。
+
+启动失败时，即使写 `launcher.json` 也发生 I/O 错误，仍优先停止已有 PID/创建时间/EXE 身份的自有进程；评测结束时 client/trace 关闭报错同样不会跳过进程清理。关闭失败会保留为错误，不能当作完整成功归档。
