@@ -13,7 +13,7 @@
 | 来源 | 当前能力 | 含义 |
 |---|---|---|
 | `state_visualization` | 可运行、已编码验收 | 根据记录的植物、僵尸位置等字段绘图，画面上永久标注非原版画面 |
-| `original_game_frame` | 原生表面适配器与 RPC 转换已实现，需集成验收 | 必须来自指定游戏边界的真实渲染结果，不能用状态图冒充 |
+| `original_game_frame` | 当前固定绘制模式的1,000 tick录像对照已通过 | 来自指定游戏边界的真实缓存原画；验收仅覆盖已测引擎和显示环境 |
 | `synthetic_fixture` | 测试用 | 用纯色帧验证编码、色彩通道和时间映射 |
 
 隐藏窗口的 `BitBlt`、`PrintWindow` 或桌面录屏可能得到黑屏、旧帧或其他窗口。现有模块不会因为有窗口句柄就声明原画捕获可用；RPC 适配器还会拒绝全黑帧，并记录原因。但“不是全黑”不能证明画面新鲜，真实渲染端仍须携带并验证对应的游戏版本。
@@ -76,7 +76,7 @@ with TickRecorder(provider, video, Path(run_dir) / "video" / "recording.jsonl") 
 }
 ```
 
-成功 result 必须包含：
+当前 `deterministic_draw_schedule_v1` 模式的成功 result 包含：
 
 ```json
 {
@@ -88,8 +88,10 @@ with TickRecorder(provider, video, Path(run_dir) / "video" / "recording.jsonl") 
   "pixel_format": "bgr24",
   "row_stride": 2400,
   "origin": "top_left",
-  "method": "engine_widget_draw_to_directdraw_surface",
-  "forced_render": true,
+  "method": "cached_controlled_engine_frame",
+  "mode": "deterministic_draw_schedule_v1",
+  "frame_version": {"epoch": 1, "tick": 100, "revision": 0},
+  "forced_render": false,
   "used_3d": false,
   "known_rng_unchanged": true,
   "game_clock_before": 100,
@@ -98,20 +100,26 @@ with TickRecorder(provider, video, Path(run_dir) / "video" / "recording.jsonl") 
 }
 ```
 
-必须在完成的模拟边界上读取或生成渲染结果，再复制到不可变缓冲区；IPC 工作者不读取游戏对象。若绘制本身消耗随机数或修改模拟状态，需要纳入审计。捕获前后应检查状态摘要，不能因为“只是画图”就默认无副作用。请求需要独立的能力协商，例如 `available` 和 `hidden_window_support`。
+固定绘制模式在初始化时预热一次，并在每个经验证的时钟步后执行一次原版绘制；`capture_frame` 只复制该版本缓存，不增加绘制调用。暂停不自主绘制，同tick动作使旧缓存失效，随后应完成受控推进才能取新缓存。绘制回执和状态变化仍进入逐边界审计；IPC 工作者不直接读取游戏对象。旧档可能使用 `engine_widget_draw_to_directdraw_surface` / `forced_render:true`，其捕获会执行绘制，不能按新缓存合同重新解释。
 
 `capture_frame` 要求暂停、战斗有效、记录未关闭、没有待完成推进，并精确匹配 `expect`。若绘制改变游戏时钟或已确认 RNG，controller 拒绝像素并递增 revision；原始绘制错误也可能使旧观察失效。适配器在捕获失败后尝试 `observe` 刷新同一连接，并将结果保存在 `provider.last_observation`；刷新失败则为 `None`，需要重新连接。使用独立动作连接时，恢复实验前仍应在动作连接调用 `observe`，不能继续使用旧的 `expect`。
 
 图像结果单独保留最近四个用于去重；更早的相同请求 ID 返回 `request_result_expired`，不会重新绘制。像素不写入 native audit 或动作缓存，视频文件与帧映射保存其内容和哈希。
 
-建议独立的 capture 客户端连接，避免可选视频的超时影响动作连接：
+可使用独立的 capture 客户端连接，避免可选视频的超时影响动作连接；能力直接取自实际 hello：
 
 ```python
-provider = RemoteGameFrameProvider(
+from llm_vs_zombies.recording import RemoteGameFrameProvider
+
+provider = RemoteGameFrameProvider.from_hello(
     lambda method, params, expect: capture_client.request(method, params, expect=expect),
-    {"available": capture_supported, "hidden_window_support": "unverified"},
+    capture_client.hello_result,
 )
 ```
+
+将这个 provider 交给上文的 `TickRecorder`，并把视频尺寸设为800×600、像素格式设为`bgr24`、来源设为`original_game_frame`即可录制原画。记录网格须与实际暂停边界一致；原画录像当前通过 Python API 接线，`evaluation plan` 尚无原画录像开关。
+
+041/043实机对照使用每100 tick一帧，共10帧、1 fps、10秒；1,000次单步加录像与一次批量推进的全部2,000个捕获边界、71次受控出生、40,764次粒子调用相同。B0三次重复缓存读取相同，1/5秒暂停完整状态相同，视频实际解码及归档校验通过。完整身份与限制见[实机证据](headless-validation.md#显式诊断计数起点与录像复验041043)。这不证明任意显示驱动、锁屏或无桌面环境均可用。
 
 4 MiB 的现有管道帧限制足够容纳 800×600 BGR24 的 Base64 结果。更高分辨率可扩展为共享内存/二进制通道，但首版不需要传指针到 64 位客户端。
 

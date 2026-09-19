@@ -41,6 +41,8 @@ python -m llm_vs_zombies.evaluation plan work/smoke-plan.json
 python -m llm_vs_zombies.evaluation run work/smoke-plan.json --output experiments/runs/eval-smoke
 ```
 
+当前重复性实验使用显式空音效模式：生成计划时加 `--audio-mode sound_effects_allocation_none_v1`；其初始化会记录诊断计数起点、锚定真实 App 计数并准备固定绘制边界。省略参数仍保留原始音频模式。具体合同与实际通过范围见[评测文档](docs/evaluation.md)和[实机记录](docs/headless-validation.md)。普通 REPL 的会话日志还需按[重放接口](docs/engine-replay.md)记录完整初态，才能封装严格轨迹；评测运行器已接入这些步骤。
+
 客户端示例（PID 从本轮 `launcher.json` 读取）：
 
 ```python
@@ -72,7 +74,7 @@ with SessionTrace('experiments/runs/my-run/decisions/session.jsonl') as trace:
 - 原版粒子抖动会用堆地址重新播种 CRT。当前实验启用 [deterministic_particle_shake_v1](docs/particle-shake-determinism.md)，在两个确认过的调用点以验证后的完整粒子 ID 代替地址因子；原始种子、转换种子和调用序列均保存。这会改变该粒子的抖动序列，不能称为未经修改的原版逐位重放。
 - 原引擎 replay 从相同初态重新执行真实请求，定位首个分叉。seek 从起点重算；目前不声称支持完整进程检查点或任意时刻直接恢复。
 - 视频按游戏 tick 采样并流式送入 FFmpeg，不逐帧保存截图。原画来自引擎绘制表面；状态示意图始终标为非原版画面。JSONL 保存捕获元数据和像素 SHA256，原始像素送编码器。
-- 历史版本已通过隐藏窗口初始化、真实种植/铲除、短程单步/批量和录像开关等价，以及两次冷启动的完整 1000 tick 轨迹比较。最新固定绘制版本已完成 5000 tick 来源记录，但冷启动重放在 tick 1344 检出 RNG 差异，尚未通过；不能把历史版本的短程结果当作当前版本或完整两旗的验收。
+- 当前显式计数起点版本已通过100 tick冷重放，以及1,000 tick单步/批量加录像的全部捕获状态对照。5,000 tick冷重放已完成在线状态比较，但窗口观察器采样间隔超限，整体验收保持失败；正在独立核验关闭证据并修复观察覆盖。完整两旗与十次冷启动仍未通过，不能宣称严格实验就绪。旧版第1,344 tick音频/RNG分叉及其他失败档均保留在[实机记录](docs/headless-validation.md)。
 
 ## 文档与验收
 
