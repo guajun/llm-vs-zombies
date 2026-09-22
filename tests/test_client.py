@@ -13,7 +13,7 @@ from pathlib import Path
 
 from llm_vs_zombies.client import (BRANCH_SCHEMA, Client, FramedTransport, MAX_FRAME_BYTES, OutcomeUnknown,
                                    ProtocolError, RemoteError, WindowsNamedPipeStream, branch_scope_id,
-                                   declared_branch_scope, plant, shovel)
+                                   declared_branch_scope, plant, shovel, spawn)
 from llm_vs_zombies.evidence_tree import branch_id as evidence_branch_id
 from llm_vs_zombies.session import SessionTrace
 
@@ -351,9 +351,53 @@ class ClientTests(unittest.TestCase):
             plant(True, 2, 5)
         with self.assertRaises(ValueError):
             shovel(0, 3)
+        with self.assertRaises(ValueError):
+            spawn(True, 3, 9)
+        with self.assertRaises(ValueError):
+            spawn(-1, 3, 9)
+        with self.assertRaises(ValueError):
+            spawn(1, 0, 9)
+        with self.assertRaises(ValueError):
+            spawn(1, 3, 0)
         with self.assertRaises(TypeError):
             self.client.advance(1, until=lambda obs: True)
         self.assertEqual(self.transport.requests, [])
+
+    def test_spawn_action_helper_and_convenience_wrapper(self):
+        self.assertEqual(spawn(1, 3, 9), {"op": "spawn", "type": 1, "row": 3, "col": 9})
+        # The helper keeps the runtime authoritative about the AvZ enum range.
+        self.assertEqual(spawn(32, 5, 9)["type"], 32)
+        self.client.observe()
+        def accepted(request):
+            return json.dumps({"protocol": 1, "request_id": request["request_id"], "ok": True,
+                "result": {"action_results": [{"ok": True, "zombie_id": 4294967296 + 12, "type": 1,
+                                               "row": 3, "col": 9, "engine_row": 2, "engine_col": 8,
+                                               "ordinal": 0, "action": request["params"]["actions"][0]}],
+                           "requested_ticks": 0, "executed_ticks": 0, "stop_reason": "budget_exhausted",
+                           "observation": observation(revision=1)}}).encode()
+        self.transport.response = accepted
+        result = self.client.spawn(1, 3, 9, advance_ticks=0)
+        sent = self.transport.requests[-1]
+        self.assertEqual(sent["method"], "commit")
+        self.assertEqual(sent["params"]["actions"], [{"op": "spawn", "type": 1, "row": 3, "col": 9}])
+        self.assertEqual(sent["params"]["advance_ticks"], 0)
+        self.assertTrue(result["action_results"][0]["ok"])
+        self.assertEqual(result["action_results"][0]["zombie_id"], 4294967296 + 12)
+
+    def test_failed_spawn_keeps_its_error_in_action_results(self):
+        self.client.observe()
+        def refused(request):
+            return json.dumps({"protocol": 1, "request_id": request["request_id"], "ok": True,
+                "result": {"action_results": [{"ok": False, "error": "spawn_row_unavailable", "ordinal": 0,
+                                               "action": request["params"]["actions"][0]}],
+                           "requested_ticks": 1, "executed_ticks": 0, "stop_reason": "action_failed",
+                           "observation": observation(revision=1)}}).encode()
+        self.transport.response = refused
+        result = self.client.spawn(1, 6, 9, advance_ticks=1)
+        self.assertEqual(result["stop_reason"], "action_failed")
+        self.assertFalse(result["action_results"][0]["ok"])
+        self.assertEqual(result["action_results"][0]["error"], "spawn_row_unavailable")
+        self.assertEqual(result["executed_ticks"], 0)
 
 
 @unittest.skipUnless(os.name == "nt", "requires real Windows named pipe I/O")

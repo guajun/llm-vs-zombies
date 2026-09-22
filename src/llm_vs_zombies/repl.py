@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, TextIO
 
-from .client import Client, connect, plant, shovel
+from .client import Client, connect, plant, shovel, spawn
 from .session import SessionTrace
 
 
@@ -35,7 +35,8 @@ class RecordedConsole(code.InteractiveConsole):
     """Normal Python variables/functions persist between submitted cells."""
 
     def __init__(self, game: Client, trace: SessionTrace):
-        super().__init__({"__name__": "__console__", "game": game, "plant": plant, "shovel": shovel},
+        super().__init__({"__name__": "__console__", "game": game, "plant": plant, "shovel": shovel,
+                          "spawn": spawn},
                          filename="<lvz-repl>")
         self.trace = trace
         self._last_cell_ok = True

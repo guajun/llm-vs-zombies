@@ -2,6 +2,7 @@
 #include "buffered_writer.hpp"
 #include "runtime/runtime.hpp"
 #include "runtime/diagnostics.hpp"
+#include "runtime/spawn_action.hpp"
 #include <iomanip>
 #include <set>
 #include <sstream>
@@ -174,6 +175,31 @@ bool Shovel(int row, float col, int targetType) {
         +",\"col\":"+std::to_string(col)+",\"target_type\":"+std::to_string(targetType)
         +",\"success\":"+(changed?"true":"false")+"}");
     return changed;
+}
+
+AZombie* SpawnZombie(AZombieType type, int row, int col) {
+    if (!opened || stopped || !AGetMainObject() || AGetPvzBase()->GameUi()!=3)
+        throw std::runtime_error("Logged actions require an active recorder and fight");
+    Capture();
+    auto* board = AGetMainObject();
+    // The primitive at engine 0x42A0F0 dereferences AddZombieInRow's result
+    // without a check, so a spawn the pool cannot take would crash the game
+    // thread. Reserve room for the new zombie, the engine's own last pool slot
+    // and the three extra riders a bobsled team allocates.
+    const int live = board->ZombieCount();
+    if (!runtime::SpawnPoolAccepts(live, board->ZombieLimit(), runtime::SpawnExtraPoolSlots(int(type)))) {
+        Emit("action", "{\"op\":\"spawn\",\"type\":"+std::to_string(int(type))
+            +",\"row\":"+std::to_string(row)+",\"col\":"+std::to_string(col)
+            +",\"success\":false,\"reason\":\"zombie_pool_full\"}");
+        return nullptr;
+    }
+    // AvZ takes 0-based engine grid indices; the caller passes protocol coordinates.
+    auto result = AAsm::PutZombie(row-1,col-1,type);
+    const bool created = result && result->Id() && board->ZombieCount()>live;
+    Emit("action", "{\"op\":\"spawn\",\"type\":"+std::to_string(int(type))
+        +",\"row\":"+std::to_string(row)+",\"col\":"+std::to_string(col)
+        +",\"success\":"+(created?"true":"false")+"}");
+    return created ? result : nullptr;
 }
 
 void Note(const std::string& text) { Emit("note", "{\"text\":"+Quote(text)+"}"); }

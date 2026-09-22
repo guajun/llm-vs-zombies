@@ -19,7 +19,7 @@ closed health. Older undeclared records keep their existing contract; see
 - `hello`: result includes session, PID, protocol, build/game identity, capability booleans. Unsupported methods fail explicitly.
 - `observe`: result is an observation containing `version:{epoch,tick,revision}`, `game_clock`, `game_ui`, `scene`, `wave`, `sun`, `plants`, `zombies`, `seeds`. Preserve exact types and stable object IDs. Controller tick is independent of native GameClock.
 - `initialize`: params `{game_mode:13,cards:[...]}`, with `expect`; valid from the supported title/main menu without a Board. Supply exactly all available seed slots. The immediate result confirms configuration acceptance only; poll `observe.initialization.state` for `ready` or `error`. A request to enter a level is not proof that the level loaded or that its scene is correct. Only accepted initialization releases a terminal freeze; a rejected request leaves it frozen.
-- `commit`: params `{actions:[{op:"plant",type:8,row:2,col:5}],advance_ticks:1}`. Shovel action: `{op:"shovel",row:2,col:5,target_type:-1}`. Rows/columns use 1-based AvZ coordinates. Check version, execute in order, stop on first failure and skip advancement. Earlier successes do not roll back. Result includes `action_results`, `requested_ticks`, `executed_ticks`, `stop_reason`, `observation`.
+- `commit`: params `{actions:[{op:"plant",type:8,row:2,col:5}],advance_ticks:1}`. Shovel action: `{op:"shovel",row:2,col:5,target_type:-1}`. Spawn action: `{op:"spawn",type:1,row:3,col:9}`. Rows/columns use 1-based AvZ coordinates. Check version, execute in order, stop on first failure and skip advancement. Earlier successes do not roll back. Result includes `action_results`, `requested_ticks`, `executed_ticks`, `stop_reason`, `observation`.
 - `advance`: params `{max_ticks:100,until:{event:"wave_changed"}}`; until is optional. Result includes requested/executed ticks, stop_reason, observation. Bounded maximum must be documented. No Python callbacks execute inside C++.
 - `pause`, `status`, `cancel`: bounded control/status at stable game boundaries. `pause/cancel` may omit `expect` so a second connection can interrupt an active advance. No blocking pipe read on the game thread.
 - `audit_snapshot`: returns `{state,version}` from the stable game-thread boundary. This is diagnostic state, not an arbitrary checkpoint restore format.
@@ -30,6 +30,61 @@ closed health. Older undeclared records keep their existing contract; see
 - `stop_recording`: requires exact `expect` and no pending advancement; flushes/closes native recording. Further state mutations and captures are rejected, and the engine will not resume automatically.
 - Mutations deduplicate same epoch/request_id and identical request content. Changed payload with reused ID fails. New epoch on Board/readiness transitions or an external backward native clock; stale observations fail. RNG and clock sidecar operations retain the epoch and explicitly increment revision. State-changing same-tick actions increment revision.
 - Every action, including failed attempts, goes through the same executor for REPL and replay. Preserve request/execution boundaries and ordinal in logs. Strict determinism and checkpoints remain false until independently verified.
+
+## Spawn action
+
+`{op:"spawn",type:<AvZ zombie enum>,row:<1..5|6>,col:<1..9>}` creates one
+zombie through AvZ's original primitive `AAsm::PutZombie(row,col,type)`
+(`avz/framework/inc/avz_asm.h:106-109`, `avz/framework/src/avz_asm.cpp:371-384`),
+which forwards to the locked engine's `Challenge::IZombiePlaceZombie` at
+`0x42A0F0` (`work/replay-research/Lawn_Challenge.cpp:4376`). `capabilities.spawn_action`
+advertises the op.
+
+- The AvZ/engine primitive takes **0-based** grid indices (`PutZombie(1,1,APJ_0)`
+  means row 2 column 2), while the wire keeps the ordinary 1-based AvZ
+  coordinates used by `plant`/`shovel`; the runtime subtracts one. The zombie's
+  engine row is the requested row, and its x position is
+  `GridToPixelX(col-1,row-1) - 30`, so it appears inside the requested column
+  instead of at the natural off-screen spawn x.
+- `type` is the numeric AvZ `AZombieType` (`0`..`32`, `AZOMBIE`..`AGIGA_GARGANTUAR`).
+  It is not a seed-slot index and it is not the plant enum. Booleans, floats and
+  out-of-range values fail.
+- No seed packet, sun, cooldown or selection state is involved, and
+  `ASetZombies` is **not** required: the primitive creates the zombie directly
+  in the running fight. `ASetZombies` rewrites the level's wave list and is
+  unrelated to this op; the runtime never calls it.
+- An ordinary spawn consumes the engine's global RNG (the variant draw in
+  `Board::AddZombieInRow` plus the initialized zombie's own draws), so a spawn
+  is a state change like any other and must stay inside the append-only action
+  order. `ZOMBIE_BOBSLED_TEAM` (13) additionally creates its three riders, and
+  type-specific initialization may draw more.
+- `action_results[i]` is `{ok:true,zombie_id,type,row,col,engine_row,engine_col}`
+  or `{ok:false,error:<code>}`. Failure codes are `invalid_spawn_type` (missing,
+  non-integer or outside `0..32`), `invalid_spawn_position` (row/column missing,
+  non-integral or outside the scene's rows / `1..9`), `spawn_row_unavailable`
+  (the engine's `Board::RowCanHaveZombies` rejects the row, for example row 6 of
+  the ordinary five-row lawn, which is dirt) and `zombie_pool_full` (the pool
+  cannot hold the zombie the op would create). A rejected action stops the request with
+  `stop_reason:"action_failed"` and still appears in the audit.
+- `zombie_pool_full` is not cosmetic: `Board::AddZombieInRow` returns null once
+  `mSize >= mMaxSize - 1` and the primitive dereferences that null pointer
+  immediately. The runtime therefore refuses the action whenever the pool
+  cannot hold the new zombie plus the engine's reserved last slot (plus three
+  more for a bobsled team) instead of letting the game thread crash.
+- Audit: every attempt is one `action` audit record with the request id, ordinal,
+  submitted action and result, exactly like `plant`/`shovel`. The native run log
+  also gains an `action` event whose `op` is `spawn`, and the installed
+  `ZombieInitialize` exit hook records the real birth (`zombie_initialized`)
+  with the measured row/type/position, so a claimed spawn can be compared with
+  the engine's own evidence.
+- A successful spawn returns the new object id. A client must not infer success
+  from the IPC response alone; it is the `action_results` entry that is
+  authoritative.
+- `spawn` has no journal of its own: it is an ordinary `commit` action, so it
+  keeps the exact `expect` check, epoch/revision handling, same-ID dedup and
+  ordering rules of `plant`/`shovel`. Two spawns with the same `request_id` and
+  identical content replay the stored result instead of creating a second
+  zombie; reusing the ID with different content fails.
 
 ## Branch scope and dedup namespaces
 

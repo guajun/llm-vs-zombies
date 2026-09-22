@@ -6,6 +6,7 @@
 #include "pump_guard.hpp"
 #include "fp_guard.hpp"
 #include "recorder.hpp"
+#include "spawn_action.hpp"
 #include "determinism/audit.hpp"
 #include "recording/native_capture.hpp"
 #include "recording/frame_cache.hpp"
@@ -167,6 +168,27 @@ public:
             if(!found) return fail("no_plant");
             return lvz::Shovel(row,col,target)?Json{{"ok",true}}:fail("shovel_failed");
         }
+        if(op=="spawn") {
+            // One zombie through AvZ's original primitive AAsm::PutZombie; the
+            // protocol keeps 1-based rows/columns and the engine takes 0-based
+            // grid indices, so the pure helper owns the translation. No seed
+            // packet, cooldown or ASetZombies list is involved: the primitive
+            // creates the zombie directly in the running fight.
+            auto request=ParseSpawnAction(a,rows);
+            if(!request.Ok()) return fail(request.error.c_str());
+            const auto& action=request.action;
+            // Board::RowCanHaveZombies rejects out-of-range and dirt rows (row
+            // 6 of most levels), which the engine itself will not fill.
+            if(!AAsm::CanSpawnZombies(action.EngineRow())) return fail("spawn_row_unavailable");
+            // AddZombieInRow returns null for a full pool and the primitive
+            // dereferences it, so refuse the action instead of crashing.
+            if(!SpawnPoolAccepts(AGetMainObject()->ZombieCount(),AGetMainObject()->ZombieLimit(),
+                SpawnExtraPoolSlots(action.type))) return fail("zombie_pool_full");
+            auto zombie=lvz::SpawnZombie(static_cast<AZombieType>(action.type),action.row,action.col);
+            return zombie?Json{{"ok",true},{"zombie_id",zombie->Id()},{"type",action.type},
+                {"row",action.row},{"col",action.col},{"engine_row",action.EngineRow()},
+                {"engine_col",action.EngineCol()}}:fail("spawn_failed");
+        }
         return fail("unsupported_action");
     }
     Json Hello() override {
@@ -180,6 +202,7 @@ public:
                 {"app_update_anchor",lvz::determinism::silentaudio::Enabled()},{"initial_app_update_anchor_v1",lvz::determinism::silentaudio::Enabled()},
                 {"sound_counter_origin",lvz::determinism::silentaudio::Enabled()},{"sound_effects_counter_origin_v1",lvz::determinism::silentaudio::Enabled()},
                 {"fixed_owner_fp_v1",true},
+                {"spawn_action",true},
                 {"sound_effects_allocation_none_v1",lvz::determinism::silentaudio::Enabled()},{"prepare_render",true},{"deterministic_draw_schedule_v1",true},{"controlled_engine_call_v1",true}}}};
     }
     bool RequiresRenderPreparation()const override {return true;}
