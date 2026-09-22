@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 
 from llm_vs_zombies.cli import ROOT, activate, attach, create_run, demo, export
-from llm_vs_zombies.records import EventWriter, compare, finish, read_json, validate, write_json
+from llm_vs_zombies.records import (EventWriter, compare, finish, read_json, record_initial_state,
+                                   validate, write_json)
 
 
 class RecordingTests(unittest.TestCase):
@@ -34,6 +35,41 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(validate(a)['states'], 121)
         self.assertTrue(compare(a,b)['equal'])
         self.assertTrue((a/'exports/review.html').is_file())
+
+    def initial_hello(self, *, branch=True, **overrides):
+        hello = {"capabilities": {"observe": True}, "build": {"runtime_protocol": 1},
+                 "game": {"schema": "lvz.audit.v1", "coverage": {"complete_game_state": False}}}
+        if branch:
+            hello["branch"] = {"schema": "lvz.branch-scope.v1", "mode": "branch", "branch_id": "branch-a",
+                               "parent_branch_id": "parent", "origin": "adopted",
+                               "dedup_key": "branch_id+epoch+request_id", **overrides}
+        return hello
+
+    def initial_observation(self, run, epoch=1, tick=0, revision=0):
+        path = run / "observations/initial.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, {"version": {"epoch": epoch, "tick": tick, "revision": revision}})
+        return path
+
+    def test_runtime_branch_scope_is_recorded_verbatim(self):
+        run = create_run(self.root, self.config, 'branch')
+        observation = self.initial_observation(run, epoch=2, tick=3, revision=1)
+        manifest = record_initial_state(run, observation_path=observation,
+                                        hello=self.initial_hello(), scenario_verified=True)
+        self.assertEqual(manifest["branch"]["branch_id"], "branch-a")
+        self.assertEqual(manifest["branch"]["parent_branch_id"], "parent")
+        self.assertEqual(manifest["branch"]["origin"], "adopted")
+        self.assertEqual(manifest["branch"]["dedup_key"], "branch_id+epoch+request_id")
+        self.assertEqual(manifest["branch"]["source"], "runtime hello")
+        self.assertEqual(read_json(run / "manifest.json")["branch"], manifest["branch"])
+
+    def test_pre_branch_runtime_manifest_has_no_branch_key(self):
+        run = create_run(self.root, self.config, 'legacy')
+        observation = self.initial_observation(run, epoch=1)
+        manifest = record_initial_state(run, observation_path=observation,
+                                        hello=self.initial_hello(branch=False), scenario_verified=True)
+        self.assertNotIn("branch", manifest)
+        self.assertIn("runtime_hello_sha256", manifest)
 
     def test_first_divergence(self):
         result = compare(self.runfile('a'),self.runfile('b',hp=299))

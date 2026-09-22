@@ -1,5 +1,6 @@
 import json
 import base64
+import copy
 import hashlib
 import os
 import struct
@@ -10,8 +11,10 @@ import unittest
 import uuid
 from pathlib import Path
 
-from llm_vs_zombies.client import (Client, FramedTransport, MAX_FRAME_BYTES, OutcomeUnknown,
-                                   ProtocolError, RemoteError, WindowsNamedPipeStream, plant, shovel)
+from llm_vs_zombies.client import (BRANCH_SCHEMA, Client, FramedTransport, MAX_FRAME_BYTES, OutcomeUnknown,
+                                   ProtocolError, RemoteError, WindowsNamedPipeStream, branch_scope_id,
+                                   declared_branch_scope, plant, shovel)
+from llm_vs_zombies.evidence_tree import branch_id as evidence_branch_id
 from llm_vs_zombies.session import SessionTrace
 
 
@@ -19,6 +22,12 @@ def observation(epoch=4, tick=2, revision=0):
     return {"version": {"epoch": epoch, "tick": tick, "revision": revision}, "game_clock": 100,
             "game_ui": 3, "scene": 4, "wave": 1, "sun": 50,
             "plants": [], "zombies": [], "seeds": []}
+
+
+def branch(branch_id="branch-a", mode="branch", **overrides):
+    return {"schema": BRANCH_SCHEMA, "mode": mode, "branch_id": branch_id,
+            "parent_branch_id": None, "origin": "session",
+            "dedup_key": "branch_id+epoch+request_id" if mode == "branch" else "epoch+request_id", **overrides}
 
 
 class FakeRuntime:
@@ -37,6 +46,28 @@ class FakeRuntime:
 
     def close(self):
         self.closed = True
+
+
+class BranchRuntime(FakeRuntime):
+    """A runtime that answers hello with a declared branch scope."""
+
+    def __init__(self, hello_branch=None):
+        super().__init__()
+        self.hello_branch = hello_branch
+
+    def exchange(self, payload, timeout):
+        request = json.loads(payload)
+        self.requests.append(request)
+        if self.response:
+            return self.response(request)
+        if request["method"] == "hello":
+            result = {"build": {"runtime_protocol": 1}, "game": {"schema": "lvz.audit.v1"},
+                      "capabilities": {"observe": True, "branch_scope_v1": True, "branch_rebind": True}}
+            if self.hello_branch is not None:
+                result["branch"] = copy.deepcopy(self.hello_branch)
+        else:
+            result = observation()
+        return json.dumps({"protocol": 1, "request_id": request["request_id"], "ok": True, "result": result}).encode()
 
 
 class FragmentedStream:
@@ -94,6 +125,118 @@ class FramingTests(unittest.TestCase):
             FramedTransport(stream).exchange(b"{}", 0.035)
         self.assertLess(time.monotonic() - start, 0.2)
         self.assertTrue(stream.closed)
+
+
+class BranchScopeTests(unittest.TestCase):
+    """Issue #32: one runtime instance owns one request/dedup namespace."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.trace = SessionTrace(Path(self.tmp.name) / "trace.jsonl")
+
+    def tearDown(self):
+        self.trace.close()
+        self.tmp.cleanup()
+
+    def client(self, transport, **kwargs):
+        client = Client(transport, trace=self.trace, **kwargs)
+        self.addCleanup(client.close)
+        return client
+
+    def test_runtime_branch_is_learned_and_stamped_on_later_requests(self):
+        transport = BranchRuntime(branch())
+        client = self.client(transport)
+        client.hello()
+        self.assertEqual(client.branch_id, "branch-a")
+        self.assertEqual(client.branch_scope["dedup_key"], "branch_id+epoch+request_id")
+        self.assertEqual(client.branch_scope["origin"], "session")
+        client.observe()
+        self.assertIsNone(transport.requests[0].get("branch"))
+        self.assertEqual(transport.requests[1]["branch"], "branch-a")
+
+    def test_pre_branch_runtime_keeps_the_old_unstamped_contract(self):
+        transport = BranchRuntime(None)
+        client = self.client(transport)
+        client.hello()
+        self.assertIsNone(client.branch_scope)
+        self.assertIsNone(client.branch_id)
+        client.observe()
+        self.assertNotIn("branch", transport.requests[-1])
+
+    def test_expected_branch_mismatch_fails_at_hello(self):
+        with self.assertRaises(ProtocolError):
+            self.client(BranchRuntime(branch("branch-b")), expected_branch="branch-a").hello()
+        with self.assertRaises(ProtocolError):
+            self.client(BranchRuntime(None), expected_branch="branch-a").hello()
+        matching = self.client(BranchRuntime(branch("branch-a")), expected_branch="branch-a")
+        self.assertEqual(matching.hello()["branch"]["branch_id"], "branch-a")
+
+    def test_cross_branch_error_is_surfaced_without_automatic_retry(self):
+        transport = BranchRuntime(branch())
+        client = self.client(transport)
+        client.hello()
+        transport.response = lambda request: json.dumps({"protocol": 1, "request_id": request["request_id"],
+            "ok": False, "error": {"code": "cross_branch_request_id_conflict",
+                                   "message": "Request ID is already bound to different content in branch parent-a"}}).encode()
+        with self.assertRaises(RemoteError) as caught:
+            client.commit([plant(8, 2, 5)], advance_ticks=0)
+        self.assertEqual(caught.exception.code, "cross_branch_request_id_conflict")
+        self.assertIn("parent-a", str(caught.exception))
+        self.assertEqual(len(transport.requests), 2)
+
+    def test_rebind_moves_the_client_to_the_new_scope(self):
+        transport = BranchRuntime(branch())
+        client = self.client(transport)
+        client.hello()
+        seen = {}
+
+        def rebind(request):
+            seen.update(request["params"])
+            return json.dumps({"protocol": 1, "request_id": request["request_id"], "ok": True,
+                "result": {"rebound": True, "previous_branch_id": "branch-a",
+                           "branch": branch("branch-b", origin="rebound", parent_branch_id="branch-a")}}).encode()
+        transport.response = rebind
+        result = client.branch_rebind("branch-b", parent_branch_id="branch-a")
+        self.assertTrue(result["rebound"])
+        self.assertEqual(seen, {"branch_id": "branch-b", "from_branch_id": "branch-a", "parent_branch_id": "branch-a"})
+        self.assertEqual(client.branch_id, "branch-b")
+        transport.response = None
+        client.observe()
+        self.assertEqual(transport.requests[-1]["branch"], "branch-b")
+
+    def test_rebind_needs_a_declared_scope_and_a_valid_id(self):
+        client = self.client(BranchRuntime(None))
+        client.hello()
+        with self.assertRaises(ProtocolError):
+            client.branch_rebind("branch-b")
+        with self.assertRaises(ValueError):
+            self.client(BranchRuntime(branch()), expected_branch="not a branch")
+
+    def test_malformed_hello_scopes_are_rejected(self):
+        for hello in ({"schema": BRANCH_SCHEMA, "mode": "branch"},
+                      {"schema": BRANCH_SCHEMA, "mode": "unscoped", "branch_id": "branch-a"},
+                      {"schema": BRANCH_SCHEMA, "mode": "invented", "branch_id": "branch-a"},
+                      {"schema": "lvz.other.v1", "mode": "branch", "branch_id": "branch-a"},
+                      {"schema": BRANCH_SCHEMA, "mode": "branch", "branch_id": "bad id"}):
+            with self.assertRaises(ProtocolError):
+                self.client(BranchRuntime(hello)).hello()
+
+    def test_protocol_and_evidence_branch_grammars_agree(self):
+        samples = ["a", "A-1_b.c:d", "0" * 64, "x" * 65, "", "-a", "a b", "a/b", "雾夜", "branch:2-3"]
+        accepted = {}
+        for name, validator in (("protocol", branch_scope_id), ("evidence", evidence_branch_id)):
+            accepted[name] = {value for value in samples if _accepts(validator, value)}
+        self.assertEqual(accepted["protocol"], accepted["evidence"])
+        self.assertIn("branch:2-3", accepted["protocol"])
+        self.assertIn("0" * 64, accepted["protocol"])
+
+
+def _accepts(validator, value):
+    try:
+        validator(value)
+        return True
+    except Exception:
+        return False
 
 
 class ClientTests(unittest.TestCase):

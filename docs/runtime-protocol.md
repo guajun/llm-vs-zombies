@@ -31,6 +31,62 @@ closed health. Older undeclared records keep their existing contract; see
 - Mutations deduplicate same epoch/request_id and identical request content. Changed payload with reused ID fails. New epoch on Board/readiness transitions or an external backward native clock; stale observations fail. RNG and clock sidecar operations retain the epoch and explicitly increment revision. State-changing same-tick actions increment revision.
 - Every action, including failed attempts, goes through the same executor for REPL and replay. Preserve request/execution boundaries and ordinal in logs. Strict determinism and checkpoints remain false until independently verified.
 
+## Branch scope and dedup namespaces
+
+A runtime instance owns exactly one **branch scope**. The dedup namespace is
+`(branch_id, epoch, request_id)`, and a version triple is only comparable inside
+one scope: the full version namespace is `(branch_id, epoch, tick, revision)`.
+This exists because a cloned process inherits the parent's journal, epoch, tick
+and revision; without a scope it could answer with a result it never executed.
+
+- `hello.branch` is `{schema:"lvz.branch-scope.v1", mode:"branch"|"unscoped",
+  branch_id, parent_branch_id, origin:"session"|"adopted"|"rebound",
+  dedup_key}`. `dedup_key` is `branch_id+epoch+request_id` for a scoped runtime
+  and `epoch+request_id` for an unscoped one. `capabilities.branch_scope_v1` is
+  always true; `capabilities.branch_rebind` advertises the control below.
+  `status` repeats the same block, and `status` with `params.request_id`
+  additionally reports `request_state:"foreign_branch"` plus `foreign_branch_id`
+  when the ID exists only in another scope: a foreign record is evidence, never
+  an answer, and `response` is never returned for it.
+- A request may carry a top-level `branch`. It is a namespace claim, not
+  content: the runtime strips it before canonicalizing, so the same logical
+  request is byte-identical in every branch. Omitting it keeps the pre-branch
+  contract (the runtime's own scope). A declaration that is not a valid scope id
+  is `invalid_request`; a declaration that differs from the runtime's own scope
+  is `branch_scope_mismatch` with `details.request_branch`,
+  `details.runtime_branch` and, when the ID exists in the declared scope,
+  `details.foreign_record_branch` / `details.foreign_record_content_matches`.
+  Such a request is never executed, never journaled and never answered from the
+  foreign scope.
+- A same-ID record in another scope is never a hit. Identical content (after the
+  scope declaration is stripped) is re-executed and bound to this branch, which
+  is what lets two siblings inject the same `request_id` and each receive its
+  own result. Different content returns `cross_branch_request_id_conflict` with
+  `details.foreign_branch_id`; refusing is deliberate, because one ID must not
+  mean two things inside one tree and a foreign result must never be served.
+  Same-scope retries keep exactly the old behavior and codes
+  (`request_id_conflict`, `dedup_storage_failed`, `dedup_capacity`).
+- `branch_rebind` takes `{branch_id, from_branch_id, parent_branch_id?}`.
+  `from_branch_id` must equal the scope this runtime currently owns, so a clone
+  states what it is leaving instead of silently re-labelling history. It
+  requires a stable boundary with no pending work, an open recording and a
+  healthy journal; otherwise it returns `busy`, `recording_closed`,
+  `branch_rebind_rejected` or `dedup_storage_failed`. The RAM-side caches
+  (hot results, capture cache, bounded terminal reply) move with the identity;
+  every journal record keeps the scope it was admitted under. Repeating the
+  current scope is a no-op success with `rebound:false`.
+- Identity comes from `LVZ_BRANCH_ID` when the orchestrator sets it. Otherwise
+  the runtime derives a process-instance label (session directory plus PID), so
+  two live processes never share a scope by accident. `LVZ_BRANCH_PARENT_ID`
+  records the scope a clone was taken from.
+- Nothing about the branch enters comparable state: the native audit manifest,
+  state digests, draw receipts and `engine_call` evidence stay unchanged, so old
+  and new recordings remain comparable. The scope is recorded in `hello` (and
+  therefore in a run manifest's `branch` block), in the trajectory initial
+  marker's optional `branch` field, and in a replay report's `branch_scope`
+  block, which reports `runtime_branch_id`, `source_branch_id` and the
+  `same_branch`/`other_branch`/`unknown_source_branch` relation.
+
 ## Verified terminal boundaries
 
 A fight ending during a requested update is not automatically an unmeasured tick. When the same non-null Board survives and its actual GameClock delta is exactly one, the controller advances its old epoch/tick, writes `post_step`, then writes:
@@ -88,7 +144,7 @@ If rendering fails after an update, `render_failed` records the actual execution
 
 ## Long-session mutation deduplication
 
-Completed mutation responses are stored in `decisions/runtime-requests.bin`, not retained as an ever-growing tree of observations in the 32-bit process. The in-memory index is exactly 65,536 bucket heads (512 KiB). Bucket chains, exact canonical requests, and complete original responses live in the append-only file. Lookup validates record headers, IDs, and bodies before returning an old result; a damaged or truncated record freezes advancement instead of treating that ID as new. Same-ID retries and `status` with `params.request_id` can recover the exact original response throughout the current epoch, including after recording closes. Epoch changes reset the index namespace while preserving the earlier file evidence.
+Completed mutation responses are stored in `decisions/runtime-requests.bin`, not retained as an ever-growing tree of observations in the 32-bit process. The in-memory index is exactly 65,536 bucket heads (512 KiB). Bucket chains, exact canonical requests, and complete original responses live in the append-only file. Lookup validates record headers, scopes, IDs, and bodies before returning an old result; a damaged or truncated record freezes advancement instead of treating that ID as new. Same-ID retries and `status` with `params.request_id` can recover the exact original response throughout the current epoch and scope, including after recording closes; a record from another scope is reported but never returned. Epoch changes reset the index namespace while preserving the earlier file evidence.
 
 Default ordinary limits are **262,144 admitted IDs per epoch** and **64 GiB of journal bytes**, permitting 200,000 single-tick requests plus initialization and controls without retaining their observations in RAM. These are explicit bounds, not a promise that an unavailable/full disk can accept every possible 4 MiB response. Admission failure happens before the action. Ordinary quota exhaustion reports `dedup_capacity`.
 
@@ -98,7 +154,9 @@ Before admitting the first mutation, the journal physically allocates a separate
 
 The journal is scoped to a running process/session. Completed records are synchronously written to the OS file cache, and final seal uses `FlushFileBuffers`; this does **not** implement restart after a process crash or promise survival of an unsealed power loss. An interrupted run retains its lock and failure evidence. Both files are included in the ordinary archive inventory and SHA-256 seal; deterministic replay continues to use the authoritative native audit and session trace. Journal storage and status counters do not enter game-state digests.
 
-The binary format begins with a 64-byte `LVZREQ01` header. Each little-endian 64-byte record header contains `next`, `request`, `epoch`, `bodyHash`, `idHash` (five uint64 values), `kind`, `idBytes`, `bodyBytes`, `reserved` (four uint32 values), and a uint64 header checksum. It is followed by UTF-8 ID bytes and the canonical request or response body. Kind 1 reserves an ID, kind 3 reserves a closing ID, and kind 2 points to its reservation and stores its response. Offset bit 63 selects the reserve file. Record integrity uses FNV-1a-64; archive authenticity/integrity uses the enclosing SHA-256 inventory. No existing recording is automatically reopened or resumed.
+The binary format begins with a 64-byte `LVZREQ02` header: the magic at offset 0 and a little-endian uint32 sealed state at offset 8 (`0` open, `1` sealed). Each little-endian 72-byte record header contains `next`, `request`, `epoch`, `bodyHash`, `idHash`, `scopeHash` (six uint64 values), `kind`, `idBytes`, `bodyBytes`, `scopeBytes` (four uint32 values), and a uint64 header checksum. It is followed by the branch-scope bytes, the UTF-8 ID bytes and the canonical request or response body; the canonical body excludes the request's `branch` declaration, which is namespace metadata rather than content. Kind 1 reserves an ID, kind 3 reserves a closing ID, and kind 2 points to its reservation and stores its response. Offset bit 63 selects the reserve file. A completion must repeat its reservation's scope. Record integrity uses FNV-1a-64; archive authenticity/integrity uses the enclosing SHA-256 inventory.
+
+`LVZREQ01` files predate branch scope. They remain valid archive evidence and are never adopted, reopened or rewritten in place. `JournalOptions.adopt` (environment `LVZ_JOURNAL_ADOPT=1`, with `LVZ_JOURNAL_EPOCH` selecting the inherited epoch, default 1) reopens an **unsealed** journal whose previous owner released it: it refuses `LVZREQ01`, sealed, truncated, damaged and still-locked files, rebuilds the bucket index from the validated records of that epoch, keeps older records as unreachable evidence, and requires the preallocated emergency reserve tail to be untouched zeros so a torn append fails closed. Adopted records keep their original scope, which is why an inherited same-ID record becomes foreign evidence for the adopting branch. No existing recording is automatically reopened or resumed.
 # Controlled original-call boundaries (issue #11)
 
 New recordings explicitly negotiate `game.engine_call_boundary.mode` and

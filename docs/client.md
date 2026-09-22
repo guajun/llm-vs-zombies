@@ -59,6 +59,12 @@ python examples/persistent_strategy.py --pid 1234 --trace experiments/runs/trial
 
 **客户端完全不自动重试请求，包括跨 epoch 情况。** 每次新调用生成唯一 ID；同一个客户端拒绝重复 ID。若变更请求发送后断线、超时或收到无法信任的响应，会抛出 `OutcomeUnknown`，关闭连接并在 trace 中保留请求 ID、请求内容及异常。此时不能用新 ID 重复原动作；原动作可能已经执行。应先查看服务端执行记录和新的 `hello` / `observe`，确认当前会话、epoch 与实际状态，再决定后续动作。当前客户端不提供跨进程 exactly-once 保证或自动断点续跑。
 
+## 分支作用域
+
+`hello` 之后客户端会记住 runtime 声明的分支作用域（`game.branch_id` / `game.branch_scope`），并在此后每个请求上带同一个 `branch` 字段。服务端先去重键是 `(branch_id, epoch, request_id)`，字段本身不进入请求内容，因此同一逻辑请求在每个分支里逐字节相同。若旧的 runtime 不声明作用域，客户端不会发送该字段，行为与旧版完全一致。
+
+`connect(..., expected_branch="branch-a")` 把连接绑到一个作用域：克隆出的进程若忘了改写自己的身份，`hello` 阶段就会失败，而不是回答另一条时间线的结果。宿主用 `game.branch_rebind("branch-b", parent_branch_id="branch-a")` 把一个内存克隆切到新作用域（必须声明自己正在离开的作用域）；服务端返回 `branch_scope_mismatch`、`cross_branch_request_id_conflict` 或 `branch_rebind_rejected` 时都**不会**执行动作，也不会写入 journal。跨分支复用 ID 与版本命名空间规则见[分支作用域隔离](分支作用域隔离.md)与[运行协议](runtime-protocol.md#branch-scope-and-dedup-namespaces)。
+
 `--timeout` 默认 15 秒，是一个请求的总通信期限，不会因每个短读重新开始。大跨度推进可显式增加 `game.advance(1000, timeout=60)`。超时不等于取消游戏动作。运行时取消必须使用明确的 `cancel` 请求。
 
 同一客户端串行处理请求。要从另一个进程/线程取消正在执行的长推进，创建**第二个连接及独立 trace 文件**，调用 `control.cancel()` 或 `control.pause()`；这两种边界控制请求允许省略 expect，避免等待一次额外观察。`status()` 返回服务端当前状态。

@@ -10,6 +10,18 @@ Json Success(const std::string& id,Json result) {
     return {{"protocol",1},{"request_id",id},{"ok",true},{"result",std::move(result)}};
 }
 Json Controller::Version() const { return {{"epoch",epoch_},{"tick",tick_},{"revision",revision_}}; }
+Json Controller::BranchIdentity() const {
+    const auto& branch=journal_.Branch();
+    Json parent=nullptr;
+    if(!branchParent_.empty()) parent=branchParent_; else if(!journal_.Limits().parentBranch.empty()) parent=journal_.Limits().parentBranch;
+    Json identity={{"schema","lvz.branch-scope.v1"},{"origin",branchOrigin_},{"parent_branch_id",std::move(parent)}};
+    if(branch.empty()) {
+        identity["mode"]="unscoped";identity["branch_id"]=nullptr;identity["dedup_key"]="epoch+request_id";
+    } else {
+        identity["mode"]="branch";identity["branch_id"]=branch;identity["dedup_key"]="branch_id+epoch+request_id";
+    }
+    return identity;
+}
 Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Version();
     if(backend_.RequiresRenderPreparation())value["render_prepared"]=backend_.RenderPrepared();
     if(backend_.SupportsAppUpdateAnchor())value["app_update_anchored"]=backend_.AppUpdateAnchored();
@@ -20,6 +32,7 @@ Json Controller::Status() const {
         {"dedup_storage_fault",storageFault_.empty()?(journal_.Fault().empty()?Json(nullptr):Json(journal_.Fault())):Json(storageFault_)},
         {"dedup",{{"entries",journal_.Entries()},{"disk_bytes",journal_.Bytes()},{"index_bytes",RequestJournal::BucketCount*sizeof(uint64_t)},{"hot_results",cache_.size()},{"sealed",journal_.Sealed()}}},
         {"version",Version()},{"pending_request_id",pending_?Json(pending_->id):Json(nullptr)},
+        {"branch",BranchIdentity()},
         {"executed_ticks",pending_?pending_->executed:0},{"engine_call",engineCalls_.Health()}};
 }
 void Controller::Audit(const std::string& kind,const Json& payload) {
@@ -293,8 +306,41 @@ void Controller::Request(const Json& req,Reply reply) {
         std::string method=req["method"];
         Json params=req.value("params",Json::object());
         if(!params.is_object()) { reply(Error(id,"invalid_request","params must be an object")); return; }
+        // The scope declaration is a namespace claim, never request content.
+        // Stripping it keeps one logical request byte-identical in every branch,
+        // so a sibling replaying a shared prefix is not a false conflict.
+        Json scoped=req;scoped.erase("branch");
+        std::string canonical=scoped.dump();
+        // Branch-scoped request namespace (issue #32). A request may declare the
+        // scope it belongs to; the absent field keeps the pre-branch contract
+        // for old clients, and a mismatch is always an explicit error because a
+        // runtime can only speak for the branch it actually owns.
+        std::string declared;
+        if(req.contains("branch")) {
+            if(!req["branch"].is_string()||!RequestJournal::ValidBranch(req["branch"].get<std::string>())) {
+                reply(Error(id,"invalid_request","branch must be 1-64 characters of [A-Za-z0-9._:-] starting alphanumeric"));return;
+            }
+            declared=req["branch"].get<std::string>();
+        }
+        const auto& own=journal_.Branch();
+        if(!declared.empty()&&declared!=own) {
+            auto details=Json{{"request_branch",declared},{"runtime_branch",own.empty()?Json(nullptr):Json(own)}};
+            auto foreign=journal_.Find(id);
+            if(foreign.foreign) {
+                details["foreign_record_branch"]=foreign.foreign->branch;
+                details["foreign_record_content_matches"]=foreign.foreign->payload==canonical;
+            }
+            auto response=Error(id,"branch_scope_mismatch",own.empty()
+                ?"This runtime has no branch scope and cannot answer a branch-scoped request"
+                :"Request declares branch "+declared+"; this runtime owns branch "+own);
+            response["error"]["details"]=std::move(details);
+            reply(std::move(response));return;
+        }
         if(method=="hello") {
             auto result=backend_.Hello(); result["protocol"]=1; result["epoch"]=epoch_;
+            if(!result.contains("capabilities")||!result["capabilities"].is_object()) result["capabilities"]=Json::object();
+            result["capabilities"]["branch_scope_v1"]=true;result["capabilities"]["branch_rebind"]=true;
+            result["branch"]=BranchIdentity();
             result["limits"]={{"max_ticks",MaxTicks},{"max_actions",MaxActions},{"dedup_entries_per_epoch",journal_.Limits().normalEntries},
                 {"dedup_index_bytes",RequestJournal::BucketCount*sizeof(uint64_t)},{"dedup_disk_bytes",journal_.Limits().normalBytes},
                 {"dedup_control_reserve_entries",journal_.Limits().reserveEntries},{"dedup_control_reserve_bytes",journal_.Limits().reserveBytes},
@@ -319,18 +365,60 @@ void Controller::Request(const Json& req,Reply reply) {
                 }
                 result["request_state"]=it==cache_.end()?"unknown":(it->second.response?"completed":"pending");
                 if(it!=cache_.end()&&it->second.response) result["response"]=*it->second.response;
-                if(it==cache_.end()) if(auto old=journal_.Find(wanted)) {
-                    result["request_state"]=old->response?"completed":"pending";
-                    if(old->response) result["response"]=Json::parse(*old->response);
+                if(it==cache_.end()) {
+                    auto old=journal_.Find(wanted);
+                    if(old.hit) {
+                        result["request_state"]=old.hit->response?"completed":"pending";
+                        if(old.hit->response) result["response"]=Json::parse(*old.hit->response);
+                    } else if(old.foreign) {
+                        // Only this branch's records are answers; a same-ID record
+                        // from another scope is reported, never served.
+                        result["request_state"]="foreign_branch";
+                        result["foreign_branch_id"]=old.foreign->branch;
+                    }
                 }
                 reply(Success(id,std::move(result)));
             } else reply(Success(id,Status()));
             return;
         }
+        if(method=="branch_rebind") {
+            if(!params.contains("branch_id")||!params["branch_id"].is_string()
+                ||!params.contains("from_branch_id")||!params["from_branch_id"].is_string()) {
+                reply(Error(id,"invalid_params","branch_rebind requires string branch_id and from_branch_id"));return;
+            }
+            const std::string target=params["branch_id"].get<std::string>();
+            const std::string from=params["from_branch_id"].get<std::string>();
+            if(!RequestJournal::ValidBranch(target)) {
+                reply(Error(id,"invalid_params","branch_id must be 1-64 characters of [A-Za-z0-9._:-] starting alphanumeric"));return;
+            }
+            if(params.contains("parent_branch_id")&&!params["parent_branch_id"].is_string()&&!params["parent_branch_id"].is_null()) {
+                reply(Error(id,"invalid_params","parent_branch_id must be a string or null"));return;
+            }
+            if(from!=own) {
+                auto response=Error(id,"branch_rebind_rejected","from_branch_id must name this runtime's current branch");
+                response["error"]["details"]={{"from_branch_id",from},{"runtime_branch",own.empty()?Json(nullptr):Json(own)}};
+                reply(std::move(response));return;
+            }
+            if(target==own) { reply(Success(id,{{"rebound",false},{"branch",BranchIdentity()}}));return; }
+            if(pending_||inStep_) { reply(Error(id,"busy","A branch rebind requires a paused boundary without pending work"));return; }
+            if(!fault_.empty()||!storageFault_.empty()||!journal_.Fault().empty()) {
+                reply(Error(id,"dedup_storage_failed","A branch rebind requires a healthy request journal"));return;
+            }
+            if(recordingClosed_) { reply(Error(id,"recording_closed","This run has been finalized; begin a new process and run"));return; }
+            journal_.Rebind(target);
+            branchOrigin_="rebound";
+            branchParent_=params.contains("parent_branch_id")&&params["parent_branch_id"].is_string()
+                ?params["parent_branch_id"].get<std::string>():(from.empty()?std::string():from);
+            // Only RAM-side caches move with the identity: every journal record
+            // keeps the scope it was admitted under, so the previous branch's
+            // results stay readable evidence and never become this branch's hits.
+            cache_.clear();captureCache_.clear();captureResponses_.clear();captureMetadataBytes_=0;
+            terminalReply_.reset();
+            reply(Success(id,{{"rebound",true},{"previous_branch_id",from},{"branch",BranchIdentity()}}));return;
+        }
         if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render"&&method!="app_update_anchor"&&method!="sound_counter_origin") {
             reply(Error(id,"unsupported_method","Method is not implemented")); return;
         }
-        std::string canonical=req.dump();
         if(terminalReply_&&terminalReply_->id==id) {
             reply(terminalReply_->canonical==canonical?Json::parse(terminalReply_->response):Error(id,"request_id_conflict","Terminal request ID has different content"));return;
         }
@@ -340,11 +428,24 @@ void Controller::Request(const Json& req,Reply reply) {
             else it->second.waiters.push_back(std::move(reply));
             return;
         }
-        if(auto old=journal_.Find(id)) {
-            if(old->payload!=canonical) reply(Error(id,"request_id_conflict","Same request_id has different content in this epoch"));
-            else if(old->response) reply(Json::parse(*old->response));
+        auto old=journal_.Find(id);
+        if(old.hit) {
+            if(old.hit->payload!=canonical) reply(Error(id,"request_id_conflict","Same request_id has different content in this epoch"));
+            else if(old.hit->response) reply(Json::parse(*old.hit->response));
             else reply(Error(id,"dedup_storage_failed","Accepted request has no recoverable completion; it will never execute again"));
             return;
+        }
+        if(old.foreign&&old.foreign->payload!=canonical) {
+            // The same ID already denotes a different request in an inherited
+            // branch scope. Executing it here would make one ID mean two things
+            // inside one tree, and returning the foreign result would answer a
+            // request this process never ran.
+            auto response=Error(id,"cross_branch_request_id_conflict",
+                "Request ID is already bound to different content in branch "+old.foreign->branch);
+            response["error"]["details"]={{"foreign_branch_id",old.foreign->branch},
+                {"runtime_branch_id",own.empty()?Json(nullptr):Json(own)},{"content_matches",false},
+                {"scope","branch_id+epoch+request_id"}};
+            reply(std::move(response));return;
         }
         if(auto it=captureCache_.find(id);it!=captureCache_.end()) {
             if(it->second.payload!=canonical) reply(Error(id,"request_id_conflict","Same request_id has different content in this epoch"));

@@ -30,9 +30,11 @@ class ModelTransport:
     def __init__(self, directory, *, epoch=1, revision=0, divergence=None, wrong_result=False, terminal_tick=None,
                  pixel_byte=1, wrong_capture_guard=False, capture_timeout=False, animation_handle=None,
                  particle_pointer=None, particle_id=65538, particle_overflow=False, pause_changes_state=False, status_pending=False,
-                 deny_pause=False, spawn_schedule=None, initialization_spawns=0, spawn_overflow=False, late_spawn=False):
+                 deny_pause=False, spawn_schedule=None, initialization_spawns=0, spawn_overflow=False, late_spawn=False,
+                 branch=None):
         self.directory = directory
         directory.mkdir(parents=True)
+        self.branch = branch
         self.game, self.animation_handle = copy.deepcopy(GAME), animation_handle
         self.particle_pointer, self.particle_id, self.particle_overflow = particle_pointer, particle_id, particle_overflow
         self.particle_count, self.particle_digest = 0, 14695981039346656037
@@ -155,6 +157,11 @@ class ModelTransport:
         if method == "hello":
             result = {"build": BUILD, "game": self.game, "session": "synthetic", "pid": 123,
                       "capabilities": dict.fromkeys(("observe", "advance", "commit", "audit_snapshot", "capture_frame"), True)}
+            if self.branch is not None:
+                result["branch"] = {"schema": "lvz.branch-scope.v1", "mode": "branch", "branch_id": self.branch,
+                                    "parent_branch_id": None, "origin": "session",
+                                    "dedup_key": "branch_id+epoch+request_id"}
+                result["capabilities"]["branch_scope_v1"] = True
             if self.deny_pause:
                 result["capabilities"]["pause"] = False
         elif method == "observe":
@@ -291,7 +298,7 @@ class ReplayTests(unittest.TestCase):
     def initializer(self, *, divergence=None, wrong_result=False, wrong_identity=False, terminal_tick=None,
                     wrong_capture_guard=False, capture_timeout=False, wrong_particle_id=False, particle_overflow=False,
                     pause_changes_state=False, status_pending=False, deny_pause=False, spawn_schedule=None,
-                    initialization_spawns=0, spawn_overflow=False, late_spawn=False):
+                    initialization_spawns=0, spawn_overflow=False, late_spawn=False, live_branch=None):
         @contextmanager
         def initialize(trajectory, output):
             self.live = ModelTransport(output / "audit", epoch=99, revision=2,
@@ -302,7 +309,7 @@ class ReplayTests(unittest.TestCase):
                                        particle_id=131074 if wrong_particle_id else 65538, particle_overflow=particle_overflow,
                                        pause_changes_state=pause_changes_state, status_pending=status_pending, deny_pause=deny_pause,
                                        spawn_schedule=spawn_schedule, initialization_spawns=initialization_spawns,
-                                       spawn_overflow=spawn_overflow, late_spawn=late_spawn)
+                                       spawn_overflow=spawn_overflow, late_spawn=late_spawn, branch=live_branch)
             identity = copy.deepcopy(self.identity)
             if wrong_identity:
                 identity["artifacts"]["module_hashes"]["runtime"] = "4" * 64
@@ -670,6 +677,37 @@ class ReplayTests(unittest.TestCase):
     def test_target_out_of_range_is_rejected(self):
         with self.assertRaises(ValueError):
             replay(self.trajectory, self.initializer(), self.root / "out", target_tick=6)
+
+    def test_live_branch_scope_is_adopted_and_stamped_on_requests(self):
+        result = replay(self.trajectory, self.initializer(live_branch="branch-b"), self.root / "branch-scope")
+        self.assertTrue(result["equal"])
+        self.assertEqual(result["branch_scope"]["mode"], "runtime_declared")
+        self.assertEqual(result["branch_scope"]["runtime_branch_id"], "branch-b")
+        self.assertEqual(result["branch_scope"]["dedup_key"], "branch_id+epoch+request_id")
+        self.assertIsNone(result["branch_scope"]["source_branch_id"])
+        self.assertEqual(result["branch_scope"]["relation"], "unknown_source_branch")
+        self.assertEqual(result["branch_id"], "branch-b")
+        stamped = [request for request in self.live.requests if request["method"] != "hello"]
+        self.assertTrue(stamped)
+        self.assertTrue(all(request.get("branch") == "branch-b" for request in stamped))
+        self.assertNotIn("branch", self.live.requests[0])
+
+    def test_branch_relation_is_reported_against_the_source_recording(self):
+        source = self.root / "branch-source"
+        source.mkdir()
+        with SessionTrace(source / "session.jsonl") as trace, Client(ModelTransport(source / "audit", branch="branch-a"), trace=trace) as client:
+            capture_initial(client, identity=self.identity, initialization={"synthetic": True})
+            client.advance(1)
+            client.request("stop_recording", expect=client.version)
+        trajectory = build_trajectory(source / "session.jsonl", source / "audit", self.root / "branch-bundle")
+        self.assertEqual(trajectory.initial["branch"]["branch_id"], "branch-a")
+        same = replay(trajectory, self.initializer(live_branch="branch-a"), self.root / "branch-same")
+        self.assertEqual(same["branch_scope"]["relation"], "same_branch")
+        self.assertEqual(same["branch_id"], "branch-a")
+        other = replay(trajectory, self.initializer(live_branch="branch-b"), self.root / "branch-other")
+        self.assertEqual(other["branch_scope"]["relation"], "other_branch")
+        self.assertEqual(other["branch_scope"]["source_branch_id"], "branch-a")
+        self.assertEqual(other["branch_id"], "branch-b")
 
     def terminal_recording(self):
         directory = self.root / "terminal-source"
