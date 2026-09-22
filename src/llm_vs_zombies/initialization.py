@@ -62,7 +62,10 @@ def verify_seeded_rng(snapshot: dict, seed: int) -> None:
 def _persist(client, run: Path, hello: dict, recipe: dict, evidence: dict,
              snapshot: dict, observation: dict, scenario_verified: bool) -> None:
     from .records import read_json, record_initial_state, sha256, write_json
-    run = Path(run)
+    # record_initial_state reads relative evidence paths against the run, so the
+    # base is resolved once here; a relative caller path must not be prefixed twice
+    # into a path outside the archive allowlist.
+    run = Path(run).resolve()
     manifest = read_json(run / "manifest.json")
     if manifest.get("status") != "recording":
         raise ValueError("cannot rewrite initialization of a finalized run")

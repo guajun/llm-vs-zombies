@@ -71,6 +71,24 @@ class RecordingTests(unittest.TestCase):
         self.assertNotIn("branch", manifest)
         self.assertIn("runtime_hello_sha256", manifest)
 
+    def test_initial_evidence_outside_the_archive_allowlist_is_still_rejected(self):
+        run = create_run(self.root, self.config, 'allowlist')
+        observation = self.initial_observation(run)
+        hello = self.initial_hello(branch=False)
+        (run / 'sandbox').mkdir()
+        write_json(run / 'sandbox/initial.json', read_json(observation))
+        write_json(self.root / 'initial.json', read_json(observation))
+        saved = (run / 'manifest.json').read_bytes()
+        with self.assertRaisesRegex(ValueError, 'archive allowlist'):
+            record_initial_state(run, observation_path=run / 'sandbox/initial.json',
+                                 hello=hello, scenario_verified=True)
+        with self.assertRaisesRegex(ValueError, 'inside the run'):
+            record_initial_state(run, observation_path=self.root / 'initial.json',
+                                 hello=hello, scenario_verified=True)
+        self.assertEqual((run / 'manifest.json').read_bytes(), saved)
+        manifest = record_initial_state(run, observation_path=observation, hello=hello, scenario_verified=True)
+        self.assertEqual(manifest['initial_state']['observation']['path'], 'observations/initial.json')
+
     def test_first_divergence(self):
         result = compare(self.runfile('a'),self.runfile('b',hp=299))
         self.assertFalse(result['equal'])

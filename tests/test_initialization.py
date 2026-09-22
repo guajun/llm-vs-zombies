@@ -1,6 +1,8 @@
 """Protocol fixtures for initialization ordering, not native determinism evidence."""
 import base64
+import contextlib
 import copy
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -419,6 +421,49 @@ class LauncherPreparationTests(unittest.TestCase):
                     self.assertNotIn('initialize', [r['method'] for r in runtime.requests])
                 else:
                     self.assertEqual([c[0] for c in calls], ['launch', 'inject'])
+
+    def test_cli_relative_run_binds_b0_evidence_inside_the_archive_allowlist(self):
+        from llm_vs_zombies.sound_effects import MODE
+        from test_sound_effects import SPEC, activation, sound_state
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = root/'experiments/runs/silent'
+            (run/'observations').mkdir(parents=True); (run/'decisions').mkdir(); (run/'sandbox').mkdir()
+            (run/'manifest.json').write_text(json.dumps({'status':'recording','initial_state':{'captured':False}}))
+            runtime = PreparationRuntime(menu=True)
+            runtime.hello_value['game']['sound_effects'] = copy.deepcopy(SPEC)
+            runtime.hello_value['capabilities'][MODE] = True
+            runtime.state['sound_effects'] = sound_state()
+            client = Client(runtime, trace=Mock()); client.hello()
+            state = dict(sandbox=str(run/'sandbox'), engine='engine', bootstrap='bootstrap', runtime='recorder',
+                         module_hashes={'lvz-bootstrap.dll': SPEC['bootstrap_sha256']})
+            def native(state,verb,*args):
+                if verb != 'launch':
+                    return {}
+                return dict(pid=123, creation_time=456, audio_activation=activation()['pre_resume'])
+            # The reported launcher CLI shape: the project root is the working
+            # directory and --run is the relative path typed there.
+            with contextlib.chdir(root), \
+                 patch('llm_vs_zombies.launcher.prepare',return_value=state), \
+                 patch('llm_vs_zombies.launcher._native',side_effect=native), \
+                 patch('llm_vs_zombies.client.connect',return_value=client):
+                result = start(root, Path('experiments/runs/silent'), seed=42, audio_mode=MODE)
+            client.close()
+            manifest = json.loads((run/'manifest.json').read_text())
+            self.assertEqual(result['audio_mode'], MODE)
+            self.assertEqual(result['status'], 'ready')
+            self.assertEqual(result['initialization_recipe']['execution_mode'], DRAW_MODE)
+            self.assertEqual(runtime.draws, 1)
+            # B0 is bound by paths the archive allowlist actually covers.
+            self.assertTrue(manifest['initial_state']['captured'])
+            self.assertTrue(manifest['initial_state']['render_prepared'])
+            self.assertEqual(manifest['initial_state']['observation']['path'], 'observations/initial.json')
+            self.assertEqual(manifest['initial_state']['audit_snapshot']['path'], 'observations/initial-audit.json')
+            self.assertEqual(manifest['initial_state']['version'], client.version)
+            for key, name in (('observation','initial.json'), ('audit_snapshot','initial-audit.json')):
+                self.assertEqual(manifest['initial_state'][key]['sha256'],
+                                 hashlib.sha256((run/'observations'/name).read_bytes()).hexdigest())
+            self.assertFalse((run/'experiments').exists())
+            self.assertEqual(json.loads((run/'launcher.json').read_text())['status'], 'ready')
 
     def test_default_launch_prepares_and_deferred_launch_leaves_warm_to_recipe(self):
         for deferred in (False,True):
