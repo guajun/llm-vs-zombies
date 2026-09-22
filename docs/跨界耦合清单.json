@@ -1,0 +1,405 @@
+{
+  "schema": "lvz.cross-boundary.v1",
+  "generated": "2026-09-22",
+  "issue": {"number": 34, "title": "[N6] 跨界耦合清单与探针", "epic": 39},
+  "contract": {
+    "document": "docs/分支数据合同与实施计划.md",
+    "section": "§3.4",
+    "probe_section": "§7.2",
+    "ladder": "§3.3 R0–R4"
+  },
+  "scope": "只读静态 PE 导入表、候选反编译副本（work/replay-research/，提交 8a2d1218）与已归档实测记录；不启动游戏、不注入、不做运行期 API 追踪。",
+  "evidence_classes": {
+    "静态导入表": "PE 导入描述符中的名字与 IAT 槽 VA；证明被引用，不证明被调用，不证明返回值进入控制流",
+    "动态调用点": "候选反编译副本的具体 file:line，与既有文档的 [源码] 同级，未逐条反汇编",
+    "既有实测": "项目已归档的运行观测，含独立机器码复核；本文只引用，不新增"
+  },
+  "vocabulary": {
+    "status": {
+      "已固定": "存在已实现且被证据支持的机制使该输入不再是自由度；必须写明前提条件",
+      "已证伪": "有证据表明该耦合在本目标上不可达（本次仅指“三个扫描文件的导入表与原始字符串均无该名”），或已有实测表明其变化不进入 S",
+      "待定": "其余全部情形，含“机制成立而后果未实测”“有导入槽但找不到调用点”“观测器未采集到有效样本”"
+    },
+    "control_flow": {
+      "enters_control_flow": "返回值参与比较/选择、算术或随机消费（合同 §2.1）",
+      "output_only": "返回值只用于显示、日志、诊断、统计",
+      "unresolved": "有读取点但本次无法判定其角色"
+    },
+    "status_rule": "本次所有“已证伪”都是静态不可达这一种含义，逐条标注未覆盖面；没有任何一条因“实测未发现差异”而升级。"
+  },
+  "scan": {
+    "tool": "tools/import_scan.py",
+    "schema": "lvz.import-scan.v1",
+    "command": "python tools/import_scan.py --strings --json work/import-scan.json --text work/import-scan.txt game/original/PlantsVsZombies.exe game/local-engine/PlantsVsZombies.exe game/original/bass.dll",
+    "never_loads_target": true,
+    "targets": [
+      {
+        "path": "game/local-engine/PlantsVsZombies.exe",
+        "role": "实际引擎（判定主目标）；外层 wrapper 解包后的 popcapgame1.exe",
+        "sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322",
+        "size": 3007800,
+        "kind": "PE32",
+        "image_base": "0x400000",
+        "import_count": 276,
+        "delay_import_count": 0,
+        "matches": {
+          "time": ["GetTickCount@0x65208c", "QueryPerformanceCounter@0x652088", "QueryPerformanceFrequency@0x652084", "GetSystemTimeAsFileTime@0x652190", "GetLocalTime@0x6521a8", "timeGetTime@0x652400"],
+          "audio": ["mixerOpen@0x65240c", "PlaySoundA@0x65241c"],
+          "cursor_focus_window": ["GetActiveWindow@0x6523d8", "GetCursorPos@0x652308", "GetFocus@0x6523a0", "SetFocus@0x6522ec", "SetActiveWindow@0x652378", "SetForegroundWindow@0x6522d8", "ShowWindow@0x6522b8", "GetMessageA@0x652398", "PeekMessageA@0x652328", "DispatchMessageA@0x6522d0", "TranslateMessage@0x6522a4", "PostMessageA@0x65230c", "SendMessageA@0x6523d0", "SetCapture@0x652374", "ReleaseCapture@0x652340", "ScreenToClient@0x652304", "ClientToScreen@0x652348", "GetClientRect@0x6522f4", "GetWindowRect@0x652300", "IsWindowVisible@0x6523c4", "GetSystemMetrics@0x652324", "EnumWindows@0x652350", "LoadCursorA@0x6523d4", "SetCursor@0x6523c8", "RegisterWindowMessageA@0x6522ac", "SetTimer@0x652314"],
+          "file_log_crt": ["CreateFileA@0x652114", "CreateFileW@0x652098", "ReadFile@0x652210", "WriteFile@0x652214", "SetFilePointer@0x652220", "FlushFileBuffers@0x652258", "GetFileSize@0x65216c", "FindFirstFileA@0x6520f4", "CreateDirectoryA@0x6521bc", "GetCurrentDirectoryA@0x65225c", "GetCurrentDirectoryW@0x65214c", "SetCurrentDirectoryA@0x652260", "GetModuleFileNameA@0x65206c", "RegOpenKeyExA@0x652014", "RegCreateKeyExA@0x652004", "RegQueryValueExA@0x652018", "RegSetValueExA@0x65200c"],
+          "parallel_shared": ["CreateMutexA@0x6520e0", "CreateEventA@0x65215c", "CreateFileMappingA@0x65207c", "MapViewOfFile@0x652078", "OpenFileMappingA@0x652124", "GetModuleHandleA@0x652070", "GetCurrentProcessId@0x652080", "GetCurrentThreadId@0x6520e8", "ShellExecuteA@0x652294", "WinExec@0x652074"],
+          "dynamic_loader": ["LoadLibraryA@0x6520a4", "LoadLibraryW@0x652150", "GetProcAddress@0x6520ac", "FreeLibrary@0x6520a8"]
+        },
+        "string_hits_note": "DirectSoundCreate、BASS_Init/BASS_ChannelIsActive 等、GetLastInputInfo 以原始字符串出现 → 运行时按名解析，导入表必然缺席"
+      },
+      {
+        "path": "game/original/PlantsVsZombies.exe",
+        "role": "外层包装器；不是本项目运行时（启动器直接运行内层引擎）",
+        "sha256": "9397ca2dc3a4560eba5f87aef40fd800786ba0312716729ccbdbda185abee27d",
+        "size": 1885896,
+        "kind": "PE32",
+        "image_base": "0x400000",
+        "import_count": 261,
+        "delay_import_count": 0,
+        "matches": {
+          "time": ["GetTickCount@0x53d124", "QueryPerformanceCounter@0x53d0b0", "QueryPerformanceFrequency@0x53d0b4", "GetSystemTimeAsFileTime@0x53d1a4", "timeGetTime@0x53d414"],
+          "audio": ["PlaySoundA@0x53d40c"],
+          "cursor_focus_window": ["GetForegroundWindow@0x53d31c", "GetCursorPos@0x53d360", "GetFocus@0x53d3bc", "SetFocus@0x53d2d4", "SetForegroundWindow@0x53d394", "ShowWindow@0x53d2f4", "GetMessageA@0x53d314", "PeekMessageA@0x53d2e8", "DispatchMessageA@0x53d328", "TranslateMessage@0x53d398", "PostMessageA@0x53d38c", "SendMessageA@0x53d334", "SetCapture@0x53d3d0", "ReleaseCapture@0x53d3cc", "ScreenToClient@0x53d3e0", "ClientToScreen@0x53d36c", "GetClientRect@0x53d310", "GetWindowRect@0x53d344", "IsWindowVisible@0x53d2ec", "GetSystemMetrics@0x53d2e4", "EnumWindows@0x53d3a4", "LoadCursorA@0x53d300", "SetCursor@0x53d3c8", "RegisterWindowMessageA@0x53d370"],
+          "file_log_crt": ["CreateFileA@0x53d070", "ReadFile@0x53d154", "WriteFile@0x53d150", "SetFilePointer@0x53d12c", "FlushFileBuffers@0x53d120", "FindFirstFileA@0x53d254", "CreateDirectoryA@0x53d210", "GetCurrentDirectoryA@0x53d10c", "SetCurrentDirectoryA@0x53d108", "GetModuleFileNameA@0x53d240", "RegOpenKeyExA@0x53d00c", "RegCreateKeyExA@0x53d014", "RegQueryValueExA@0x53d000", "RegSetValueExA@0x53d004"],
+          "parallel_shared": ["CreateMutexA@0x53d1cc", "CreateEventA@0x53d084", "CreateFileMappingA@0x53d090", "MapViewOfFile@0x53d080", "OpenFileMappingA@0x53d22c", "OpenEventA@0x53d238", "OpenMutexA@0x53d228", "CreateProcessA@0x53d0d8", "ShellExecuteA@0x53d2b0", "GetModuleHandleA@0x53d0ac", "GetCurrentProcessId@0x53d0b8", "GetCurrentThreadId@0x53d278"],
+          "dynamic_loader": ["LoadLibraryA", "GetProcAddress", "GetModuleHandleA"]
+        },
+        "note": "对比目的：GetForegroundWindow 只在这里出现；引擎不导入它（见条目 C16）"
+      },
+      {
+        "path": "game/original/bass.dll",
+        "role": "锁定音乐/音频插件（dependencies.lock.json 锁定）",
+        "sha256": "3627adef7e04dd7aa9b8e116d0afc11dcee40d0e09d573210a4f86bdc81a80b6",
+        "size": 92216,
+        "kind": "PE32",
+        "image_base": "0x10000000",
+        "import_count": 12,
+        "delay_import_count": 0,
+        "matches": {
+          "audio": ["mixerOpen@0x1004029c"],
+          "parallel_shared": ["GetModuleHandleA@0x1004027c"]
+        },
+        "note": "无任何时间源导入；依赖 MSACM32.dll（ACM 编解码器栈）"
+      }
+    ],
+    "absent_in_all_scanned_files": [
+      "GetTickCount64", "time", "_time32", "_time64", "clock", "GetSystemTime", "GetSystemTimePreciseAsFileTime",
+      "DirectSoundCreate", "DirectSoundCreate8", "DirectSoundEnumerateA", "DirectSoundCaptureCreate", "waveOutOpen", "waveOutGetPosition", "waveOutWrite",
+      "BASS_Init", "BASS_ChannelIsActive", "BASS_ChannelGetPosition", "BASS_StreamCreateFile",
+      "GetAsyncKeyState", "GetLastInputInfo", "SetCursorPos", "ShowCursor", "FindWindowA",
+      "fopen", "fread", "fwrite", "fflush", "fclose", "setvbuf"
+    ],
+    "blind_spots": [
+      "静态 CRT [推断]：引擎导入表无 MSVCRT.dll 或其它 CRT（三个文件里只有 bass.dll 带 MSVCRT.dll），time/_time64/clock 因此必然缺席",
+      "运行时解析：LoadLibraryA + GetProcAddress 取得 SHGetFolderPathA/W、DirectSoundCreate、GetLastInputInfo、BASS_*；这些名字只出现在原始字符串中",
+      "GetTickCount64 同时没有导入槽与原始字符串命中；DirectSoundCreate/BASS_*/GetLastInputInfo 有字符串命中；time 有 1 处字符串命中但无法据其定位调用者"
+    ]
+  },
+  "summary": {
+    "entries": 35,
+    "by_status": {"已固定": 17, "已证伪": 3, "待定": 15},
+    "by_control_flow": {"enters_control_flow": 16, "output_only": 10, "unresolved": 7, "mixed": 2},
+    "by_contract_item": {
+      "时间源": {"ids": ["C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09", "C10", "C35"], "已固定": 5, "已证伪": 2, "待定": 4},
+      "音频设备状态": {"ids": ["C11", "C12", "C13"], "已固定": 1, "已证伪": 0, "待定": 2},
+      "光标焦点窗口消息": {"ids": ["C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21"], "已固定": 2, "已证伪": 1, "待定": 5},
+      "文件与日志游标": {"ids": ["C22", "C23", "C24", "C25", "C26", "C27"], "已固定": 4, "已证伪": 0, "待定": 2},
+      "并行共享资源": {"ids": ["C28", "C29", "C30", "C31", "C32", "C33", "C34"], "已固定": 5, "已证伪": 0, "待定": 2}
+    }
+  },
+  "entries": [
+    {"id": "C01", "contract_item": "时间源", "family": "time", "api": "GetTickCount", "name": "全局 MT 播种", "trigger": "启动初始化",
+     "sources": ["静态导入表", "动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:6129-6130"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "锁定初始化配方（rng_seed/rng_restore 在 B(0) 覆盖全局 MT）",
+     "evidence": ["docs/determinism.md（全局 MT 地址 0x5A9930/0x5A98D0 与捕获恢复）", "docs/runtime-protocol.md（rng_seed/rng_restore 前置条件）", "docs/headless-validation.md（041/044 冷重放 10,000 边界逐帧相等）"],
+     "notes": "两个已验收 run 的进程启动时刻不同，GetTickCount 起点必然不同 [推断]；该差异没有传播到 B(0) 及之后 10,000 个边界的捕获状态 [实测]。未做把 GetTickCount 改成常量的单变量对照（由探针 B 覆盖）。"},
+
+    {"id": "C02", "contract_item": "时间源", "family": "time", "api": "GetTickCount", "name": "游戏线程 CRT 播种", "trigger": "启动初始化",
+     "sources": ["静态导入表", "动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:6145"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "同上（game_thread_crt 实例捕获/恢复）",
+     "evidence": ["docs/determinism.md（CRT rand/srand 走引擎静态 CRT 的 _getptd）", "docs/机制读取点表.md L64", "docs/headless-validation.md 041/044"],
+     "notes": "必须恢复游戏线程自身的 CRT 状态，不得误用 DLL 的 rand() 状态（既有合同已明确）。"},
+
+    {"id": "C03", "contract_item": "时间源", "family": "time", "api": "_time64", "name": "LawnApp::mAppRandSeed → Board::mBoardRandSeed（局部 MT 播种）", "trigger": "建局时",
+     "sources": ["动态调用点"], "read_sites": ["work/replay-research/LawnApp.cpp:109", "work/replay-research/Lawn_Board.cpp:57", "work/replay-research/Lawn_Board.cpp:798", "work/replay-research/Lawn_Board.cpp:1095"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "根必须来自锁定参考存档（mBoardRandSeed 随 Board 整块往返，合同 §2 的 D2-4）",
+     "evidence": ["docs/机制读取点表.md L12（mBoardRandSeed +0x561C → 局部 MT）与 D2-4（SyncBoard）", "docs/原版确定性重放器提案.md §2「不能假定只有一个种子」", "docs/headless-validation.md（B(0) 完整捕获含 board 种子字段的递归比较）"],
+     "notes": "_time64 不在导入表（静态 CRT，见 scan.blind_spots）；若将来做“不读档的新档根”，该读点会重新成为自由度。"},
+
+    {"id": "C04", "contract_item": "时间源", "family": "time", "api": "timeGetTime", "name": "绘制调度 / 帧率 / 日志", "trigger": "每 tick / 绘制",
+     "sources": ["静态导入表", "动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:222", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:223", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:257", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:2125", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:2605", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:4919"],
+     "control_flow": "mixed", "status": "已固定", "status_condition": "deterministic_draw_schedule_v1（自动绘制被 gate 拒绝，绘制只发生在受控作用域内）",
+     "evidence": ["docs/runtime-protocol.md（Controlled original drawing；gate 目标 0x538eb0；automatic_allowed/denied 不进状态摘要）", "docs/机制读取点表.md L57/L60", "docs/headless-validation.md（draw receipt 逐项比较）"],
+     "notes": "绘制写回动画字段属转移函数（#10 实测），因此“绘制时读时间”这条链路必须由绘制调度合同接管，而不是只把时间当输出。"},
+
+    {"id": "C05", "contract_item": "时间源", "family": "time", "api": "QueryPerformanceCounter", "name": "高精度计数器", "trigger": "未定位",
+     "sources": ["静态导入表"], "read_sites": [], "control_flow": "unresolved", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py：引擎 KERNEL32 导入槽 0x652088（wrapper 为 0x53d0b0）", "docs/libTAS与AvZ方案调研.md §2.3/§2.8（libTAS 在 Wine 侧接管该函数，可作设计参考）"],
+     "notes": "候选反编译副本内找不到调用点；导入槽存在说明二进制确实引用了它。由探针 B 的 B0 读点清单定位调用者。"},
+
+    {"id": "C06", "contract_item": "时间源", "family": "time", "api": "QueryPerformanceFrequency", "name": "计数器频率", "trigger": "未定位",
+     "sources": ["静态导入表"], "read_sites": [], "control_flow": "unresolved", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py：引擎 0x652084（wrapper 0x53d0b4）", "docs/libTAS与AvZ方案调研.md §2.3"],
+     "notes": "若被读取，频率本身会进入任何“ticks → 毫秒”的算术；虚拟时钟必须固定它而不是返回宿主真值。"},
+
+    {"id": "C07", "contract_item": "时间源", "family": "time", "api": "GetSystemTimeAsFileTime / GetLocalTime", "name": "挂钟时间（静态 CRT 与日志路径）", "trigger": "未定位",
+     "sources": ["静态导入表", "推断"], "read_sites": ["work/replay-research/LawnApp.cpp:109（推断链：C03 的 _time64 由静态 CRT 实现，内部取系统时间）"],
+     "control_flow": "unresolved", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py：引擎 0x652190 / 0x6521a8", "docs/原版确定性重放器提案.md §3「先查 GetTickCount/timeGetTime/QPC/time/_time64 是否真正影响玩法」"],
+     "notes": "GetLocalTime 也可能只用于日志时间戳；两者都必须由读点清单区分，不能只看导入槽。"},
+
+    {"id": "C08", "contract_item": "时间源", "family": "time", "api": "GetTickCount", "name": "加载时长 / 重绘重试 / FPS / 错误日志", "trigger": "特定状态",
+     "sources": ["静态导入表", "动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:166", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:257", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:2318", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:2481", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:2664", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:2718", "work/replay-research/Lawn_Board.cpp:340", "work/replay-research/Lawn_Board.cpp:7658", "work/replay-research/Sexy.TodLib_TodCommon.cpp:1125", "work/replay-research/Sexy.TodLib_TodCommon.cpp:1186"],
+     "control_flow": "output_only", "status": "已固定", "status_condition": "绘制门接管自动绘制（同 C04）",
+     "evidence": ["docs/机制读取点表.md L58", "docs/runtime-protocol.md（automatic_denied/diagnostic 字段不进状态摘要）"],
+     "notes": "这些读点把墙钟带进日志与显示，属“仅作输出”；其中重绘重试分支只影响重绘尝试次数，不改变模拟。"},
+
+    {"id": "C09", "contract_item": "时间源", "family": "time", "api": "GetTickCount64", "name": "64 位 tick", "trigger": "不适用",
+     "sources": ["静态导入表"], "read_sites": [], "control_flow": "output_only", "status": "已证伪", "status_condition": "证据类型：静态；未覆盖：运行期 API 追踪、以序数导入 kernel32 的极端构造",
+     "evidence": ["tools/import_scan.py：三个文件均无导入槽，且 --strings 也无原始字符串命中"],
+     "notes": "此处的“已证伪”只表示“在这三个文件里静态不可达”，不表示任何一般性结论。"},
+
+    {"id": "C10", "contract_item": "时间源", "family": "time", "api": "time / _time64（作为导入名）", "name": "CRT 时间函数导入名", "trigger": "不适用",
+     "sources": ["静态导入表"], "read_sites": [], "control_flow": "output_only", "status": "已证伪", "status_condition": "证据类型：静态（导入表缺席）；明确不覆盖真正的静态 CRT 调用路径（见 C03）",
+     "evidence": ["tools/import_scan.py：三个文件均无该导入名", "docs/determinism.md（rand/srand 调用引擎静态 CRT 的 _getptd=0x628A3D；函数地址只适用于该镜像）"],
+     "notes": "该条目的存在意义是防止把“导入表没有 time/_time64”误读成“没有用挂钟”——真正的调用在 C03。"},
+
+    {"id": "C35", "contract_item": "时间源", "family": "time", "api": "time", "name": "版本检查阈值（mLastVerCheckQueryTime 的 7 天比较）", "trigger": "启动/周期查询",
+     "sources": ["动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyApp.cpp:214", "work/replay-research/SexyAppFramework_SexyApp.cpp:404", "work/replay-research/SexyAppFramework_SexyApp.cpp:417", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:1250"],
+     "control_flow": "enters_control_flow", "status": "待定", "status_condition": null,
+     "evidence": ["SexyAppFramework_SexyApp.cpp:404（return (mLastVerCheckQueryTime == 0) || (!mLastShutdownWasGraceful) || (aTimeNow - mLastVerCheckQueryTime > 7*24*60*60)）", "launcher/bootstrap.cpp（NoShell/NoWinExec 屏蔽下游打开；注册表重定向为每 run volatile 键）", "SexyAppFramework_SexyAppBase.cpp:1250（调试 dump 的时间戳，属 output_only）"],
+     "notes": "`time` 与 `_time64` 都是静态 CRT（导入表缺席），必须分别按调用点定位。启动器下 mLastVerCheckQueryTime 来自每 run 新建的 volatile 键：首次读失败→写入当前时间→阈值比较立即为假，因此“分支成立”与“分支有可观测后果”是两件事，后者未取证。"},
+
+    {"id": "C11", "contract_item": "音频设备状态", "family": "audio", "api": "IsPlaying / IDirectSoundBuffer::GetStatus", "name": "音效播放状态查询", "trigger": "音效查询时",
+     "sources": ["动态调用点", "既有实测"], "read_sites": ["work/replay-research/Sexy.TodLib_TodFoley.cpp:170", "work/replay-research/SexyAppFramework_DSoundInstance.cpp:149-161"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "sound_effects_allocation_none_v1（GetSoundInstance 返回 null → 无实例 → refcount 恒 0 → IsPlaying 不被读取）；original 模式下是已实测的真实耦合",
+     "evidence": ["docs/headless-validation.md:99-111（036：pre1343→post1344 首次准入差，MT 游标 199→200）", "work/issue12-foley-cause-confirmed.md（完整因果链 + 独立机器码复核）", "docs/silent-audio.md（补丁语义与不追认旧档）", "docs/headless-validation.md:112-203 与 docs/sound-counter-origin-native.md（037→044 逐级冷重放通过）"],
+     "notes": "方向必须写对：036 证明的是“设备状态会改变模拟”，不是“已证伪”。模式规格自身仍标 live_verified:false，与后续按模式的冷重放结论并列记录，不互相追认。"},
+
+    {"id": "C12", "contract_item": "音频设备状态", "family": "audio", "api": "GetCurrentPosition / mUpdateCount 差", "name": "音乐侧播放状态与最近播放窗口", "trigger": "音效查询时",
+     "sources": ["动态调用点"], "read_sites": ["work/replay-research/Sexy.TodLib_TodFoley.cpp:134", "work/replay-research/Sexy.TodLib_TodFoley.cpp:180-184", "work/replay-research/Lawn_System_Music.cpp:255", "work/replay-research/Lawn_System_Music.cpp:757"],
+     "control_flow": "mixed", "status": "待定", "status_condition": null,
+     "evidence": ["docs/机制读取点表.md L49（复用即跳过变体随机）与 L52（音乐“不进 S，但设备状态须固定”）", "docs/app-update-anchor-native.md（mUpdateCount 锚定契约）"],
+     "notes": "GetSoundPosition 返回设备播放游标；SoundSystemHasFoleyPlayedTooRecently 用的是 App 更新计数差（已由锚点固定），两者角色不同。"},
+
+    {"id": "C13", "contract_item": "音频设备状态", "family": "audio", "api": "mixerOpen / DirectSoundCreate / BASS_*", "name": "音频设备枚举、打开与插件", "trigger": "建局 / 首次播放",
+     "sources": ["静态导入表", "动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:144", "work/replay-research/SexyAppFramework_DSoundManager.cpp:46-49", "work/replay-research/Lawn_System_Music.cpp:52-85"],
+     "control_flow": "unresolved", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py：引擎 mixerOpen@0x65240c、bass.dll mixerOpen@0x1004029c；DirectSoundCreate/BASS_* 仅有原始字符串", "docs/silent-audio.md「Music/BASS is not virtualized」", "docs/audio-frame-validation.md"],
+     "notes": "设备打开失败会走失败返回路径，可能改变后续准入；属于 N9（#37 虚拟音频设备）的范围。"},
+
+    {"id": "C14", "contract_item": "光标 / 焦点 / 窗口消息", "family": "cursor_focus_window", "api": "GetActiveWindow", "name": "活动窗口判定 → mActive", "trigger": "每 tick（RehupFocus）",
+     "sources": ["静态导入表", "动态调用点", "既有实测"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:4844-4858", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:3743-3749"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "启动器把该导入槽重写为 LogicalActiveWindow（只返回本进程隐藏 HWND）；只对本进程生效",
+     "evidence": ["launcher/bootstrap.cpp:88-89、:125（hook 表）", "docs/launcher.md §5（不切换桌面、不抢焦点；GetActiveWindow 映射到自身隐藏 HWND）", "launcher/isolation_fixture.cpp:25-30（前台窗口未变化 + 窗口隐藏）", "docs/headless-validation.md（各轮隐藏/前台归属检查）"],
+     "notes": "这是本族里唯一有明确“固定机制”的读取点；它与 C17（WM_ACTIVATEAPP）是两条不同的路径。"},
+
+    {"id": "C15", "contract_item": "光标 / 焦点 / 窗口消息", "family": "cursor_focus_window", "api": "SetForegroundWindow / SetActiveWindow / SetFocus / ShowWindow", "name": "抢焦点与显示切换", "trigger": "特定状态",
+     "sources": ["静态导入表", "既有实测"], "read_sites": ["launcher/bootstrap.cpp:79-86", "launcher/bootstrap.cpp:129-133"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "分别重写为 NoForeground / NoFocus / Hidden；显示模式切换另由 ChangeDisplaySettingsA 拦截",
+     "evidence": ["tools/import_scan.py：引擎 0x6522d8 / 0x652378 / 0x6522ec / 0x6522b8", "docs/launcher.md §5", "docs/window-observer.md（全过程无自有可见窗口/前台）"],
+     "notes": "固定的是“不改变系统焦点”，不是“焦点不影响模拟”；模拟侧的入口在 C14/C17。"},
+
+    {"id": "C16", "contract_item": "光标 / 焦点 / 窗口消息", "family": "cursor_focus_window", "api": "GetForegroundWindow", "name": "系统前台窗口查询", "trigger": "不适用",
+     "sources": ["静态导入表"], "read_sites": [], "control_flow": "output_only", "status": "已证伪", "status_condition": "证据类型：静态（引擎无导入槽且无原始字符串）；只对引擎成立，wrapper 有该导入",
+     "evidence": ["tools/import_scan.py：引擎缺失；wrapper GetForegroundWindow@0x53d31c 存在", "work/ambient-focus-evidence-044.md（观察器侧读系统前台，属观测器而非引擎耦合）"],
+     "notes": "引擎判定“我在不在前台”用的是 GetActiveWindow（C14），所以启动器只需重写那一个导入。"},
+
+    {"id": "C17", "contract_item": "光标 / 焦点 / 窗口消息", "family": "cursor_focus_window", "api": "WM_ACTIVATEAPP / GetMessageA / PeekMessageA / DispatchMessageA", "name": "窗口消息与激活状态", "trigger": "每消息",
+     "sources": ["静态导入表", "动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:3280", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:3403-3408", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:4188-4192", "tools/import_scan.py：SetTimer@0x652314（WM_TIMER 消息源）"],
+     "control_flow": "enters_control_flow", "status": "待定", "status_condition": null,
+     "evidence": ["docs/headless-validation.md:21（007 冷启动的“启动前后前台 HWND 不同”失败，仅改为只读采样，未证明不影响动力学）", "docs/window-observer.md", "work/ambient-focus-evidence-044.md（118,422 个样本均为 foreground HWND=0，属观测器未取得有效值，不能证明桌面未变）"],
+     "notes": "本项目不发送 OS 输入，但外部激活/最小化/屏幕保护事件仍可能到达；扰动验收（原版确定性重放器提案 §5 P3）未做。"},
+
+    {"id": "C18", "contract_item": "光标 / 焦点 / 窗口消息", "family": "cursor_focus_window", "api": "GetCursorPos", "name": "光标位置与预览路径", "trigger": "每 tick / 暂停期间",
+     "sources": ["静态导入表", "动态调用点"], "read_sites": ["docs/原版确定性重放器提案.md §2（高级暂停仍运行 GLOBAL 回调与光标预览）", "docs/原版确定性重放器提案.md §3（验证暂停期间移动光标是否消耗共享 RNG）"],
+     "control_flow": "unresolved", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py：引擎 GetCursorPos@0x652308（bootstrap 未拦）", "launcher/bootstrap.cpp 的 hook 表（无 GetCursorPos）"],
+     "notes": "光标位置可驱动 Widget 命中测试；暂停期间的光标预览是否消耗共享随机流是合同明确要求的探针之一（探针 A）。"},
+
+    {"id": "C19", "contract_item": "光标 / 焦点 / 窗口消息", "family": "cursor_focus_window", "api": "SystemParametersInfo(SPI_GETSCREENSAVE*) / GetLastInputInfo", "name": "桌面状态与用户空闲时间", "trigger": "每 ≤10 s（tick 驱动）",
+     "sources": ["动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:145", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:2504-2568", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:2605-2608"],
+     "control_flow": "enters_control_flow", "status": "待定", "status_condition": null,
+     "evidence": ["launcher/bootstrap.cpp:99-102（Parameters 只拦 SPI_SETSCREENSAVERRUNNING 写入，查询转发真值）", "launcher/bootstrap.cpp:134（SystemParametersInfoA 在 hook 表中）"],
+     "notes": "GetLastInputInfo 是运行时按名解析（导入表必然缺席，工具已记录该盲区）；anIdleTime = theTick - mLastUserInputTick → gScreenSaverActive → MarkAllDirty。"},
+
+    {"id": "C20", "contract_item": "光标 / 焦点 / 窗口消息", "family": "cursor_focus_window", "api": "SetCursor / LoadCursorA / ShowCursor", "name": "光标形状与可见性", "trigger": "特定状态",
+     "sources": ["静态导入表"], "read_sites": [], "control_flow": "output_only", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py：SetCursor@0x6523c8、LoadCursorA@0x6523d4；ShowCursor 导入槽缺席"],
+     "notes": "按合同 §2.1 判据应属不进 S（只影响显示），但没有实测对照，因此不升级为已证伪；列出以保持族完整。"},
+
+    {"id": "C21", "contract_item": "光标 / 焦点 / 窗口消息", "family": "cursor_focus_window", "api": "EnumWindows / IsWindowVisible / GetSystemMetrics / GetWindowRect", "name": "窗口枚举与几何", "trigger": "特定状态",
+     "sources": ["静态导入表"], "read_sites": [], "control_flow": "unresolved", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py：引擎 0x652350 / 0x6523c4 / 0x652324 / 0x652300"],
+     "notes": "可能用于窗口放置与多显示器判定；候选副本内未逐点定位，隐藏运行已通过既有验收不构成本条证据。"},
+
+    {"id": "C22", "contract_item": "文件与日志游标", "family": "file_log_crt", "api": "fopen(\"rb\") + SyncBytes", "name": "存档读取（内容进 S，同时是根身份）", "trigger": "加载时",
+     "sources": ["动态调用点", "既有实测"], "read_sites": ["work/replay-research/Lawn_System_DataSync.cpp:34", "work/replay-research/Lawn_System_SaveGame.cpp:364-379", "work/replay-research/Lawn_System_SaveGame.cpp:501-560"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "根来自锁定参考存档，存档摘要进入根身份（合同 §1.4）",
+     "evidence": ["docs/机制读取点表.md D2-4/L66-L71", "docs/分支数据合同与实施计划.md §1.4", "docs/headless-validation.md（B(0) 递归完整比较）"],
+     "notes": "文件内容进 S 是合法的：它由根身份固定，不是自由度。"},
+
+    {"id": "C23", "contract_item": "文件与日志游标", "family": "file_log_crt", "api": "userdata/user%d.dat、userdata/users.dat", "name": "用户档读写", "trigger": "加载时 / 存档时",
+     "sources": ["动态调用点", "既有实测"], "read_sites": ["work/replay-research/Lawn_System_PlayerInfo.cpp:87", "work/replay-research/Lawn_System_PlayerInfo.cpp:114", "work/replay-research/Lawn_System_ProfileMgr.cpp:76", "work/replay-research/Lawn_System_ProfileMgr.cpp:103"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "启动器为每 run 生成合成 Experiment 档案（ID 1、已通关、10 卡槽）；真实用户档只读核验",
+     "evidence": ["docs/launcher.md §3", "docs/headless-validation.md（各轮 shared_profile_unchanged）", "launcher/bootstrap.cpp（appdata 重定向）"],
+     "notes": "进度/卡槽决定可选卡，属比较与选择；合成档案使这一输入在根上固定。"},
+
+    {"id": "C24", "contract_item": "文件与日志游标", "family": "file_log_crt", "api": "fread(&mRandSeed) → SRand", "name": "Demo 文件回读种子", "trigger": "播放 demo 时",
+     "sources": ["动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:572-573", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:672"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "启用 initial_app_update_anchor_v1 的运行核验 App+0x510/+0x511 两标志为 0；无锚点的旧档不覆盖",
+     "evidence": ["docs/app-update-anchor-native.md（demo_before/demo_after 与“两标志必须为 0”的前置条件）", "docs/determinism.md（demo 参数未在 exe/dat 中找到明文，不能据此判定不存在）"],
+     "notes": "这是“文件内容直接成为 RNG 种子”的最短链路；若将来启用 demo 路径必须重新做根身份与探针。"},
+
+    {"id": "C25", "contract_item": "文件与日志游标", "family": "file_log_crt", "api": "fopen(\"wb\") + fwrite + fclose", "name": "写盘缓冲与文件游标", "trigger": "存档时",
+     "sources": ["动态调用点"], "read_sites": ["work/replay-research/Lawn_System_DataSync.cpp:504-577"],
+     "control_flow": "output_only", "status": "待定", "status_condition": "只在 a2 恢复路径（R2+）上成立；R0/R1 不受影响",
+     "evidence": ["tools/process_snapshot.py 模块文档（只抓已提交、可写、私有页；文件句柄与内核游标不在镜像内）", "docs/archive-integrity.md（封存前必须先关闭写入方）"],
+     "notes": "写侧没有显式 fflush，缓冲只在 fclose 落地；恢复后继续写同一文件可能得到与连续运行不同的字节序列。"},
+
+    {"id": "C26", "contract_item": "文件与日志游标", "family": "file_log_crt", "api": "fprintf / sprintf 日志与统计", "name": "引擎自身错误与统计输出", "trigger": "特定状态",
+     "sources": ["动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:2718", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:4919", "work/replay-research/SexyAppFramework_SexyAppBase.cpp:5653"],
+     "control_flow": "output_only", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py（fopen/fwrite/fflush 等导入槽缺席 → 静态 CRT）", "work/replay-research/Lawn_System_DataSync.cpp:577（引擎唯一的写路径之一）"],
+     "notes": "未穷举写者；不参与已捕获状态比较，但写入耗时会进入墙钟。"},
+
+    {"id": "C27", "contract_item": "文件与日志游标", "family": "file_log_crt", "api": "determinism::Flush / logger / runtime journal / 证据归档", "name": "宿主侧审计写入", "trigger": "每边界",
+     "sources": ["动态调用点", "既有实测"], "read_sites": ["logger/avz/recorder.cpp:180-183", "docs/runtime-protocol.md（journal、flush、seal、lock）", "docs/archive-integrity.md（封存范围与白名单）"],
+     "control_flow": "output_only", "status": "已固定", "status_condition": "写者、封口顺序、哈希、锁与失败保留均有合同；不进入游戏状态摘要",
+     "evidence": ["docs/determinism.md（Flush 语义）", "docs/window-observer.md（0.691 s 采样缺口；I/O 争用为合理归因但非已证因果）", "docs/headless-validation.md:155", "docs/parallel-cold.md（磁盘门槛与真实失败保留）"],
+     "notes": "它不进 S，但会经“墙钟/磁盘”影响 C05–C07 之类的时间读点——这正是探针 A 要把挂起时长作为自变量的原因。"},
+
+    {"id": "C28", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "CreateMutexA", "name": "单实例互斥体", "trigger": "启动",
+     "sources": ["静态导入表", "动态调用点"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:6124-6128"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "启动器把互斥体名追加 -lvz-<pid>，并行实例与用户手动开的原版都不互撞",
+     "evidence": ["launcher/bootstrap.cpp:69-71、:118", "docs/launcher.md §5", "tools/import_scan.py：引擎 CreateMutexA@0x6520e0"],
+     "notes": "已存在时游戏走 HandleGameAlreadyRunning 分支，属启动期控制流——并行时若不隔离会直接改变启动行为。"},
+
+    {"id": "C29", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "SHGetFolderPathA/W、Software\\PopCap 注册表", "name": "用户档与注册表共享", "trigger": "启动/加载时",
+     "sources": ["动态调用点", "既有实测"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:119-124", "launcher/bootstrap.cpp:37-67", "launcher/bootstrap.cpp:114-121"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "appdata 重定向到 sandbox\\appdata；PopCap 键重定向到 HKCU\\Software\\LLMVsZombies\\<pid>-<创建时间>（volatile）",
+     "evidence": ["docs/launcher.md §3/§5", "docs/headless-validation.md（用户档指纹不变）", "launcher/bootstrap.cpp SeedRegistry（固定 ScreenMode/Volume/CurUser）"],
+     "notes": "GetProcAddress 也被重写，使运行时按名解析的 SHGetFolderPathA/W 同样被拦截。"},
+
+    {"id": "C30", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "chdir / GetCurrentDirectory", "name": "运行目录", "trigger": "启动",
+     "sources": ["动态调用点", "既有实测"], "read_sites": ["work/replay-research/SexyAppFramework_SexyAppBase.cpp:6113-6116"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "每 run 复制整份 sandbox（资源/引擎/bootstrap/runtime），逐文件记入哈希清单",
+     "evidence": ["docs/launcher.md §2", "tools/import_scan.py：引擎 SetCurrentDirectoryA@0x652260、GetCurrentDirectoryA/W"],
+     "notes": "引擎会自行改变工作目录，所以不能靠只设置 cwd 来“假装隔离”（既有文档已明确）。"},
+
+    {"id": "C31", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "Job Object / worker 宿主", "name": "进程与作业隔离", "trigger": "并行启动",
+     "sources": ["既有实测"], "read_sites": ["docs/parallel-cold.md", "src/llm_vs_zombies/cold_workers.py"],
+     "control_flow": "output_only", "status": "已固定", "status_condition": "每 worker 独立隐藏宿主进程、独立 run 目录、独立 Windows Job Object；停止一个 worker 不终止另一个",
+     "evidence": ["docs/parallel-cold.md「隔离与比较」「失败、资源和证据」"],
+     "notes": "隔离是并行能力的前提，但它不构成并行验收通过（见 C33）。"},
+
+    {"id": "C32", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "共享音频设备 / BASS 音乐通道", "name": "并行时的音频设备", "trigger": "建局 / 播放时",
+     "sources": ["静态导入表", "动态调用点", "既有实测"], "read_sites": ["docs/silent-audio.md（Music/BASS 未虚拟化）", "docs/parallel-cold.md"],
+     "control_flow": "unresolved", "status": "待定", "status_condition": null,
+     "evidence": ["tools/import_scan.py：引擎 mixerOpen@0x65240c、bass.dll mixerOpen@0x1004029c", "docs/silent-audio.md", "docs/parallel-cold.md（两 worker 竞争 CPU/内存/磁盘，未单独讨论音频设备）"],
+     "notes": "allocation-none 只切断 GetSoundInstance 分配路径；音乐侧仍会真实打开设备。归入 N9（#37）范围。"},
+
+    {"id": "C33", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "磁盘/CPU 竞争与证据采样", "name": "并行运行时的资源竞争", "trigger": "整轮",
+     "sources": ["既有实测"], "read_sites": ["docs/headless-validation.md §224", "docs/window-observer.md", "docs/parallel-cold.md"],
+     "control_flow": "output_only", "status": "待定", "status_condition": null,
+     "evidence": ["docs/headless-validation.md:218-227（047：A 运行期窗口观察最大间隔 380.44 ms 超 250 ms 门槛；B 因 A 失败在 tick 2501 中止，并遇到 control.json 的 PermissionError；整轮 passed=false）", "docs/window-observer.md（ReplaceFileW + 仅 2/5/32/33 重试，重试预算有限）"],
+     "notes": "该轮失败不归因于并发本身（既有文档明确），但并行的完整验收确实尚未取得；资源不足保留真实失败，不删除旧档。"},
+
+    {"id": "C34", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "ShowWindow / ChangeDisplaySettingsA / WS_EX_NOACTIVATE", "name": "显示设备与窗口", "trigger": "启动",
+     "sources": ["动态调用点", "既有实测"], "read_sites": ["launcher/bootstrap.cpp:72-86", "launcher/bootstrap.cpp:131-134"],
+     "control_flow": "enters_control_flow", "status": "已固定", "status_condition": "窗口以 SW_HIDE + WS_EX_NOACTIVATE/TOOLWINDOW 创建；ChangeDisplaySettingsA 被拦为成功但不生效",
+     "evidence": ["docs/launcher.md §5", "docs/window-observer.md（全过程无自有可见窗口/前台）", "docs/headless-validation.md（启动与运行期窗口检查通过）"],
+     "notes": "修复了“隐藏窗口会让显示模式/前台状态成为输入”的路径，但没有把窗口层从实验中移除。"}
+  ],
+  "probes": [
+    {
+      "id": "A",
+      "title": "长挂起 vs 短挂起",
+      "question": "在已完成的稳定边界让墙钟前进 T 秒（进程继续运行 / 进程被冻结），是否改变捕获状态与后续轨迹",
+      "contract": ["docs/分支数据合同与实施计划.md §3.3 R2–R4", "docs/原版确定性重放器提案.md §5 P3", "docs/determinism.md（暂停与隐藏窗口的扰动验收要求）"],
+      "existing_baseline": [
+        {"observation": "headless-launch-006：间隔一秒的完整已审计快照相同", "result": "pass", "source": "docs/headless-validation.md:12"},
+        {"observation": "headless-counter-041-batch：B0 等待 1 s 与 5 s", "result": "pass", "source": "docs/headless-validation.md:147"},
+        {"observation": "headless-counter-044-baseline-replay：B0 1 s、B1000 1 s、B2501 5 s", "result": "pass", "source": "docs/headless-validation.md:161-180"}
+      ],
+      "gaps": [">10 s 的墙钟挂起未做", "挂起期间进程被冻结（SuspendThread）未做", "挂起期间移动光标/切换前台/锁屏未做"],
+      "arms": [
+        {"name": "A0 诊断（今天可跑）", "kind": "REPL + 任意墙钟时长", "commands": ["python -m llm_vs_zombies.cli repl --pid <PID> --defer-preparation --trace <run>/decisions/long-suspend-trace.jsonl --script work/probe-long-suspend.py"], "sealed": false},
+        {"name": "A1 短 vs 中（今天可跑，可封存）", "kind": "evaluation plan/run，pause-points 0.05/1/10 s", "commands": ["python -m llm_vs_zombies.evaluation plan work/coupling-pause-plan.json --tier smoke --seeds 42 --tick-budget 3000 --cold-starts 1 --audio-mode sound_effects_allocation_none_v1 --pause-points '[[500,0.05],[1000,1.0],[2500,10.0]]'", "python -m llm_vs_zombies.evaluation run work/coupling-pause-plan.json --output experiments/runs/coupling-pause-001"], "sealed": true},
+        {"name": "A2 >=300 s 长挂起", "kind": "同上，需放宽 pause 上界（evaluation.py:79 与 :95 的 0.05..10 区间），不放宽任何冷重放门槛", "commands": ["python -m llm_vs_zombies.evaluation plan work/coupling-longsuspend-plan.json --tier smoke --seeds 42 --tick-budget 3000 --cold-starts 1 --audio-mode sound_effects_allocation_none_v1 --pause-points '[[1000,1.0],[2500,300.0],[3000,1800.0]]'"], "sealed": true, "landing_required": true},
+        {"name": "A3 冻结挂起", "kind": "tools/process_snapshot.py 增 --hold-seconds N（复用 suspend_threads/quiesce/resume_threads；与 --r0 互斥；保持“先上下文后内存”的恢复顺序）", "commands": ["python tools/process_snapshot.py --pid <PID> --hold-seconds 300", "python -m llm_vs_zombies.cli repl --pid <PID> --defer-preparation --trace <run>/decisions/hold-trace.jsonl --script work/probe-hold-compare.py"], "sealed": true, "landing_required": true}
+      ],
+      "criteria": {
+        "pass": [
+          "挂起前后 audit_snapshot 的 version 与规范化 state 完全相等（含 fixed_fp 激活凭据，若声明固定 FP 模式）",
+          "挂起区间内 native audit 没有新增 pre_step/post_step，无 scene_changed/terminal_transition，epoch 不变",
+          "挂起后继续执行同一动作序列，与同一源的短挂起对照逐帧相等：replay-report.json.equal 为真、边界/请求数一致、关闭 health 全部通过",
+          "pause-probes-during-play.json.coverage_status == \"pass\" 且 pause_invariance 门槛为 pass"
+        ],
+        "fail": ["任一字段不等", "出现新的 pre/post 边界", "epoch/scene 变化", "后续出现首分叉"],
+        "record_alongside": ["实际墙钟时长", "挂起期间是否并行运行其它 worker（R4）", "隐藏/焦点状态（C17）", "是否发生证据采样缺口（C27/C33）"]
+      },
+      "implemented_by": ["src/llm_vs_zombies/evaluation.py:373-393（_pause_probe）", "src/llm_vs_zombies/evaluation.py:52/59/79/95（pause_seconds/pause_points 与区间校验）", "src/llm_vs_zombies/engine_replay.py:523-529（重放期暂停必须无状态变化）"]
+    },
+    {
+      "id": "B",
+      "title": "虚拟时钟（GetTickCount / QPC 固定或按 tick 推进）",
+      "question": "把时间源固定或按 tick 推进后，是否还有墙钟进入 S；反向的“威力检查”是否有差异",
+      "design_reference": ["docs/libTAS与AvZ方案调研.md §2.3（时间只在帧边界按 1/fps 推进）", "docs/libTAS与AvZ方案调研.md §2.8（Wine 侧 kernel32 四个函数的补丁点）"],
+      "stages": [
+        {"id": "B0", "name": "只观察", "detail": "在 IAT 槽后接计数/记录 thunk，返回值不变；记录 (调用序号, 线程, 返回地址 RVA, 返回值) 到 native 旁证", "criteria": "记录完整且不改变任何捕获状态；得到真实调用清单（含频次与线程）"},
+        {"id": "B1", "name": "固定", "detail": "GetTickCount/timeGetTime → 配方常量 base_ms；QPF → 固定常量；QPC → base_ms*qpf/1000；time/_time64 → 固定 unix 秒", "criteria": "两次不同墙钟起点冷重放逐帧相等，且虚拟时钟读点 trace 逐项相等"},
+        {"id": "B2", "name": "按 tick 推进", "detail": "每次受控引擎调用边界把虚拟毫秒 +10（对齐 SECONDS_PER_UPDATE=0.01f），QPC 同步", "criteria": "同上；与 B1 的差异只能出现在确实读取虚拟时钟的字段上，可逐条归因"}
+      ],
+      "iat_slots": {"image": "game/local-engine/PlantsVsZombies.exe", "sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322", "image_base": "0x400000", "GetTickCount": "0x65208c", "QueryPerformanceCounter": "0x652088", "QueryPerformanceFrequency": "0x652084", "GetSystemTimeAsFileTime": "0x652190", "GetLocalTime": "0x6521a8", "timeGetTime": "0x652400"},
+      "landing": [
+        "复用 launcher/bootstrap.cpp 的 IAT 重写：按 OriginalFirstThunk 的导入名匹配，VirtualProtect 临时开放写权限后改写 FirstThunk 槽，主线程恢复前完成",
+        "写入前必须核对文件 SHA-256、PE 头/SizeOfImage 与槽内当前值（等于 GetProcAddress 得到的真实地址），任一不符即 fail closed（同 silent_audio 的 preflight 风格）",
+        "静态 CRT 的 time/_time64/clock 需内联补丁或按有界签名定位 LawnApp 构造路径上的调用点；定位失败必须显式声明未覆盖",
+        "thunk 只在游戏线程且处于受控边界内返回虚拟值，其它调用转发真实函数；宿主侧 IPC/日志/观察器/封存继续用真实墙钟",
+        "base_ms/qpf/虚拟 unix 秒、thunk 目标地址、原槽值与目标文件哈希写入 manifest/hello 与初始化配方；虚拟时钟读取轨迹与状态摘要同源落盘",
+        "新增 capabilities.virtual_clock_* 与 game.time_source.mode；属改变实验语义的模式，旧档不可追认"
+      ],
+      "commands": [
+        "python -m llm_vs_zombies.evaluation plan work/coupling-clock-observe-plan.json --tier smoke --seeds 42 --tick-budget 3000 --audio-mode sound_effects_allocation_none_v1",
+        "python -m llm_vs_zombies.evaluation run work/coupling-clock-observe-plan.json --output experiments/runs/coupling-clock-observe-001",
+        "python -m llm_vs_zombies.evaluation run work/coupling-clock-virtual-plan.json --output experiments/runs/coupling-clock-virtual-001",
+        "python -m llm_vs_zombies.evaluation run work/coupling-clock-power-plan.json --output experiments/runs/coupling-clock-power-001"
+      ],
+      "criteria": {
+        "pass": [
+          "B0 给出被真实调用的函数、频次、线程与调用点 RVA；未定位的函数显式列为未覆盖",
+          "两次不同墙钟起点的 B1/B2 运行逐帧捕获状态相等（沿用现有 10,000 边界门槛），虚拟时钟读点 trace 逐项相等",
+          "威力检查已执行：速率改 2× 或加固定偏移后，若出现差异必须定位首个差异并归因到具体读取点",
+          "宿主侧真实时间不受影响，现有门槛一条不放宽",
+          "模式声明 original_engine_bitwise_unmodified:false，旧档不追认"
+        ],
+        "fail": ["读点 trace 不完整或与状态摘要不同源", "两次运行 trace 出现差异", "威力检查出现未归因差异", "前置校验失败却继续运行"],
+        "power_check_rule": "整轮捕获状态仍然完全相等时，只能得出“在当前读取点与当前捕获范围内不进入 S”，不得升级为 C05–C07 的全局已证伪。"
+      }
+    }
+  ],
+  "not_done": [
+    "不运行游戏、不注入、不启动进程（本文与 tools/import_scan.py 都是纯静态读取）",
+    "不反汇编、不逐条核对候选副本行号与锁定二进制的对应",
+    "不修改游戏内 DLL、不改 game/、experiments/ 与任何既有文档或历史失败档结论",
+    "不在缺少证据时下已证伪结论；本次已证伪仅指“三个扫描文件的导入表与原始字符串均无该名”",
+    "不把未观察到当成已证伪：焦点、光标、屏幕保护、共享音频设备、并行资源竞争一律保持待定",
+    "不把已有的 ≤5 s 暂停证据外推为长挂起或冻结挂起结论",
+    "不安装运行期 API 追踪、不做长局、不做并行验收"
+  ],
+  "open_items": [
+    {"id": "C05-C07/C35", "need": "探针 B 的 B0 读点清单，定位 QPC/QPF/GetSystemTimeAsFileTime/GetLocalTime 的调用者与角色，以及 time 在版本检查分支的返回值"},
+    {"id": "C03", "need": "mBoardRandSeed 在长局中是否存在第二写入点"},
+    {"id": "C11/C32", "need": "N9（#37 虚拟音频设备）或并行验收覆盖共享音频设备与 BASS 音乐"},
+    {"id": "C17/C18/C19", "need": "探针 A：挂起期间移动光标、切前台、锁屏，并取得只读观察器的有效样本"},
+    {"id": "C25/C26", "need": "N5（#33）落地 R2/R3 后的写盘缓冲与文件游标对照"},
+    {"id": "C33", "need": "修复后的双 worker 验收（#19/#38）"},
+    {"id": "词汇", "need": "是否新增“已归一化”档，待 N7（#35）与 #31 的归一化范围确定"}
+  ]
+}
