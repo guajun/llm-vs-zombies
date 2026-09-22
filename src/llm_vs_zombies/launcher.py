@@ -165,6 +165,10 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
         raise ValueError("seed must be uint32")
     if type(defer_preparation) is not bool:
         raise ValueError("defer_preparation must be boolean")
+    # The CLI may pass a project-relative --run. Resolve the archive base once so
+    # the session trace, launcher.json and the initialization recipe cannot bind
+    # the same evidence to different paths.
+    root, run = Path(root).resolve(), Path(run).resolve()
     audio_mode = sound_effects.configured(audio_mode)
     state = prepare(root, run, audio_mode=audio_mode)
     state["audio_mode"] = audio_mode
