@@ -26,7 +26,7 @@ from .audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA as AUDIT_
                             audit_files, digests, file_hash, first_difference, hash_backend, jsonl, particle_semantics,
                             spawn_semantics, read_json, version, DRAW_SCHEDULE_MODE, draw_mode, render_semantics,
                             ENGINE_CALL_MODE, engine_call_mode, engine_call_semantics, validate_engine_origin)
-from .client import Client, OutcomeUnknown, RemoteError
+from .client import Client, OutcomeUnknown, ProtocolError, RemoteError, declared_branch_scope
 from .evidence_tree import TreePlacement, attach_tree, content_identity, validate_embedded_tree
 
 SCHEMA = "lvz.engine-replay.v1"
@@ -90,6 +90,11 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
     marker = {"schema": SCHEMA, "identity": copy.deepcopy(identity),
               "initialization": copy.deepcopy(initialization), "observation": observation,
               "state": snapshot["state"]}
+    branch = declared_branch_scope(hello)
+    if branch is not None:
+        # The runtime's own scope, so a later replay can prove whether it
+        # continued this branch or started a different one.
+        marker["branch"] = copy.deepcopy(branch)
     if engine_call_mode(identity["game"]):
         marker["engine_call_origin"] = copy.deepcopy(snapshot.get("engine_call"))
     fp_evidence = fp_environment.evidence(snapshot, identity["game"])
@@ -121,6 +126,13 @@ def _validate_initial(initial: dict) -> None:
     if initial.get("schema") != SCHEMA:
         raise EvidenceError("initial marker schema mismatch")
     _validate_identity(initial.get("identity"))
+    if "branch" in initial:
+        try:
+            branch = declared_branch_scope({"branch": initial["branch"]})
+        except ProtocolError as error:
+            raise EvidenceError(f"initial marker branch scope is invalid: {error}") from error
+        if branch is None:
+            raise EvidenceError("initial marker branch scope is empty")
     observation = initial.get("observation", {})
     if version(observation.get("version"))["tick"] != 0:
         raise EvidenceError("replay must begin at controller tick zero; this is not snapshot restore")
@@ -374,8 +386,9 @@ def _validate_native_details(audit: AuditLog, request: dict, result: dict) -> No
     selected = audit.request_events(rid)
     starts = [event for event in selected if event["kind"] == "request_started"]
     ends = [event for event in selected if event["kind"] == "request_completed"]
+    recorded = starts[0]["payload"].get("request") if len(starts) == 1 else None
     if (len(starts) != 1 or len(ends) != 1 or starts[0]["version"] != before
-            or starts[0]["payload"].get("request") != request
+            or not isinstance(recorded, dict) or _request_content(recorded) != _request_content(request)
             or ends[0]["payload"].get("result") != result
             or ends[0]["version"] != result["observation"]["version"]):
         raise EvidenceError("native request/completion identity, result, or version mismatch")
@@ -389,6 +402,11 @@ def _validate_native_details(audit: AuditLog, request: dict, result: dict) -> No
         if (event["payload"] != wanted or event["version"] != expected_version
                 or not starts[0]["seq"] < event["seq"] < ends[0]["seq"]):
             raise EvidenceError("native action attempts, outcomes, or frame order mismatch")
+
+
+def _request_content(request: dict) -> dict:
+    """The branch scope is a namespace claim, never part of request content."""
+    return {key: value for key, value in request.items() if key != "branch"}
 
 
 def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
@@ -744,6 +762,32 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             fp_environment.negotiate(hello)
             require_equal(session.identity["build"], hello.get("build"), "live_build")
             require_equal(session.identity["game"], hello.get("game"), "live_game")
+            # Branch scope: the live runtime owns the namespace that actually
+            # produced these frames. A pre-branch runtime keeps the legacy
+            # controller-side label and is reported as unscoped.
+            try:
+                runtime_branch = declared_branch_scope(hello)
+            except ProtocolError as error:
+                raise EvidenceError(f"live hello branch scope is invalid: {error}") from error
+            source_branch = trajectory.initial.get("branch")
+            if not isinstance(source_branch, dict):
+                source_branch = None
+            report["branch_scope"] = {
+                "mode": "runtime_declared" if runtime_branch and runtime_branch["branch_id"] else "runtime_unscoped",
+                "request_label": report["branch_id"],
+                "runtime_branch_id": None if runtime_branch is None else runtime_branch["branch_id"],
+                "runtime_origin": None if runtime_branch is None else runtime_branch["origin"],
+                "runtime_parent_branch_id": None if runtime_branch is None else runtime_branch["parent_branch_id"],
+                "dedup_key": None if runtime_branch is None else runtime_branch["dedup_key"],
+                "source_branch_id": None if source_branch is None else source_branch.get("branch_id"),
+                "relation": ("unknown_source_branch" if source_branch is None or runtime_branch is None
+                             else "same_branch" if source_branch.get("branch_id") == runtime_branch["branch_id"]
+                             else "other_branch"),
+                "scope": "a version triple is only comparable inside one branch scope",
+            }
+            if runtime_branch is not None and runtime_branch["branch_id"]:
+                report["branch_id"] = runtime_branch["branch_id"]
+                require_equal(report["branch_id"], client.branch_id, "live_branch_scope")
             required = {"observe", "audit_snapshot"} | {step["request"]["method"] for step in trajectory.steps if step["request"]["method"] in STEP_METHODS}
             if controlled_draw:
                 required.update({"prepare_render", DRAW_SCHEDULE_MODE})
@@ -807,6 +851,10 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 "parent": {"trajectory_id": trajectory.manifest["trajectory_id"],
                            "branch_id": report["branch_id"], "target_tick": target_tick,
                            "epoch_mapping": copy.deepcopy(report["epoch_mapping"])}}
+            if runtime_branch is not None:
+                # The actual node's own scope, so a packaged continuation carries
+                # the namespace that produced it.
+                actual_marker["branch"] = copy.deepcopy(runtime_branch)
             if controlled_calls:
                 actual_marker["engine_call_origin"] = copy.deepcopy(snapshot["engine_call"])
             fp_evidence = fp_environment.evidence(snapshot, session.identity["game"])
@@ -1064,7 +1112,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             report["request_mapping"] = actual_ids
             report["takeover"] = {"parent_trajectory_id": trajectory.manifest["trajectory_id"],
                                    "parent_tick": reached_version["tick"], "parent_requests_consumed": len(report["requests"]),
-                                   "actual_version": client.version, "epoch_mapping": report["epoch_mapping"]}
+                                   "actual_version": client.version, "epoch_mapping": report["epoch_mapping"],
+                                   "branch_id": report["branch_id"], "branch_scope": report["branch_scope"]}
             if controlled_calls:
                 report["takeover"].update(parent_engine_calls_consumed=report["engine_calls"]["returned_calls_compared"],
                     last_source_call_id=report["engine_calls"]["last_source_call_id"],

@@ -62,12 +62,20 @@ def record_initial_state(run: Path, *, observation_path: Path, hello: dict,
 
     Call after launcher saves its actual observation. The optional snapshot is a
     replay-initial marker or an audit_snapshot envelope from that same boundary.
+    A runtime that declares a branch scope is recorded verbatim: the version
+    namespace of this run is (branch_id, epoch, tick, revision). Pre-branch
+    runtimes simply have no ``branch`` key, exactly like older recordings.
     """
+    # Imported here on purpose: client -> initialization -> records is already a
+    # module-level chain, so a top-level import would close the cycle.
+    from .client import declared_branch_scope
+
     manifest = read_json(run / "manifest.json")
     if manifest.get("status") != "recording":
         raise ValueError("cannot update initialization metadata of a finalized run")
     if type(scenario_verified) is not bool or not isinstance(hello, dict) or not isinstance(hello.get("capabilities"), dict):
         raise ValueError("live initialization requires hello capabilities and a scenario verification result")
+    branch = declared_branch_scope(hello)
 
     def evidence(path: Path) -> tuple[dict, dict]:
         if not path.is_absolute():
@@ -111,6 +119,8 @@ def record_initial_state(run: Path, *, observation_path: Path, hello: dict,
                                 "original_engine_replay_verified": False,
                                 "source": "live hello; implementation claims, not experiment acceptance"}
     manifest["runtime_hello_sha256"] = hashlib.sha256(canonical(hello)).hexdigest()
+    if branch is not None:
+        manifest["branch"] = {**branch, "source": "runtime hello"}
     write_json(run / "manifest.json", manifest)
     return manifest
 

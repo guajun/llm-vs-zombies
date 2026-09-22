@@ -120,6 +120,8 @@ manifest/hello 的完整 `draw_schedule` 规范进入轨迹 identity。初态必
 
 `replay-report.json` 的 `capture_interventions` 会分别报告 recorded、attempted、executed、compared、expected_in_scope、reproduced 和 unknown_outcome。完整重放的 scope 是 entire_trajectory；seek 的 scope 是 executed_prefix，到达目标边界后尚未发生的同 tick 捕获不会提前执行。明确响应失败属于已执行的接口尝试；unknown_outcome 不会标为已确认执行或已重现。
 
+`replay-report.json` 的 `branch_scope` 绑定版本命名空间：`request_label` 是本次重放最初生成的标签，`runtime_branch_id` 是实际 runtime 声明的分支（旧 runtime 为 null，`mode` 记 `runtime_unscoped`），`source_branch_id` 来自源轨迹初始 marker 的可选 `branch`，`relation` 为 `same_branch`、`other_branch` 或 `unknown_source_branch`。声明了作用域的 runtime 会取代标签成为报告的 `branch_id`，实际请求以 `replay-<branch_id>-<序号>` 命名并带上该作用域；同源分叉因此不会与父时间线的 `request_id` 撞车，跨分支结果也不会被当作命中。
+
 原生 `audit/` 当前不写捕获事件和像素，捕获顺序的证据来源是 SessionTrace。`pack-native` 没有该信息，因此报告 capture 来源为 `unknown_native_only`，recorded/reproduced 为 null；不能据此宣称原录制没有发生任何绘制干预。包含原画面捕获的正式实验应保留并封装 SessionTrace。
 
 ## Seek 与接管

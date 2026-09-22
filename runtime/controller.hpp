@@ -54,7 +54,11 @@ public:
     static constexpr int MaxTicks = 100000;
     static constexpr int MaxActions = 256;
     using Reply = std::function<void(Json)>;
-    explicit Controller(Backend& backend, JournalOptions journal={}) : backend_(backend),journal_(std::move(journal)) {}
+    explicit Controller(Backend& backend, JournalOptions journal={}) : backend_(backend),journal_(std::move(journal)) {
+        const auto& branch=journal_.Branch();
+        if(!branch.empty()&&!RequestJournal::ValidBranch(branch)) throw std::runtime_error("branch scope id is invalid");
+        branchOrigin_=journal_.Limits().adopt?"adopted":"session";
+    }
     void Boundary();
     void Request(const Json& request, Reply reply);
     bool ShouldStep() const;
@@ -71,6 +75,10 @@ public:
     Json Observe();
     Json Version() const;
     Json Status() const;
+    // Branch scope identity of this runtime instance (issue #32). It belongs to
+    // hello/status and to the request namespace, never to the comparable game
+    // state, the audit manifest or the state digests.
+    Json BranchIdentity() const;
 #ifdef LVZ_REQUEST_JOURNAL_TESTING
     RequestJournal& JournalForTesting() { return journal_; }
 #endif
@@ -103,6 +111,8 @@ private:
     bool wrapperActive_=false;
     int preUi_=0;
     uintptr_t preBoard_=0;
+    std::string branchOrigin_;
+    std::string branchParent_;
     Json callMetadata_,callRaw_;
     Json CallCounts(const Pending& pending) const;
     void Complete(const std::string& key, Json response, bool seal=false);

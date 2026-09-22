@@ -27,6 +27,19 @@ again. Ordinary quota exhaustion returns `dedup_capacity` before admitting a new
 action. These are capacity bounds, not a guarantee that a full disk can accept
 every response.
 
+Every runtime instance owns exactly one **branch scope** (`hello.branch`,
+`status.branch`). The dedup namespace is `(branch_id, epoch, request_id)`, and
+each journal record stores the scope it was admitted under, so a cloned or
+rebound sibling can never answer with the parent's cached result. A request may
+declare the scope it belongs to; the declaration is stripped before
+canonicalizing, so one logical request stays byte-identical in every branch. A
+foreign scope is always an explicit error (`branch_scope_mismatch`), a foreign
+record with different content is `cross_branch_request_id_conflict`, and an
+inherited record with identical content is re-executed here instead of being
+served. A clone changes scope through `branch_rebind`; a fresh process may adopt
+the parent's unsealed journal (`LVZ_JOURNAL_ADOPT=1`), whose index is rebuilt
+from the records. Legacy `LVZREQ01` files and sealed journals are never adopted.
+
 A physically allocated **32 MiB** reserve supports up to **128 additional control
 IDs** and failed completion writes. Its final ID slot and **12 MiB + 16 KiB** are
 reserved for closing and outstanding results. If both disk paths fail after an
@@ -81,6 +94,12 @@ beside the loaded DLL (normally in the run's private module directory).
 
 Additional negotiated methods:
 
+- `branch_rebind`: `{branch_id, from_branch_id, parent_branch_id?}` for a cloned
+  or restored process. `from_branch_id` must name the scope this runtime
+  currently owns; a paused boundary without pending work and an open, healthy
+  recording are required. Records already admitted keep their original scope,
+  so history stays unambiguous while later records use the new scope. See the
+  [branch scope contract](../docs/runtime-protocol.md#branch-scope-and-dedup-namespaces).
 - `initialize`: `{game_mode: 13, cards: [...]}`, exact expect, supported title/main
   menu without a Board only.
   Completes applying configuration and returns `state: initializing`; this does

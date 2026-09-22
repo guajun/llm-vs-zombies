@@ -140,18 +140,21 @@ void CorruptionAndEpoch() {
         auto& journal=c.JournalForTesting();
         // Damage the newest node's ID: checking only a matching candidate would
         // silently skip it and allow that original request to run a second time.
-        if(std::string(kind)=="id") journal.TestingWrite(0,64+64+std::string("corrupt-original").size()+request.dump().size()+64,"X");
-        if(std::string(kind)=="body") journal.TestingWrite(0,64+64+std::string("corrupt-original").size(),"X");
-        if(std::string(kind)=="header") journal.TestingWrite(0,64,"X");
-        if(std::string(kind)=="truncate") journal.TestingTruncate(0,65);
+        const auto fileHeader=RequestJournal::TestingFileHeaderBytes;
+        const auto recordHeader=RequestJournal::TestingRecordHeaderBytes();
+        const auto completion=fileHeader+recordHeader+std::string("corrupt-original").size()+request.dump().size();
+        if(std::string(kind)=="id") journal.TestingWrite(0,completion+recordHeader,"X");
+        if(std::string(kind)=="body") journal.TestingWrite(0,fileHeader+recordHeader+std::string("corrupt-original").size(),"X");
+        if(std::string(kind)=="header") journal.TestingWrite(0,fileHeader,"X");
+        if(std::string(kind)=="truncate") journal.TestingTruncate(0,fileHeader+1);
         auto duplicate=Immediate(c,request);
         Check(duplicate["error"]["code"]=="dedup_storage_failed"&&e.actions==1&&!c.ShouldStep(),"damaged journal allowed a duplicate action");
     }
     RequestJournal journal;auto first=journal.Reserve("id","epoch-one",false);journal.Complete(first,"id","result-one");
-    Check(journal.Find("id")->response=="result-one","direct journal result mismatch");
-    journal.Epoch(2);Check(!journal.Find("id"),"epoch did not reset request ID namespace");
+    Check(journal.Find("id").hit->response=="result-one","direct journal result mismatch");
+    journal.Epoch(2);Check(!journal.Find("id").hit,"epoch did not reset request ID namespace");
     auto second=journal.Reserve("id","epoch-two",false);journal.Complete(second,"id","result-two");
-    Check(journal.Find("id")->payload=="epoch-two"&&journal.Find("id")->response=="result-two","new epoch returned previous epoch result");
+    Check(journal.Find("id").hit->payload=="epoch-two"&&journal.Find("id").hit->response=="result-two","new epoch returned previous epoch result");
     journal.Seal();
 }
 void TerminalWriteFailures() {

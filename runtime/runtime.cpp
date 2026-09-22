@@ -28,6 +28,36 @@ bool wasFight=false;
 std::vector<int> pendingCards;
 std::string initializationState="idle",initializationError;
 bool cardsSubmitted=false;
+std::string EnvironmentValue(const char* name) {
+    char buffer[512]{};DWORD size=GetEnvironmentVariableA(name,buffer,sizeof(buffer));
+    if(!size) return std::string();
+    if(size>=sizeof(buffer)) throw std::runtime_error(std::string(name)+" is longer than 511 characters");
+    return std::string(buffer,size);
+}
+std::string EnvironmentBranch(const char* name) {
+    auto value=EnvironmentValue(name);
+    if(!value.empty()&&!RequestJournal::ValidBranch(value))
+        throw std::runtime_error(std::string(name)+" must be 1-64 characters of [A-Za-z0-9._:-] starting alphanumeric");
+    return value;
+}
+// Every runtime instance owns exactly one branch scope. The orchestrator sets
+// LVZ_BRANCH_ID when it creates or forks a process; the default is a
+// process-instance label, so two live processes never share one scope by
+// accident and a clone can still be rebound explicitly over IPC.
+std::string InstanceBranchScope(const std::filesystem::path& directory) {
+    auto explicitScope=EnvironmentBranch("LVZ_BRANCH_ID");
+    if(!explicitScope.empty()) return explicitScope;
+    auto alnum=[](char c){return (c>='0'&&c<='9')||(c>='A'&&c<='Z')||(c>='a'&&c<='z');};
+    std::string sanitized;
+    for(char c:directory.filename().string()) {
+        const bool allowed=alnum(c)||c=='.'||c=='_'||c==':'||c=='-';
+        sanitized.push_back(allowed?c:'-');
+    }
+    while(!sanitized.empty()&&!alnum(sanitized.front())) sanitized.erase(sanitized.begin());
+    if(sanitized.size()>32) sanitized.resize(32);
+    if(sanitized.empty()) sanitized="session";
+    return sanitized+"-"+std::to_string(GetCurrentProcessId());
+}
 void FinishContinueDialog() {
     auto dialog=AGetPvzBase()->MouseWindow()->TopWindow();
     if(!dialog || dialog->MRef<uintptr_t>(0)!=0x657e28 || dialog->MRef<int>(0x13c)!=37) return;
@@ -325,6 +355,19 @@ void Start(const std::filesystem::path& directory) {
     lvz::flagfixture::Initialize(directory,ownerThread);
 #endif
     JournalOptions journal;journal.path=directory/"decisions/runtime-requests.bin";
+    journal.branch=InstanceBranchScope(directory);
+    journal.parentBranch=EnvironmentBranch("LVZ_BRANCH_PARENT_ID");
+    if(EnvironmentValue("LVZ_JOURNAL_ADOPT")=="1") {
+        // Sibling path used by the fork/snapshot host: continue the parent's
+        // unsealed journal under this instance's own branch scope.
+        journal.adopt=true;
+        auto epoch=EnvironmentValue("LVZ_JOURNAL_EPOCH");
+        if(!epoch.empty()) {
+            try { journal.adoptEpoch=std::stoull(epoch); }
+            catch(const std::exception&) { throw std::runtime_error("LVZ_JOURNAL_EPOCH must be a positive integer"); }
+            if(!journal.adoptEpoch) throw std::runtime_error("LVZ_JOURNAL_EPOCH must be a positive integer");
+        }
+    }
     controller=std::make_unique<Controller>(backend,std::move(journal));controller->Boundary();
     server=new PipeServer();server->Start();
 }

@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import struct
 import threading
 import time
@@ -23,10 +24,60 @@ from .initialization import DRAW_MODE, draw_mode
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 READ_ONLY_METHODS = frozenset({"hello", "observe", "status", "audit_snapshot"})
+BRANCH_SCHEMA = "lvz.branch-scope.v1"
+_BRANCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 
 
 class ProtocolError(RuntimeError):
     pass
+
+
+def branch_scope_id(value: Any) -> str:
+    """The branch-scope grammar, shared with the evidence tree's branch_id."""
+    if not isinstance(value, str) or _BRANCH_ID.fullmatch(value) is None:
+        raise ValueError("branch_id must be 1-64 characters of [A-Za-z0-9._:-] starting alphanumeric")
+    return value
+
+
+def declared_branch_scope(hello: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The runtime's own branch scope, or None for a pre-branch runtime.
+
+    A runtime instance owns exactly one scope. Its dedup namespace is
+    ``(branch_id, epoch, request_id)``; requests carry the scope id so a cloned
+    or rebound process can never answer for a branch it did not execute.
+    """
+    value = hello.get("branch")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or value.get("schema") != BRANCH_SCHEMA:
+        raise ProtocolError("hello branch scope is missing or malformed")
+    mode = value.get("mode")
+    if mode not in ("branch", "unscoped"):
+        raise ProtocolError("hello branch scope mode is invalid")
+    declared = value.get("branch_id")
+    if mode == "branch":
+        if not isinstance(declared, str):
+            raise ProtocolError("a branch-scoped runtime must declare branch_id")
+        try:
+            declared = branch_scope_id(declared)
+        except ValueError as error:
+            raise ProtocolError(f"hello branch_id is invalid: {error}") from error
+    elif declared is not None:
+        raise ProtocolError("an unscoped runtime must not declare branch_id")
+    parent = value.get("parent_branch_id")
+    if parent is not None:
+        try:
+            parent = branch_scope_id(parent)
+        except ValueError as error:
+            raise ProtocolError(f"hello parent branch is invalid: {error}") from error
+    origin = value.get("origin")
+    if origin is not None and not isinstance(origin, str):
+        raise ProtocolError("hello branch origin is invalid")
+    dedup_key = value.get("dedup_key")
+    if dedup_key is not None and not isinstance(dedup_key, str):
+        raise ProtocolError("hello dedup key is invalid")
+    return {"schema": BRANCH_SCHEMA, "mode": mode, "branch_id": declared, "parent_branch_id": parent,
+            "origin": origin, "dedup_key": dedup_key}
 
 
 class RemoteError(RuntimeError):
@@ -270,10 +321,14 @@ def _completed_step(method: str, result: dict[str, Any], *, engine_calls: bool =
 
 
 class Client:
-    def __init__(self, transport: Transport, *, trace: SessionTrace, timeout: float = 15.0):
+    def __init__(self, transport: Transport, *, trace: SessionTrace, timeout: float = 15.0,
+                 expected_branch: str | None = None):
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self.transport, self.trace, self.timeout = transport, trace, timeout
+        self._expected_branch = None if expected_branch is None else branch_scope_id(expected_branch)
+        self._branch_scope: dict[str, Any] | None = None
+        self._branch_id: str | None = None
         self._mutex = threading.RLock()
         self._request_ids: set[str] = set()
         self._last_observation: dict[str, Any] | None = None
@@ -287,6 +342,26 @@ class Client:
     @property
     def version(self) -> dict[str, int] | None:
         return None if self._last_observation is None else _version(self._last_observation["version"])
+
+    @property
+    def branch_scope(self) -> dict[str, Any] | None:
+        """The negotiated scope of the runtime this client is bound to."""
+        return None if self._branch_scope is None else copy.deepcopy(self._branch_scope)
+
+    @property
+    def branch_id(self) -> str | None:
+        """The branch id stamped on requests, or None for a pre-branch runtime."""
+        return self._branch_id
+
+    def _adopt_branch_scope(self, hello: dict[str, Any], *, enforce_expected: bool = True) -> None:
+        scope = declared_branch_scope(hello)
+        if enforce_expected and self._expected_branch is not None:
+            if scope is None or scope["branch_id"] is None:
+                raise ProtocolError("runtime does not declare a branch scope; the expected branch cannot be verified")
+            if scope["branch_id"] != self._expected_branch:
+                raise ProtocolError(f"runtime owns branch {scope['branch_id']}, not the expected {self._expected_branch}")
+        self._branch_scope = scope
+        self._branch_id = None if scope is None else scope["branch_id"]
 
     def request(self, method: str, params: Mapping[str, Any] | None = None, *,
                 expect: Mapping[str, Any] | None = None, request_id: str | None = None,
@@ -308,6 +383,11 @@ class Client:
                        "method": method, "params": dict(params or {})}
             if not isinstance(request["request_id"], str) or not request["request_id"]:
                 raise ValueError("request_id must be a nonempty string")
+            # The scope claim is not request content: the runtime strips it
+            # before canonicalizing, so the same logical request stays identical
+            # in every branch while still being bound to one namespace.
+            if self._branch_id is not None:
+                request["branch"] = self._branch_id
             if expect is not None:
                 request["expect"] = _version(expect)
             if request["request_id"] in self._request_ids:
@@ -371,6 +451,7 @@ class Client:
                     self._last_observation = copy.deepcopy(observation)
                     self.trace.emit("observation", {"request_id": request["request_id"], "observation": observation})
                 if method == "hello":
+                    self._adopt_branch_scope(result)
                     self.hello_result = copy.deepcopy(result)
                 return result
             except RemoteError as error:
@@ -392,6 +473,26 @@ class Client:
 
     def hello(self) -> dict[str, Any]:
         return self.request("hello")
+
+    def branch_rebind(self, branch_id: str, *, parent_branch_id: str | None = None,
+                      timeout: float | None = None) -> dict[str, Any]:
+        """Move a cloned runtime to its own branch scope.
+
+        A runtime cannot verify that a fork happened, so the request must name
+        the scope it is leaving. Records already admitted keep their original
+        scope, and this client stamps the new branch on later requests.
+        """
+        target = branch_scope_id(branch_id)
+        if self._branch_id is None:
+            raise ProtocolError("runtime does not declare a branch scope")
+        params: dict[str, Any] = {"branch_id": target, "from_branch_id": self._branch_id}
+        if parent_branch_id is not None:
+            params["parent_branch_id"] = branch_scope_id(parent_branch_id)
+        result = self.request("branch_rebind", params, timeout=timeout)
+        if not isinstance(result.get("branch"), Mapping):
+            raise ProtocolError("branch_rebind response lacks the runtime branch identity")
+        self._adopt_branch_scope({"branch": result["branch"]}, enforce_expected=False)
+        return result
 
     def observe(self) -> dict[str, Any]:
         return self.request("observe")
@@ -459,11 +560,15 @@ class Client:
 
 
 def connect(*, pid: int | None = None, endpoint: str | None = None,
-            trace: SessionTrace, timeout: float = 15.0) -> Client:
+            trace: SessionTrace, timeout: float = 15.0,
+            expected_branch: str | None = None) -> Client:
     """Connect and negotiate hello. A supplied trace is owned by its caller.
 
     Pass a SessionTrace context manager explicitly. Closing a client closes
     only the transport, so the same audit file can record an explicit reconnect.
+    ``expected_branch`` binds the connection to one runtime branch scope: a
+    clone that forgot to rebind fails at hello instead of answering for another
+    branch.
     """
     if (pid is None) == (endpoint is None):
         raise ValueError("provide exactly one of pid or endpoint")
@@ -472,7 +577,7 @@ def connect(*, pid: int | None = None, endpoint: str | None = None,
     if not isinstance(trace, SessionTrace):
         raise TypeError("trace must be an open SessionTrace; use its context manager")
     transport = FramedTransport(WindowsNamedPipeStream(endpoint, timeout))
-    client = Client(transport, trace=trace, timeout=timeout)
+    client = Client(transport, trace=trace, timeout=timeout, expected_branch=expected_branch)
     try:
         client.hello()
     except BaseException:
