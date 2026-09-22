@@ -1,5 +1,6 @@
 #include "audit.hpp"
 #include "app_update_anchor.hpp"
+#include "mj_clock_anchor.hpp"
 #include "sound_counter_origin.hpp"
 #include "silent_audio_audit.hpp"
 #include "recording/draw_gate.hpp"
@@ -265,7 +266,8 @@ Json ProbeTarget() {
         {"engine_call_boundary",lvz::runtime::EngineCallManifest()},{"foley_trace",foleytrace::Manifest()},
         {"fixed_fp",fpenv::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
-    if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();result["sound_counter"]=SoundCounterManifest();}
+    if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();
+        result["mj_clock_anchor"]=MjClockAnchorManifest();result["sound_counter"]=SoundCounterManifest();}
 #ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
     result["test_fixture"]=lvz::flagfixture::Manifest();
 #endif
@@ -490,6 +492,7 @@ void Audit(const std::string& kind,const Json& payload,const Json& observation) 
         // acknowledgement must also make warm-draw receipts and drained hook
         // evidence visible to a replay reader before the first update.
         if(kind=="request_completed"||kind=="render_prepared"||kind=="app_update_anchored"||kind=="app_update_anchor_failed"
+            ||kind=="mj_clock_anchored"||kind=="mj_clock_anchor_failed"
             ||kind=="sound_counter_origin_bound"||kind=="sound_counter_origin_failed") Flush();
         return;
     }

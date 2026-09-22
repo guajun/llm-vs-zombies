@@ -37,7 +37,7 @@ lvz::determinism::Shutdown();
 
 `RestoreRng` 在写入任何状态之前验证全部字段、算法、实例集合、范围与签名，只允许固定的内部地址。它恢复 RNG，**不恢复 Board**。不能独立用它模拟 rewind。进程 ID、裸指针、线程 ID 不写入规范化比较状态。游戏线程身份由运行时绑定，协议中的字符串不能替代真正暂停控制。
 
-`CaptureClocks()/RestoreClocks(snapshot,"paused_at_boundary",error)` 对已确认的 Board GameClock、EffectCounter 和 App MjClock 提供初始化 sidecar 接口。所有字段始终参与审计，不能为了通过不同菜单等待时长的比较而删除。恢复只允许处于战斗边界；它不调整出怪倒计时、对象年龄或控制器自己的 tick，也不是任意时间点的回滚。实验应明确记录在 B(0) 统一设定的三个值，并在重放用相同初始化流程恢复它们。
+`CaptureClocks()/RestoreClocks(snapshot,"paused_at_boundary",error)` 对已确认的 Board GameClock、EffectCounter 和 App MjClock 提供初始化 sidecar 接口。所有字段始终参与审计，不能为了通过不同菜单等待时长的比较而删除。恢复只允许处于战斗边界；它不调整出怪倒计时、对象年龄或控制器自己的 tick，也不是任意时间点的回滚。实验应明确记录在 B(0) 统一设定的三个值，并在重放用相同初始化流程恢复它们。第三个字段 `mj_clock` 就是 `LawnApp+0x838`（AvZ `MjClock`、候选反编译的 `mAppCounter`），也是 `Zombie::GetDancerFrame` 读取的绝对计数；它在显式静音模式下可被[固定 MJ 时钟锚定](mj-clock-anchor-native.md)在 warm 前真实写入实验声明的固定目标。恢复与锚定是两个阶段：前者让同一世界可复现，后者让不同世界在同一初始化目标上可比，二者都不删除比较字段、不引入偏移。
 
 ## 播种时机与实际初始波表
 

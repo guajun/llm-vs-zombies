@@ -6,6 +6,7 @@ that every original-engine source of nondeterminism has been controlled.
 from __future__ import annotations
 from . import sound_effects
 from . import app_update_anchor
+from . import mj_clock_anchor
 from . import sound_counter
 from . import fp_environment
 from . import evidence_codec
@@ -60,6 +61,7 @@ def identity_from_launcher(hello: dict, launcher: dict) -> dict:
         raise EvidenceError("hello lacks build/game identity")
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
+    mj_clock_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
     fp_environment.negotiate(hello)
     return {"build": copy.deepcopy(hello["build"]), "game": copy.deepcopy(hello["game"]),
@@ -76,6 +78,7 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
     hello = client.hello()
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
+    mj_clock_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
     fp_environment.negotiate(hello)
     _validate_identity(identity)
@@ -118,6 +121,7 @@ def _validate_identity(identity: dict) -> None:
     engine_call_mode(game)
     sound_effects.artifacts(game, identity["artifacts"])
     app_update_anchor.mode(game)
+    mj_clock_anchor.mode(game)
     sound_counter.mode(game)
     fp_environment.mode(game)
 
@@ -161,6 +165,7 @@ def _validate_initial(initial: dict) -> None:
         raise EvidenceError("engine call origin lacks an explicit engine identity")
     sound_effects.initial(initial)
     app_update_anchor.initial(initial)
+    mj_clock_anchor.initial(initial)
     sound_counter.initial(initial)
     fp_environment.initial(initial)
     digests(initial["state"])
@@ -692,6 +697,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     controlled_calls = engine_call_mode(trajectory.audit.manifest)
     audio_mode = sound_effects.mode(trajectory.audit.manifest)
     anchor_mode = app_update_anchor.mode(trajectory.audit.manifest)
+    mj_clock_mode = mj_clock_anchor.mode(trajectory.audit.manifest)
     counter_mode = sound_counter.mode(trajectory.audit.manifest)
     fp_mode = fp_environment.mode(trajectory.audit.manifest)
     report["fixed_fp"] = {"mode": fp_mode or "not_declared", "activation_compared": False,
@@ -703,6 +709,10 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     report["app_update_anchor"] = {"mode": anchor_mode or "not_declared", "receipt_compared": False,
         "original_engine_bitwise_unmodified": False if anchor_mode else None,
         "before_values_compared": False, "subsequent_state_normalized": False}
+    report["mj_clock_anchor"] = {"mode": mj_clock_mode or "not_declared",
+        "original_engine_bitwise_unmodified": False if mj_clock_mode else None,
+        "receipt_compared": False, "before_values_compared": False, "subsequent_state_normalized": False,
+        "target_policy": mj_clock_anchor.SPEC["target_policy"] if mj_clock_mode else None}
     report["sound_effects"] = {"mode": audio_mode or "original", "state_compared": False,
         "original_engine_bitwise_unmodified": False if audio_mode else None,
         "activation_evidence_verified": False, "final_health_verified": False,
@@ -758,6 +768,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             hello = client.hello()
             sound_effects.negotiate(hello)
             app_update_anchor.negotiate(hello)
+            mj_clock_anchor.negotiate(hello)
             sound_counter.negotiate(hello)
             fp_environment.negotiate(hello)
             require_equal(session.identity["build"], hello.get("build"), "live_build")
@@ -797,6 +808,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 required.add(sound_effects.MODE)
             if anchor_mode:
                 required.update({app_update_anchor.MODE, app_update_anchor.METHOD})
+            if mj_clock_mode:
+                required.update({mj_clock_anchor.MODE, mj_clock_anchor.METHOD})
             if counter_mode:
                 required.update({sound_counter.MODE, sound_counter.METHOD})
             if fp_mode:
@@ -878,6 +891,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                               render_semantics(actual_audit.warm_render), "initial_warm_render")
                 report["draw_schedule"]["warm_receipts_compared"] = 1
             actual_audit.validate_app_anchor_initial(actual_marker)
+            actual_audit.validate_mj_clock_initial(actual_marker)
             actual_audit.validate_sound_counter_initial(actual_marker)
             actual_audit.validate_fp_initial(actual_marker)
             if fp_mode:
@@ -893,11 +907,22 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     actual_origin_raw_calls=actual_counter["origin_raw_calls"])
             if anchor_mode:
                 expected_anchor, actual_anchor = trajectory.audit.app_anchor_receipt, actual_audit.app_anchor_receipt
-                require_equal(app_update_anchor.semantics(expected_anchor, map_version=mapped_version),
-                              app_update_anchor.semantics(actual_anchor), "initial_app_update_anchor")
+                pending_mj_clock = mj_clock_mode is not None
+                require_equal(app_update_anchor.semantics(expected_anchor, map_version=mapped_version,
+                                                          pending_mj_clock=pending_mj_clock),
+                              app_update_anchor.semantics(actual_anchor, pending_mj_clock=pending_mj_clock),
+                              "initial_app_update_anchor")
                 report["app_update_anchor"].update(receipt_compared=True, source_before=expected_anchor["before"],
                     actual_before=actual_anchor["before"], requested=expected_anchor["requested"],
                     source_after=expected_anchor["after"], actual_after=actual_anchor["after"])
+            if mj_clock_mode:
+                expected_mj, actual_mj = trajectory.audit.mj_clock_receipt, actual_audit.mj_clock_receipt
+                require_equal(mj_clock_anchor.semantics(expected_mj, map_version=mapped_version),
+                              mj_clock_anchor.semantics(actual_mj), "initial_mj_clock_anchor")
+                report["mj_clock_anchor"].update(receipt_compared=True, source_before=expected_mj["before"],
+                    actual_before=actual_mj["before"], requested=expected_mj["requested"],
+                    common_target=expected_mj["requested"], source_after=expected_mj["after"],
+                    actual_after=actual_mj["after"])
             for ordinal, step in enumerate(trajectory.steps):
                 if target_tick is not None and client.version["tick"] >= target_tick:
                     break

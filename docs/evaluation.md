@@ -63,6 +63,8 @@ launcher 在进入游戏前应用 seed，源实验在真实两仪初态暂停后
 
 当前显式静音 runtime 还声明两项独立初始化能力：[App 更新计数锚定](app-update-anchor-native.md)与[诊断音效计数起点](sound-counter-origin-native.md)。顺序为种子/三时钟读回、绑定本进程诊断计数起点、写入记录的真实 App 计数、warm 绘制、B0。原始 App 写入保留完整前后回执；bootstrap 的绝对计数不重置，每个更新边界另存原始累计旁证，实验内计数包含 warm。完整游戏状态直接比较，允许不同的启动诊断累计值不等于允许游戏字段分叉。旧档没有这些声明时仍按原合同读取，不能自动升级为新模式。
 
+同一 runtime 还声明第三项能力：[固定 MJ 时钟锚定](mj-clock-anchor-native.md)。计划的 `mj_clock` 字段声明 B(0) 的固定目标，顺序变为种子/三时钟读回、绑定诊断计数起点、写入记录的真实 App 计数、把 `LawnApp+0x838` 真实写入该固定目标、warm 绘制、B0。运行声明能力而没有声明目标时 `apply_recipe` 在发出任何初始化请求前拒绝启动；每个平行世界必须在自己的计划里声明同一个值，跨运行的真实 before 照实保留，after 必须等于共同目标。该字段只统一初始化输入，不改变任何状态比较字段，也不改动既有 C/D 结论。
+
 在 `capture_initial` 前执行暂停扰动：保存 audit snapshot 与观察，等待指定墙钟时间，再确认**已捕获模拟状态与version逐字段不变**。暂停证明的冻结对象是模拟状态与版本，不是整份 snapshot 字节：声明固定 owner 浮点模式时，每次读取 snapshot 都会新增一次 monitor 检查，两次读取必然不同；探针改为显式核验该模式的激活回执未变，且 after 侧 monitor 仍健康、控制位仍在目标值，并把实际比较的字段写入probe记录，不静默丢弃这段证据。随后记录单帧推进，再执行策略：**公开runner首个策略决策在B1**，与私有045在B0决策不同；当前公开源自行记录真实初始锚点，不继承私有041的B0。每个cold使用自己的实际进程及源recipe，从完整B0重新执行包括这次advance1在内的相同请求。
 
 source及cold还按 `pause_points`，在首次达到指定tick的已完成战斗请求边界等待。默认为≥1000时1秒、≥2500时5秒；保存请求目标、实际版本和同样的模拟状态不变证明（比较范围与B0暂停探针一致）。一次请求跨过多个点就在同一实际边界逐个检查，不拆预算、不新增推进、不重试动作。末请求恰好停在B1000且仍在战斗时照常探测。报告分别列出configured、completed、已达阈值却无法执行的unexecuted_reached和尚未到达终点的not_reached。直接到终局或资源停止导致已达点无法合法探测时，coverage为unverified，不能用B0暂停通过来遮盖；超出真实终点的点明确not applicable。记录在 `pause-probes-during-play.json` 和客户端trace中。

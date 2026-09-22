@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from . import sound_effects
 from . import app_update_anchor
+from . import mj_clock_anchor
 from . import sound_counter
 from . import fp_environment
 
@@ -90,11 +91,14 @@ def _persist(client, run: Path, hello: dict, recipe: dict, evidence: dict,
 
 
 def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | None = None,
-                 scenario_verified: bool | None = None, app_update_count: int | None = None) -> dict:
+                 scenario_verified: bool | None = None, app_update_count: int | None = None,
+                 mj_clock: int | None = None) -> dict:
     if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
         raise ValueError("seed must be uint32")
     if app_update_count is not None and (type(app_update_count) is not int or not 0 <= app_update_count <= 0x7fffffff):
         raise ValueError("initial App update count must be an integer in 0..2147483647")
+    if mj_clock is not None and (type(mj_clock) is not int or not 0 <= mj_clock <= 0x7fffffff):
+        raise ValueError("fixed initial MJ clock target must be an integer in 0..2147483647")
     hello = client.hello()
     capabilities = hello["capabilities"]
     if capabilities.get("rng_seed") is not True:
@@ -102,10 +106,19 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     mode = draw_mode(hello)
     sound_mode = sound_effects.negotiate(hello)
     app_anchor_mode = app_update_anchor.negotiate(hello)
+    mj_clock_mode = mj_clock_anchor.negotiate(hello)
     counter_mode = sound_counter.negotiate(hello)
     fp_mode = fp_environment.negotiate(hello)
     if app_update_count is not None and app_anchor_mode is None:
         raise RuntimeError("runtime has no declared initial App update anchor capability")
+    if mj_clock_mode is not None and mj_clock is None:
+        # The whole point of this capability is a target the experiment chose.
+        # Recording the run's own current counter would recreate the cross-run
+        # asymmetry of the App update counter.
+        raise RuntimeError("runtime declares the fixed MJ clock anchor; declare the fixed B(0) target explicitly "
+                           "(the run's own current value is not accepted)")
+    if mj_clock is not None and mj_clock_mode is None:
+        raise RuntimeError("runtime has no declared fixed MJ clock anchor capability")
     if (anchor is not None or mode == DRAW_MODE) and capabilities.get("clock_restore") is not True:
         raise RuntimeError("runtime lacks clock_restore needed by the recorded initialization recipe")
     observation = client.observe()
@@ -186,6 +199,30 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
             raise RuntimeError("App anchor readback differs from its actual receipt")
         seeded = anchored
         verify_seeded_rng(seeded, seed)
+    mj_receipt = None
+    if mj_clock_mode:
+        before_version = copy.deepcopy(client.version)
+        if seeded.get("version") != before_version:
+            raise RuntimeError("MJ clock anchor requires the current App-anchored audit boundary")
+        result = client.request("mj_clock_anchor", {"mj_clock": mj_clock}, expect=before_version)
+        expected_version = {**before_version, "revision": before_version["revision"] + 1}
+        if (result.get("anchored") is not True or client.version != expected_version
+                or result.get("observation", {}).get("version") != expected_version
+                or result.get("observation", {}).get("mj_clock_anchored") is not True):
+            raise RuntimeError("MJ clock anchor did not establish the exact next initialization boundary")
+        mj_receipt = mj_clock_anchor.receipt(result.get("anchor"), hello["game"], requested=mj_clock,
+            before_version=before_version, after_version=expected_version, seed=seed)
+        if mj_receipt["before_state"] != seeded["state"]:
+            raise RuntimeError("MJ clock anchor before-state differs from its actual App-anchored snapshot")
+        anchored = client.request("audit_snapshot")
+        if (anchored.get("version") != expected_version or anchored.get("state") != mj_receipt["after_state"]
+                or clock_anchor(anchored) != {**before_clock, "mj_clock": mj_clock}):
+            raise RuntimeError("MJ clock anchor readback differs from its actual receipt")
+        seeded = anchored
+        verify_seeded_rng(seeded, seed)
+        # The anchored absolute counter is the real prewarm boundary; ordinary
+        # clocks keep their restored values.
+        before_clock = clock_anchor(seeded)
     recipe = {"game_mode": 13, "seed": seed,
         "seed_phase": "before_enter_game_and_paused_after_scenario_load",
         "seed_scope": "global Sexy MT + game-thread CRT; initialization also seeds before scene creation; generated initial state is compared",
@@ -193,6 +230,9 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     if app_receipt is not None:
         recipe["app_update_anchor"] = {"configuration": copy.deepcopy(hello["game"]["app_update_anchor"]),
                                        "app_update_count": app_receipt["requested"]}
+    if mj_receipt is not None:
+        recipe[mj_clock_anchor.METHOD] = {"configuration": copy.deepcopy(hello["game"][mj_clock_anchor.METHOD]),
+                                          "mj_clock": mj_receipt["requested"]}
     if counter_receipt is not None:
         recipe["sound_counter"] = {"configuration": copy.deepcopy(hello["game"]["sound_counter"])}
     prepared = None
@@ -243,6 +283,8 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         evidence["fixed_fp"] = copy.deepcopy(fp_environment.evidence(snapshot, hello["game"]))
     if app_receipt is not None:
         evidence["app_update_anchor"] = app_receipt
+    if mj_receipt is not None:
+        evidence[mj_clock_anchor.METHOD] = mj_receipt
     if counter_receipt is not None:
         evidence["sound_counter"] = counter_receipt
     trace = getattr(client, "trace", None)
@@ -254,11 +296,12 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     return recipe
 
 
-def ensure_render_prepared(client, seed: int = 0) -> dict | None:
+def ensure_render_prepared(client, seed: int = 0, *, mj_clock: int | None = None) -> dict | None:
     """Prepare an attached ready new-mode game; reconnecting never reseeds it."""
     hello = client.hello_result if client.hello_result is not None else client.hello()
     sound_effects.negotiate(hello)
     app_update_anchor.negotiate(hello)
+    mj_clock_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
     fp_environment.negotiate(hello)
     if draw_mode(hello) != DRAW_MODE:
@@ -268,4 +311,4 @@ def ensure_render_prepared(client, seed: int = 0) -> dict | None:
         return None
     if observation.get("game_ui") != 3:
         return None  # The REPL can still inspect/loading-initialize the process.
-    return apply_recipe(client, seed)
+    return apply_recipe(client, seed, mj_clock=mj_clock)

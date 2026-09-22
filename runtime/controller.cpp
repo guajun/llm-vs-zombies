@@ -25,6 +25,7 @@ Json Controller::BranchIdentity() const {
 Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Version();
     if(backend_.RequiresRenderPreparation())value["render_prepared"]=backend_.RenderPrepared();
     if(backend_.SupportsAppUpdateAnchor())value["app_update_anchored"]=backend_.AppUpdateAnchored();
+    if(backend_.SupportsMjClockAnchor())value["mj_clock_anchored"]=backend_.MjClockAnchored();
     if(backend_.SupportsSoundCounterOrigin())value["counter_origin_bound"]=backend_.SoundCounterBound();return value; }
 Json Controller::Status() const {
     return {{"state",!fault_.empty()?"audit_failed":(!storageFault_.empty()||!journal_.Fault().empty()?"dedup_storage_failed":(pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight"))))},
@@ -416,7 +417,7 @@ void Controller::Request(const Json& req,Reply reply) {
             terminalReply_.reset();
             reply(Success(id,{{"rebound",true},{"previous_branch_id",from},{"branch",BranchIdentity()}}));return;
         }
-        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render"&&method!="app_update_anchor"&&method!="sound_counter_origin") {
+        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render"&&method!="app_update_anchor"&&method!="mj_clock_anchor"&&method!="sound_counter_origin") {
             reply(Error(id,"unsupported_method","Method is not implemented")); return;
         }
         if(terminalReply_&&terminalReply_->id==id) {
@@ -506,7 +507,7 @@ void Controller::Request(const Json& req,Reply reply) {
             // audit or the action dedup budget. Expired IDs remain tombstones.
             reply(std::move(response));return;
         }
-        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||method=="app_update_anchor"||method=="sound_counter_origin"||req.contains("expect")) {
+        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||method=="app_update_anchor"||method=="mj_clock_anchor"||method=="sound_counter_origin"||req.contains("expect")) {
             if(!req.contains("expect") || req["expect"]!=Version()) {
                 reply(Error(id,"stale_observation","expect must exactly match epoch, tick and revision")); return;
             }
@@ -591,11 +592,48 @@ void Controller::Request(const Json& req,Reply reply) {
             Audit("app_update_anchored",{{"request_id",id},{"anchor",receipt}});
             Complete(id,Success(id,{{"anchored",true},{"anchor",std::move(receipt)},{"observation",Observe()}}));return;
         }
+        if(method=="mj_clock_anchor") {
+            if(params.size()!=1||!params.contains("mj_clock")||!params["mj_clock"].is_number_integer()) {
+                Complete(id,Error(id,"invalid_params","mj_clock must be the only parameter, an integer in 0..2147483647"));return;
+            }
+            const auto& count=params["mj_clock"];
+            const bool valid=count.is_number_unsigned()?count.get<uint64_t>()<=INT32_MAX:count.get<int64_t>()>=0&&count.get<int64_t>()<=INT32_MAX;
+            if(!valid){Complete(id,Error(id,"invalid_params","mj_clock must be in 0..2147483647"));return;}
+            // The real counter write is one fixed target chosen by the
+            // experiment; the run's own current value is never substituted.
+            if(!ready_||terminalFrozen_||inStep_||tick_!=0||engineCalls_.Health().at("entered_calls")!=0
+                ||!backend_.SupportsMjClockAnchor()||backend_.RenderPrepared()||backend_.MjClockAnchored()
+                ||(backend_.SupportsAppUpdateAnchor()&&!backend_.AppUpdateAnchored())) {
+                Complete(id,Error(id,"mj_clock_anchor_rejected","Fixed MJ clock anchor requires an unused prewarm paused silent fight after the App anchor, tick zero and no entered engine call"));return;
+            }
+            const auto beforeVersion=Version();Json result;
+            try {result=backend_.AnchorMjClock(count.get<uint32_t>());}
+            catch(const std::exception& error){
+                // An unexpected backend exception cannot establish whether a
+                // write occurred. Invalidate the boundary and freeze truthfully.
+                ++revision_;Fail(std::string("MJ clock anchor failed: ")+error.what());
+                Audit("mj_clock_anchor_failed",{{"request_id",id},{"before_version",beforeVersion},{"after_version",Version()},{"message",error.what()}});
+                Complete(id,Error(id,"mj_clock_anchor_failed",error.what()));return;
+            }
+            if(!result.value("ok",false)&&!result.value("write_attempted",false)) {
+                Complete(id,Error(id,"mj_clock_anchor_rejected",result.value("error",std::string("MJ clock anchor rejected"))));return;
+            }
+            ++revision_;backend_.InvalidateFrame("mj_clock_anchor");
+            auto receipt=result.at("anchor");receipt["before_version"]=beforeVersion;receipt["after_version"]=Version();
+            if(!result.value("ok",false)) {
+                Fail(result.value("error",std::string("MJ clock anchor post-write verification failed")));
+                Audit("mj_clock_anchor_failed",{{"request_id",id},{"anchor",receipt},{"message",result.value("error",std::string())}});
+                Complete(id,Error(id,"mj_clock_anchor_failed",result.value("error",std::string("MJ clock anchor failed"))));return;
+            }
+            Audit("mj_clock_anchored",{{"request_id",id},{"anchor",receipt}});
+            Complete(id,Success(id,{{"anchored",true},{"anchor",std::move(receipt)},{"observation",Observe()}}));return;
+        }
         if(method=="prepare_render") {
             if(!params.empty()) {Complete(id,Error(id,"invalid_params","prepare_render takes no parameters"));return;}
             if(!ready_||terminalFrozen_||inStep_||tick_!=0) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing requires a paused ready fight at tick zero"));return;}
             if(!backend_.RequiresRenderPreparation()||backend_.RenderPrepared()) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing is unavailable or has already completed"));return;}
             if(backend_.SupportsAppUpdateAnchor()&&!backend_.AppUpdateAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Explicit App update anchor must precede warm drawing"));return;}
+            if(backend_.SupportsMjClockAnchor()&&!backend_.MjClockAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Fixed MJ clock anchor must precede warm drawing"));return;}
             ++revision_;
             Audit("render_preparing",{{"request_id",id}});
             Json receipt;
@@ -610,6 +648,7 @@ void Controller::Request(const Json& req,Reply reply) {
         }
         if(method=="rng_restore"||method=="rng_seed"||method=="clock_restore") {
             if((backend_.SupportsAppUpdateAnchor()&&backend_.AppUpdateAnchored())
+                ||(backend_.SupportsMjClockAnchor()&&backend_.MjClockAnchored())
                 ||(backend_.SupportsSoundCounterOrigin()&&backend_.SoundCounterBound())) {
                 Complete(id,Error(id,"initialization_sealed","RNG/clock initialization is sealed by the explicit counter/App boundary"));return;
             }
