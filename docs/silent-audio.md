@@ -138,3 +138,19 @@ policy acceptance require separate recorded experiments. The ordinary-audio
 Foley probe established that an actual IsPlaying return can control a variation
 RNG call; that finding does not by itself prove every source of randomness is
 covered by this mode.
+
+## Related mode
+
+`virtual_audio_tick_v1` (issue #37,
+`docs/虚拟音频设备与离线音轨.md`) keeps this mode's simulation-side profile
+unchanged -- the same null-return `GetSoundInstance` replacement, so the Foley
+admission trace, variation draws and slot bookkeeping stay frame-identical --
+and adds a tick-driven virtual mixer that answers `IsPlaying` /
+`GetCurrentPosition` from the game tick and the sound duration instead of a
+sound card. The mixer is read-only for the simulation and produces an offline,
+tick-aligned audio track; the audio-only admission (ten-update rejection,
+one-at-a-time reuse, eight live slots) is re-derived on the rendering side.
+
+Like this mode, the new one changes experimental semantics, declares
+`original_engine_bitwise_unmodified:false`, requires new source recordings, and
+does not make older recordings replayable under it.

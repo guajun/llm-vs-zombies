@@ -140,6 +140,10 @@ provider = RemoteGameFrameProvider.from_hello(
 
 生成视频应在实验 `finalize` 前完成，使主项目能将附件加入校验清单；不要向已封存的实验增补或覆盖文件。
 
+## 音轨来源
+
+视频本身不带音轨（`-an`）。音频由 tick 驱动的虚拟音频设备模型离线生成：`tools/offline_soundtrack.py` 把音效事件流（资源、起播 tick、音量/声道、真实抽到的随机变体）渲染成与游戏 tick 网格对齐的 44.1 kHz 立体声 WAV，并写出可核对的覆盖清单（帧数、union/silence、每段边界、payload 哈希）。`--video-manifest` 会在写盘前核对 `timing_basis`、`ticks_per_second` 与 `start_tick` 偏移，`--mux` 用 `-c:v copy` 把音轨接到既有 mp4 上，不改动画面编码。语义取舍与声明见 `docs/虚拟音频设备与离线音轨.md`；没有 FFmpeg 时保留 WAV，工具明确报错而不是静默降级。
+
 ## 验证
 
 ```powershell
