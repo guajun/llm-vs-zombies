@@ -2,6 +2,8 @@
 
 公开仓库：[guajun/llm-vs-zombies](https://github.com/guajun/llm-vs-zombies)。初始交付包含设计文档和可编译记录器；以下能力按独立 issue 实现并验收。
 
+对局形态的下一步定义见 [LLM 对局 MVP](LLM对局MVP.md)（feature `llm-match-mvp`，2026-09-20 完成定义，尚未实现，不占用上表 issue 编号）。
+
 | Issue | 交付 | 依赖 |
 |---|---|---|
 | [#1](https://github.com/guajun/llm-vs-zombies/issues/1) | 常驻 IPC、游戏线程动作、暂停与精确推进 | 固定 AvZ 与目标游戏 |

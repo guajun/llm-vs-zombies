@@ -89,7 +89,9 @@ with SessionTrace('experiments/runs/my-run/decisions/session.jsonl') as trace:
 - [后台实机验收记录](docs/headless-validation.md)
 - [实施 issue 与验收规则](docs/implementation-board.md)
 - [LLM 控制设计](docs/LLM交互控制设计.md)
+- [LLM 对局 MVP 定义](docs/LLM对局MVP.md)
 - [原版确定性重放器提案](docs/原版确定性重放器提案.md)
+- [libTAS + AvZ 方案调研](docs/libTAS与AvZ方案调研.md)
 
 ```powershell
 $env:PYTHONPATH = 'src'
