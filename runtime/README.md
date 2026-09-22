@@ -113,14 +113,18 @@ Additional negotiated methods:
   operations with exact expect and revision changes. They affect only declared
   RNG instances or clock fields, not the whole Board. The explicit sound-counter
   origin/App anchor seals further RNG/clock initialization in that mode.
-- `sound_counter_origin` and `app_update_anchor`: negotiated only with the
-  explicit allocation-none sound mode. The first binds the native diagnostic
-  counter's experiment origin while preserving absolute raw evidence; the second
-  sets the actual initial App update count. Both are guarded one-shot prewarm
+- `sound_counter_origin`, `app_update_anchor` and `mj_clock_anchor`: negotiated
+  only with the explicit allocation-none sound mode. The first binds the native
+  diagnostic counter's experiment origin while preserving absolute raw evidence;
+  the second sets the actual initial App update count; the third writes
+  `LawnApp+0x838` (the absolute counter `Zombie::GetDancerFrame` reads) to the
+  fixed target the experiment declares. All three are guarded one-shot prewarm
   operations with full before/after receipts. Use the shared
   [initialization helper](../src/llm_vs_zombies/initialization.py) for their required
-  order; contracts are in [counter origin](../docs/sound-counter-origin-native.md)
-  and [App anchor](../docs/app-update-anchor-native.md).
+  order (counter origin → App anchor → fixed MJ clock anchor → warm draw);
+  contracts are in [counter origin](../docs/sound-counter-origin-native.md),
+  [App anchor](../docs/app-update-anchor-native.md) and
+  [fixed MJ clock anchor](../docs/mj-clock-anchor-native.md).
 - `prepare_render`: exact expect, seeded ready fight at tick zero; verifies RNG
   and performs the one warm draw. Capture B(0) after this succeeds. Actions and
   advancement before preparation are rejected.

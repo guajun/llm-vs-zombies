@@ -272,6 +272,12 @@ demo 明确使用 synthetic counter，创建两个独立计数器实例并经过
 
 `test_app_update_anchor.py` 用模拟器覆盖完整回放、seek 0/2、原始 before 旁证、状态外溢修改、demo 守卫、缺/重复/晚事件及旧能力兼容。这些离线检查不代替新构建的真实冷启动验证，也不修改已失败的旧来源归档。
 
+`initial_mj_clock_anchor_v1` 是第二个独立的初始化合同，同样不修改音效 v1 规格。只有 hello/game 明确声明 `mj_clock_anchor`、两个 capability 都为 true、recipe 保存同配置与固定目标时才启用；旧来源没有该声明时继续按原语义读入。配方保存的是实验声明的**固定目标**（evaluation `Plan.mj_clock`），不是运行时当场计数：运行声明了该能力却没有声明目标时 `initialization.apply_recipe` 直接拒绝启动，运行器必须在两个世界声明同一个值。
+
+原生在 `rng_seed`、`clock_restore`、可选计数原点与 `app_update_anchor` 之后、warm 之前，在同一游戏线程上把 `LawnApp+0x838`（AvZ `MjClock`，候选反编译的 `mAppCounter`，即 `GetDancerFrame` 读取的绝对计数）真实写入四字节固定目标，并记录完整 before/after 状态、真实原值、请求目标、实际读回值与相邻 revision。读取器独立核验：只允许 `/app/mj_clock` 变化，RNG 必须仍与原生 `rng_seeded` 完整相符，其余时钟、历史、参数、实体均不得变化；锚定必须是 App anchor 的紧邻下一 revision，warm 必须是锚定的紧邻下一 revision，锚定后再改 seed/clocks 或出现缺失/重复/晚到/失败事件都使严格轨迹失败。跨运行允许 before 不同（例如 1307 与 1340），但 after 必须等于共同目标；报告同时列出双方真实 before 与共同目标，比较 after、完整 after 状态和映射后的版本，不对任何字段做偏移或删除。字段身份与反汇编证据见 [mj-clock-anchor-native.md](mj-clock-anchor-native.md)。
+
+`test_mj_clock_anchor.py` 用模拟器覆盖「不同真实计数、同一固定目标」的完整回放与 seek、越界/篡改/重复/晚到/篡改链、warm 顺序、缺目标拒启动及旧能力兼容；`tests/mj_clock_anchor.cpp` 用原生夹具覆盖真实四字节写入、跨运行目标、前置拒绝不写内存、故障保留与旧音效兼容。这些离线检查不代替新构建的真实冷启动验证，也不改写既有 C/D 结论或历史失败档。
+
 `sound_effects_counter_origin_v1` 进一步声明独立的计数范围；只有 game 的 `sound_counter` 配置和对应 mode/RPC capability 一致时生效，原有 sound-effects 与 App-anchor 规格不变。原生 `sound_counter_origin` 在 seed/clock readback 后、App anchor 和 warm 前执行一次。它不写游戏字段，也不重置 bootstrap 的累计计数：原生 state 在绑定前增加 `counter_scope:bootstrap_lifetime`，绑定后改为 `counter_scope:experiment`，此时 `calls` 是原生实际累计调用数减去固定原点。旧档没有新能力时仍使用原来的绝对 `calls`，不添加 scope，也不自动升级。
 
 成功事件 `sound_counter_origin_bound` 保留完整原始 activation 形状的 `raw_before/raw_after`、原点绝对值、完整游戏 before/after 状态和实际相邻 revision。读取器要求两个 raw status 完全相同并与 recorder attach 的真实属主/线程/补丁相符，绝对数不小于 attach；状态前后只允许 `calls` 和 `counter_scope` 两处表示变化，原始 RNG、游戏字段、历史、参数均须相同。配方只保存稳定配置，动态回执完整保留在初始化证据与原生事件中。

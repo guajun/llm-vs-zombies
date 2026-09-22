@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from . import sound_effects
 from . import app_update_anchor
+from . import mj_clock_anchor
 from . import sound_counter
 from . import fp_environment
 from . import evidence_codec
@@ -315,6 +316,7 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     store = evidence_codec.EvidenceStore(directory, error=EvidenceError)
     draw_mode(manifest)
     app_update_anchor.mode(manifest)
+    mj_clock_anchor.mode(manifest)
     counter_mode = sound_counter.mode(manifest)
     fp_mode = fp_environment.mode(manifest)
     coverage = manifest.get("coverage", {})
@@ -1400,6 +1402,7 @@ class _AuditStreamDecoder:
         self.sound_counter = sound_counter.Evidence(manifest, audio_activation)
         self.fp = fp_environment.Evidence(manifest)
         self.app_anchor = app_update_anchor.Evidence(manifest)
+        self.mj_anchor = mj_clock_anchor.Evidence(manifest)
         self.calls = _EngineCallEvidence() if engine_call_mode(manifest) else None
         self.frames = _FrameDecoder(reuse_state=reuse_state, engine_calls=self.calls is not None)
         self.animation = _AnimationDecoder(manifest) if RAW_ANIMATIONS in files else None
@@ -1421,6 +1424,7 @@ class _AuditStreamDecoder:
         self.sound_counter.event(event)
         self.fp.event(event)
         self.app_anchor.event(event)
+        self.mj_anchor.event(event)
         if self.calls:
             self.calls.event(event, raw)
         elif event["kind"] == "engine_call_closed" or "engine_call" in event["payload"] or "engine_call_id" in event["payload"]:
@@ -1471,6 +1475,7 @@ class _AuditStreamDecoder:
         fp_raw_index = engine_raw_index + int(self.calls is not None) + int(self.sound_counter.enabled)
         self.fp.frame(frame, records[fp_raw_index] if self.fp.enabled else None)
         self.app_anchor.frame(frame)
+        self.mj_anchor.frame(frame)
         if self.calls:
             self.calls.frame(frame, records[engine_raw_index])
             frame = replace(frame, raw_engine_call=records[engine_raw_index])
@@ -1661,6 +1666,7 @@ class AuditLog:
         self._particle, self._summary, self._draw, self._calls = decoder.particle, decoder.summary, decoder.draw, decoder.calls
         self._audio = decoder.audio
         self._app_anchor = decoder.app_anchor
+        self._mj_anchor = decoder.mj_anchor
         self._sound_counter = decoder.sound_counter
         self._fp = decoder.fp
         self.peak_pending_particle_calls = decoder.peak_pending
@@ -1698,6 +1704,13 @@ class AuditLog:
     @property
     def app_anchor_receipt(self):
         return copy.deepcopy(self._app_anchor.anchor)
+
+    def validate_mj_clock_initial(self, initial):
+        self._mj_anchor.initial(initial)
+
+    @property
+    def mj_clock_receipt(self):
+        return copy.deepcopy(self._mj_anchor.anchor)
 
     def validate_fp_initial(self, initial):
         self._fp.initial(initial)
@@ -1745,7 +1758,7 @@ class AuditLog:
             raise EvidenceError("invalid native audit schema/sequence")
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
-        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed", "sound_counter_origin_failed", "fp_environment_fault"}:
+        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed", "mj_clock_anchor_failed", "sound_counter_origin_failed", "fp_environment_fault"}:
             raise EvidenceError("native hook fault invalidates strict evidence")
         if record["kind"] == "particle_shake_seed":
             if record.get("native_phase") != "before_srand" or record.get("phase") not in {"controlled_boundary", "initialization"}:
@@ -1841,6 +1854,7 @@ class AuditTail:
         self._calls = self._stream.calls
         self._audio = self._stream.audio
         self._app_anchor = self._stream.app_anchor
+        self._mj_anchor = self._stream.mj_anchor
         self._sound_counter = self._stream.sound_counter
         self._fp = self._stream.fp
         self._identities = {}
@@ -1869,6 +1883,13 @@ class AuditTail:
     @property
     def app_anchor_receipt(self):
         return copy.deepcopy(self._app_anchor.anchor)
+
+    def validate_mj_clock_initial(self, initial):
+        self._mj_anchor.initial(initial)
+
+    @property
+    def mj_clock_receipt(self):
+        return copy.deepcopy(self._mj_anchor.anchor)
 
     def validate_fp_initial(self, initial):
         self._fp.initial(initial)

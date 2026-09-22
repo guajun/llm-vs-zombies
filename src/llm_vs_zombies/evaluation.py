@@ -26,6 +26,7 @@ from .initialization import apply_recipe, clock_anchor
 from . import sound_effects
 from . import fp_environment
 from .app_update_anchor import target_from_recipe
+from .mj_clock_anchor import target_from_recipe as mj_clock_target_from_recipe
 from .window_observer import LaunchWindowMonitor, launch_window_evidence, window_probe
 from .evaluation_support import (BoundaryBudget, BoundaryStop, ReplayBoundaryClient,
     cleanup_passed, error_detail, finalize_run, host_sources)
@@ -59,6 +60,10 @@ class Plan:
     pause_points: tuple = ((1000, 1.0), (2500, 5.0))
     strategy: str | None = None
     audio_mode: str = "original"
+    # Fixed common B(0) target for LawnApp+0x838. Required (and identical
+    # across worlds) whenever the runtime declares the fixed MJ clock anchor;
+    # a run's own current counter is never accepted as the target.
+    mj_clock: int | None = None
 
     def validate(self) -> "Plan":
         sound_effects.configured(self.audio_mode)
@@ -96,6 +101,8 @@ class Plan:
             last = point[0]
         if self.tier == "strict" and (self.cold_starts < 10 or not self.strategy):
             raise ValueError("strict requires at least 10 cold starts per seed and an explicit strategy file")
+        if self.mj_clock is not None and (type(self.mj_clock) is not int or not 0 <= self.mj_clock <= 0x7fffffff):
+            raise ValueError("mj_clock must be an integer in 0..2147483647")
         return self
 
     @classmethod
@@ -531,7 +538,7 @@ def _recovery_probe(root: Path, name: str, plan: Plan, seed: int, *, lifecycle=N
     from .client import WindowsNamedPipeStream, connect
     with live_session(root, name, plan, seed, lifecycle=lifecycle) as (run, launcher, client, trace):
         _require_production_runtime(client)
-        recipe = apply_recipe(client, seed)
+        recipe = apply_recipe(client, seed, mj_clock=plan.mj_clock)
         before = client.observe()
         budget = BoundaryBudget(root, plan, report_path=run / "evaluation-resources.json")
         budget.check(before["version"], force=True)
@@ -681,7 +688,8 @@ def run_cold_attempt(root, plan, output, seed, repeat, trajectory):
         with live_session(root, cold_run.name, plan, seed, lifecycle=cold_lifecycle) as (replay_run, state, replay_client, replay_trace):
             _require_production_runtime(replay_client)
             apply_recipe(replay_client, seed, expected.initial["initialization"]["clock_anchor"],
-                         app_update_count=target_from_recipe(expected.initial["initialization"]))
+                         app_update_count=target_from_recipe(expected.initial["initialization"]),
+                         mj_clock=mj_clock_target_from_recipe(expected.initial["initialization"]))
             # apply_recipe rewrites observations/initial.json with the B0-bound
             # observation, so the scenario gate has to record it afterwards.
             add("scenario", state.get("scenario_verified") is True, {"repeat": repeat}, replay_run / "observations/initial.json")
@@ -811,7 +819,7 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                     with live_session(root, source_run.name, plan, seed, lifecycle=source_lifecycle) as (run, launcher, client, trace):
                         _require_production_runtime(client)
                         case["run"] = str(run)
-                        recipe = apply_recipe(client, seed)
+                        recipe = apply_recipe(client, seed, mj_clock=plan.mj_clock)
                         # apply_recipe rewrites observations/initial.json with the
                         # B0-bound observation; the scenario gate follows it so the
                         # recorded hash cannot go stale.

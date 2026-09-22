@@ -157,7 +157,7 @@ def stop(run: Path) -> dict:
 
 
 def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90.0, seed: int = 0,
-          defer_preparation: bool = False, audio_mode: str = "original") -> dict:
+          defer_preparation: bool = False, audio_mode: str = "original", mj_clock: int | None = None) -> dict:
     from .client import connect
     from .session import SessionTrace
     from . import fp_environment
@@ -165,6 +165,8 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
         raise ValueError("seed must be uint32")
     if type(defer_preparation) is not bool:
         raise ValueError("defer_preparation must be boolean")
+    if mj_clock is not None and (type(mj_clock) is not int or not 0 <= mj_clock <= 0x7fffffff):
+        raise ValueError("fixed initial MJ clock target must be an integer in 0..2147483647")
     # The CLI may pass a project-relative --run. Resolve the archive base once so
     # the session trace, launcher.json and the initialization recipe cannot bind
     # the same evidence to different paths.
@@ -222,7 +224,8 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
                 state["scenario_verified"] = True
                 if not defer_preparation:
                     from .initialization import apply_recipe
-                    state["initialization_recipe"] = apply_recipe(client, seed, run=run, scenario_verified=True)
+                    state["initialization_recipe"] = apply_recipe(client, seed, run=run, scenario_verified=True,
+                                                                  mj_clock=mj_clock)
                     observation = client.observation
                     state["hello"] = client.hello_result
                 else:
@@ -298,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Explicit SFX allocation semantics; original remains the default")
     parser.add_argument("--defer-preparation", action="store_true",
                         help="Leave seeded/warm boundary preparation to the evaluation or replay recipe")
+    parser.add_argument("--mj-clock", type=int, default=None,
+                        help="Fixed B(0) target for LawnApp+0x838; required by a runtime that declares the fixed MJ clock anchor")
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "stop":
@@ -307,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = start(arguments.root, arguments.run, initialize=not arguments.no_initialize,
                            timeout=arguments.timeout, seed=arguments.seed, defer_preparation=arguments.defer_preparation,
-                           audio_mode=arguments.audio_mode)
+                           audio_mode=arguments.audio_mode, mj_clock=arguments.mj_clock)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as error:

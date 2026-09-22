@@ -37,6 +37,9 @@ struct Backend {
     virtual bool SupportsAppUpdateAnchor() const { return false; }
     virtual bool AppUpdateAnchored() const { return false; }
     virtual Json AnchorAppUpdate(uint32_t) { return {{"ok",false},{"error","unsupported"}}; }
+    virtual bool SupportsMjClockAnchor() const { return false; }
+    virtual bool MjClockAnchored() const { return false; }
+    virtual Json AnchorMjClock(uint32_t) { return {{"ok",false},{"error","unsupported"}}; }
     virtual bool SupportsSoundCounterOrigin()const {return false;}
     virtual bool SoundCounterBound()const {return false;}
     virtual Json BindSoundCounterOrigin(){return {{"ok",false},{"error","unsupported"}};}
