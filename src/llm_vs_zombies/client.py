@@ -280,6 +280,17 @@ def shovel(row: int, col: int, target_type: int = -1) -> dict[str, Any]:
             "col": _integer(col, "col", 1), "target_type": _integer(target_type, "target_type", -1)}
 
 
+def spawn(type: int, row: int, col: int) -> dict[str, Any]:
+    """Create an action. Spawn one zombie of an AvZ zombie enum into a row.
+
+    Row/column are 1-based lawn coordinates; the runtime converts them to the
+    engine's 0-based grid indices of AvZ's spawn primitive. Requires an active
+    fight: the zombie appears in the column immediately, with no seed packet.
+    """
+    return {"op": "spawn", "type": _integer(type, "type"),
+            "row": _integer(row, "row", 1), "col": _integer(col, "col", 1)}
+
+
 def _version(value: Mapping[str, Any]) -> dict[str, int]:
     if not isinstance(value, Mapping):
         raise ProtocolError("observation version must be an object")
@@ -539,6 +550,9 @@ class Client:
 
     def shovel(self, row: int, col: int, target_type: int = -1, **kwargs: Any) -> dict[str, Any]:
         return self.commit([shovel(row, col, target_type)], **kwargs)
+
+    def spawn(self, type: int, row: int, col: int, **kwargs: Any) -> dict[str, Any]:
+        return self.commit([spawn(type, row, col)], **kwargs)
 
     def pause(self, *, expect: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.request("pause", expect=expect)

@@ -13,7 +13,7 @@ python -m llm_vs_zombies.repl --pid 1234 --trace experiments/runs/trial-ready/de
 
 `1234` 必须替换为已加载本项目运行时 DLL 的游戏 PID。客户端不会自行启动游戏、注入 DLL 或选关。也可以传 `--endpoint '\\.\pipe\llm-vs-zombies-1234'`。只接受本机、本项目前缀的命名管道。
 
-进入后已有 `game`、`plant`、`shovel`：
+进入后已有 `game`、`plant`、`shovel`、`spawn`：
 
 ```python
 game.hello_result                 # session / epoch / capabilities / limits
@@ -27,9 +27,13 @@ result["stop_reason"]
 result = game.commit([plant(8, row=2, col=5)], advance_ticks=1)
 result["action_results"]          # 即使 RPC 成功，也可能有具体动作失败
 result = game.shovel(row=2, col=5) # 默认不推进模拟
+# 1 是 AvZ 普通僵尸枚举（0..32）。生成不使用选卡、阳光或冷却，也不需要 ASetZombies。
+result = game.commit([spawn(1, row=3, col=9)], advance_ticks=1)
 ```
 
 `game.plant(8, 2, 5)` 是单动作 `commit` 的方便写法。类型使用 AvZ 数字枚举，**不是选卡槽编号**。字符串植物名暂不接受。
+
+`game.spawn(1, 3, 9)` 同理生成一只僵尸。行列同样是 1-based；运行时把它换算成 AvZ 生成原语的 0-based 格坐标，僵尸出现在指定列（不是屏幕外自然出生点）。行不可用（例如五行草坪的第 6 行）、类型越界或僵尸池已满会在 `action_results` 里逐条返回 `ok:false` 与具体 `error`，不会静默。详细失败码见[协议文档](runtime-protocol.md)。
 
 变量、函数、导入和循环会持续存在：
 
