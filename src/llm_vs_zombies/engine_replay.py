@@ -8,6 +8,7 @@ from . import sound_effects
 from . import app_update_anchor
 from . import sound_counter
 from . import fp_environment
+from . import evidence_codec
 
 import argparse
 import base64
@@ -555,7 +556,11 @@ class Trajectory:
         if manifest.get("schema") != SCHEMA or manifest.get("trajectory_id") != _hash(unsigned):
             raise EvidenceError("trajectory schema/content identity mismatch")
         audit_directory = path.parent / "audit"
-        expected_files = {"audit/" + name for name in audit_files(audit_directory, read_json(audit_directory / "manifest.json"))}
+        store = evidence_codec.EvidenceStore(audit_directory, error=EvidenceError)
+        expected_files = {"audit/" + store.stored_path(name).name
+                          for name in audit_files(audit_directory, read_json(audit_directory / "manifest.json"))}
+        if store.compressed:
+            expected_files.add(f"audit/{evidence_codec.RECEIPT}")
         if manifest.get("source") == "session_trace":
             expected_files.add("session.jsonl")
         elif manifest.get("source") == "native":
@@ -601,9 +606,15 @@ def build_trajectory(trace: str | Path | None, audit_directory: str | Path,
     (output / "audit").mkdir()
     filenames = []
     for name in audit.evidence_files:
-        dest = f"audit/{name}"
-        shutil.copyfile(Path(audit_directory) / name, output / dest)
+        # Copy the stored form (plain or a verified gzip container) and keep the
+        # codec receipt with it so the packaged trajectory stays self-describing.
+        stored = audit.store.stored_path(name)
+        dest = f"audit/{stored.name}"
+        shutil.copyfile(stored, output / dest)
         filenames.append(dest)
+    if audit.store.compressed:
+        shutil.copyfile(Path(audit_directory) / evidence_codec.RECEIPT, output / "audit" / evidence_codec.RECEIPT)
+        filenames.append(f"audit/{evidence_codec.RECEIPT}")
     source_name = "session.jsonl" if trace is not None else "initial.json"
     shutil.copyfile(Path(trace if trace is not None else initial), output / source_name)
     filenames.append(source_name)

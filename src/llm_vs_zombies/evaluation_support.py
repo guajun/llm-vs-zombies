@@ -155,7 +155,20 @@ def finalize_run(run: Path, plan, outcome: str, *, package=False, primary_error=
         result["secondary_errors"].append({"stage": "read_cleanup", **error_detail(error)})
     result["cleanup_passed"] = cleanup_passed(result.get("cleanup", {}))
     closed = writers_closed(result.get("cleanup", {}))
+    def compress_audit():
+        # Storage only: a rolled-back attempt leaves the plain archive intact,
+        # so a compression failure never invalidates otherwise good evidence.
+        try:
+            from .evidence_codec import compress_evidence
+            receipt = compress_evidence(run / "audit")
+            result["audit_compression"] = {
+                "codec": receipt["codec"], "files": len(receipt["files"]),
+                "plain_bytes": sum(entry["plain_bytes"] for entry in receipt["files"].values()),
+                "stored_bytes": sum(entry["stored_bytes"] for entry in receipt["files"].values())}
+        except Exception as error:
+            result["audit_compression_error"] = error_detail(error)
     if package and closed:
+        compress_audit()
         try:
             space = packaging_space(run, plan)
             result["packaging_space"] = space
@@ -170,6 +183,8 @@ def finalize_run(run: Path, plan, outcome: str, *, package=False, primary_error=
             result["secondary_errors"].append({"stage": "strict_packaging", **error_detail(error)})
     elif package:
         result["packaging_skipped"] = "cleanup_not_verified"
+    elif closed:
+        compress_audit()
     # This file intentionally describes the pre-seal attempt. The external suite
     # receipt below is the authority for actual finish()/validate() success.
     try:

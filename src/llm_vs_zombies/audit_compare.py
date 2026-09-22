@@ -26,6 +26,7 @@ from . import sound_effects
 from . import app_update_anchor
 from . import sound_counter
 from . import fp_environment
+from . import evidence_codec
 
 SCHEMA = "lvz.audit.v1"
 RAW_ANIMATIONS = "reanimation-handles.jsonl"
@@ -205,11 +206,19 @@ class EventStream:
 
     Each read checks inode/size/timestamps and all bytes against the original
     SHA-256. Closing an early iterator also verifies the unread suffix.
+    A stored gzip container is verified through its plain bytes, so the bound
+    digest is the same logical content the plain recorder produced.
     """
-    def __init__(self, path: Path):
+    def __init__(self, store, name: str | None = None):
+        if name is None:
+            path = Path(store)
+            store = evidence_codec.EvidenceStore(path.parent, error=EvidenceError)
+            name = path.name
+        self.store, self.name = store, name
+        path = store.stored_path(name)
         self.path = path
         self.signature = self._signature()
-        self.sha256 = file_hash(path)
+        self.sha256 = store.plain_sha256(name)
         self._check_signature()
 
     def _signature(self):
@@ -222,7 +231,8 @@ class EventStream:
 
     def verify(self):
         self._check_signature()
-        if file_hash(self.path) != self.sha256:
+        self.store.verify(self.name)
+        if self.store.plain_sha256(self.name) != self.sha256:
             raise EvidenceError(f"closed audit file SHA-256 changed: {self.path.name}")
         self._check_signature()
 
@@ -230,7 +240,7 @@ class EventStream:
         self._check_signature()
         digest, completed = hashlib.sha256(), False
         try:
-            with self.path.open("rb") as stream:
+            with self.store.open(self.name) as stream:
                 number = 0
                 while line := stream.readline(_JSONL_MAX_RECORD_BYTES + 1):
                     number += 1
@@ -248,8 +258,10 @@ class EventStream:
                 raise EvidenceError(f"closed audit file SHA-256 changed: {self.path.name}")
         finally:
             self._check_signature()
-            if not completed and file_hash(self.path) != self.sha256:
-                raise EvidenceError(f"closed audit file SHA-256 changed: {self.path.name}")
+            if not completed:
+                # An early close still proves the stored bytes (and, for a
+                # container, the plain bytes it reproduces) are unchanged.
+                self.store.verify(self.name)
 
 
 def file_hash(path: Path) -> str:
@@ -299,6 +311,8 @@ def validate_engine_origin(value):
 
 def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     """Resolve supported evidence files without trusting a manifest path."""
+    directory = Path(directory)
+    store = evidence_codec.EvidenceStore(directory, error=EvidenceError)
     draw_mode(manifest)
     app_update_anchor.mode(manifest)
     counter_mode = sound_counter.mode(manifest)
@@ -321,12 +335,12 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
                 or type(descriptor.get("required")) is not bool):
             raise EvidenceError("unsupported raw animation evidence descriptor")
         required |= descriptor["required"]
-    present = (directory / RAW_ANIMATIONS).is_file()
+    present = store.exists(RAW_ANIMATIONS)
     if required and not present:
         raise EvidenceError("required raw animation evidence is missing")
     result = AUDIT_FILES + ((RAW_ANIMATIONS,) if present else ())
     particle = manifest.get("particle_shake")
-    particle_file = (directory / PARTICLE_SHAKE_RAW).is_file()
+    particle_file = store.exists(PARTICLE_SHAKE_RAW)
     if particle is not None:
         if (not isinstance(particle, dict) or particle.get("mode") != PARTICLE_SHAKE_MODE
                 or particle.get("installed") is not True or particle.get("original_engine_bitwise_unmodified") is not False
@@ -337,28 +351,28 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
         result += (PARTICLE_SHAKE_RAW,)
     elif particle_file:
         raise EvidenceError("raw particle shake evidence lacks an explicit engine mode")
-    call_file = (directory / ENGINE_CALL_RAW).is_file()
+    call_file = store.exists(ENGINE_CALL_RAW)
     if engine_call_mode(manifest):
         if not call_file:
             raise EvidenceError("required raw engine call evidence is missing")
         result += (ENGINE_CALL_RAW,)
     elif call_file:
         raise EvidenceError("raw engine call evidence lacks an explicit engine mode")
-    audio_file = (directory / sound_effects.EVIDENCE).is_file()
+    audio_file = store.exists(sound_effects.EVIDENCE)
     if sound_effects.mode(manifest):
         if not audio_file:
             raise EvidenceError("required sound effects activation evidence is missing")
         result += (sound_effects.EVIDENCE,)
     elif audio_file:
         raise EvidenceError("sound effects activation lacks an explicit engine mode")
-    counter_file = (directory / sound_counter.RAW_FILE).is_file()
+    counter_file = store.exists(sound_counter.RAW_FILE)
     if counter_mode:
         if not counter_file:
             raise EvidenceError("required raw sound counter evidence is missing")
         result += (sound_counter.RAW_FILE,)
     elif counter_file:
         raise EvidenceError("raw sound counter evidence lacks an explicit mode")
-    fp_file = (directory / fp_environment.RAW_FILE).is_file()
+    fp_file = store.exists(fp_environment.RAW_FILE)
     if fp_mode:
         if not fp_file:
             raise EvidenceError("required raw FP evidence is missing")
@@ -1625,8 +1639,9 @@ class AuditLog:
         if self.manifest.get("loaded_signatures_match") is not True:
             raise EvidenceError("native target signatures did not match")
         self.evidence_files = audit_files(self.directory, self.manifest)
-        self._files = {name: EventStream(self.directory / name) for name in self.evidence_files}
-        self.audio_activation = (read_json(self.directory / sound_effects.EVIDENCE)
+        self.store = evidence_codec.EvidenceStore(self.directory, error=EvidenceError)
+        self._files = {name: EventStream(self.store, name) for name in self.evidence_files}
+        self.audio_activation = (decode(self.store.stored_path(sound_effects.EVIDENCE).read_bytes())
                                  if sound_effects.EVIDENCE in self.evidence_files else None)
         if self.audio_activation is not None:
             self._files[sound_effects.EVIDENCE].verify()
@@ -1793,18 +1808,25 @@ class AuditTail:
     raw and semantic records are verified as they arrive, then released after
     its frame is consumed. Closing rechecks consumed byte hashes, without
     decoding or patching the history again.
+
+    This reader follows a *live* recording with byte offsets, so it accepts only
+    plain evidence. A sealed archive whose containers were compressed is read
+    through AuditLog instead and is rejected here instead of misreading offsets.
     """
     def __init__(self, directory: str | Path):
         self.directory = Path(directory)
+        self.store = evidence_codec.EvidenceStore(self.directory, error=EvidenceError)
+        if self.store.compressed:
+            raise EvidenceError("live audit tail requires plain evidence; this archive is compressed")
         self.manifest = read_json(self.directory / "manifest.json")
         if (self.manifest.get("schema") != SCHEMA or not isinstance(self.manifest.get("target"), str)
                 or self.manifest.get("loaded_signatures_match") is not True):
             raise EvidenceError("invalid live audit target manifest")
-        self._manifest_file = EventStream(self.directory / "manifest.json")
+        self._manifest_file = EventStream(self.store, "manifest.json")
         self.evidence_files = audit_files(self.directory, self.manifest)
-        self._static_files = {name: EventStream(self.directory / name) for name in self.evidence_files
+        self._static_files = {name: EventStream(self.store, name) for name in self.evidence_files
                               if name == sound_effects.EVIDENCE}
-        self.audio_activation = (read_json(self.directory / sound_effects.EVIDENCE)
+        self.audio_activation = (decode(self.store.stored_path(sound_effects.EVIDENCE).read_bytes())
                                  if self._static_files else None)
         for evidence in self._static_files.values():
             evidence.verify()
