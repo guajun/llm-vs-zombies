@@ -27,6 +27,7 @@ from .audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA as AUDIT_
                             spawn_semantics, read_json, version, DRAW_SCHEDULE_MODE, draw_mode, render_semantics,
                             ENGINE_CALL_MODE, engine_call_mode, engine_call_semantics, validate_engine_origin)
 from .client import Client, OutcomeUnknown, RemoteError
+from .evidence_tree import TreePlacement, attach_tree, content_identity, validate_embedded_tree
 
 SCHEMA = "lvz.engine-replay.v1"
 READ_ONLY = {"hello", "observe", "status", "audit_snapshot"}
@@ -37,10 +38,6 @@ INTERVENTIONS = STEP_METHODS | {"capture_frame", "pause"}
 def _write(path: Path, value: Any) -> None:
     with path.open("x", encoding="utf-8", newline="\n") as stream:
         stream.write(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
-
-
-def _hash(value: Any) -> str:
-    return hashlib.sha256(canonical(value)).hexdigest()
 
 
 def _artifacts(value: Any) -> None:
@@ -552,9 +549,9 @@ class Trajectory:
         if path.is_dir():
             path = path / "trajectory.json"
         manifest = read_json(path)
-        unsigned = {key: value for key, value in manifest.items() if key != "trajectory_id"}
-        if manifest.get("schema") != SCHEMA or manifest.get("trajectory_id") != _hash(unsigned):
+        if manifest.get("schema") != SCHEMA or manifest.get("trajectory_id") != content_identity(manifest):
             raise EvidenceError("trajectory schema/content identity mismatch")
+        validate_embedded_tree(manifest)
         audit_directory = path.parent / "audit"
         store = evidence_codec.EvidenceStore(audit_directory, error=EvidenceError)
         expected_files = {"audit/" + store.stored_path(name).name
@@ -586,11 +583,14 @@ class Trajectory:
 
 
 def build_trajectory(trace: str | Path | None, audit_directory: str | Path,
-                     output_directory: str | Path, *, initial: str | Path | None = None) -> Trajectory:
+                     output_directory: str | Path, *, initial: str | Path | None = None,
+                     tree: TreePlacement | None = None) -> Trajectory:
     """Package a closed recording. Exactly one source is required.
 
     Native-only input still requires a live-captured initial.json identity/state.
     It cannot recover an omitted initial state from later observations.
+    An optional tree placement adds one manifest section; it never changes the
+    content identity of the recording and is verified separately.
     """
     if (trace is None) == (initial is None):
         raise ValueError("provide exactly one of SessionTrace or initial metadata")
@@ -622,7 +622,9 @@ def build_trajectory(trace: str | Path | None, audit_directory: str | Path,
                 "initial": marker, "steps": steps,
                 "files": {name: file_hash(output / name) for name in filenames},
                 "scope": "captured state only; no completeness or original-engine determinism certification"}
-    manifest["trajectory_id"] = _hash(manifest)
+    manifest["trajectory_id"] = content_identity(manifest)
+    if tree is not None:
+        manifest["tree"] = attach_tree(manifest, tree)
     _write(output / "trajectory.json", manifest)
     return Trajectory.load(output)
 
