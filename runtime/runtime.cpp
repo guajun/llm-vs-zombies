@@ -511,4 +511,8 @@ void RecordEnvironmentCollect(uint32_t itemId,int type,int x,int y) {
     try { backend.Audit("environment_collect",payload,{{"version",controller->Version()}}); }
     catch(const std::exception& error) { controller->Fail(error.what()); }
 }
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+Json CurrentVersion() { return controller?controller->Version():Json(); }
+void ReportAuditFault(const std::string& message) { if(controller) controller->Fail(message); }
+#endif
 }

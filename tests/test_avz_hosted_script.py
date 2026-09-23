@@ -8,6 +8,8 @@
 # may only be touched by a build compiled with LVZ_AVZ_HOSTED_SCRIPT.
 from __future__ import annotations
 
+import hashlib
+import re
 import unittest
 from pathlib import Path
 
@@ -162,6 +164,113 @@ class HostedCrashProbeTests(unittest.TestCase):
         default_target = cmake.split("add_executable(hosted_crash_probe_default_tests")[1]
         self.assertNotIn("LVZ_AVZ_HOSTED_SCRIPT",
                          default_target.split("add_test(NAME hosted_crash_probe_default")[0])
+class HostedFireAuditWiringTests(unittest.TestCase):
+    """Hosted cannon shots are audited only in a hosted build (issue #84)."""
+
+    def assert_guarded(self, text: str, marker: str):
+        index = text.index(marker)
+        guard = text.rindex("#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT", 0, index)
+        self.assertNotIn("#endif", text[guard:index], f"{marker} is outside the build switch")
+
+    def test_overlay_is_one_guarded_insertion_at_the_reviewed_anchor(self):
+        overlay = read("runtime/avz_overlay.cmake")
+        self.assertIn("    AAsm::Fire(x, y, cobIdx);", overlay)
+        # One call, immediately after the reviewed engine call, compiled only
+        # when the switch is defined.
+        self.assertIn(r"${cob_fire_call}\n#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT\n"
+                      r"    lvz::runtime::RecordHostedFire(cobIdx, plant->Id(), plant->Row() + 1, "
+                      r"plant->Col() + 1, dropRow, dropCol);\n#endif", overlay)
+        self.assertIn(r"#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT\n#include \"runtime/hosted_fire.hpp\"\n"
+                      r"#endif\n${cob_source}", overlay)
+        # The anchor must be present and unique, or cmake fails before building.
+        self.assertIn('string(FIND "${cob_source}" "${cob_fire_call}" cob_fire_position)', overlay)
+        self.assertIn("Reviewed cannon call site is missing", overlay)
+        self.assertIn("Reviewed cannon call site is not unique", overlay)
+        self.assertIn("Pinned AvZ cob manager source changed", overlay)
+
+    def test_pinned_cob_manager_hash_matches_the_reviewed_file(self):
+        overlay = read("runtime/avz_overlay.cmake")
+        pin = re.search(r'cob_hash STREQUAL "([0-9a-f]{64})"', overlay).group(1)
+        # Same three steps as runtime/avz_overlay.cmake and prepare-checkout:
+        # read, normalise CRLF, SHA256.
+        source = (ROOT / "avz/framework/src/avz_cob_manager.cpp").read_bytes().replace(b"\r\n", b"\n")
+        self.assertEqual(hashlib.sha256(source).hexdigest(), pin)
+
+    def test_the_overlay_replaces_the_source_only_under_the_switch(self):
+        overlay = read("runtime/avz_overlay.cmake")
+        marker = 'set(AVZ_SOURCES "${AVZ_SOURCES_COB_OVERLAY}")'
+        guard = overlay.index("if(LVZ_AVZ_HOSTED_SCRIPT)")
+        self.assertIn(marker, overlay[guard:])
+        self.assertNotIn("endif()", overlay[guard:overlay.index(marker)])
+        self.assertIn("list(REMOVE_ITEM AVZ_SOURCES_COB_OVERLAY", overlay)
+        self.assertIn("list(APPEND AVZ_SOURCES_COB_OVERLAY", overlay)
+
+    def test_default_build_compiles_no_fire_sources(self):
+        cmake = read("CMakeLists.txt")
+        recorder_sources = cmake.split("set(RECORDER_SOURCES ")[1].split("\n")[0]
+        self.assertNotIn("hosted_fire", recorder_sources)
+        before_switch, rest = cmake.split("if(LVZ_AVZ_HOSTED_SCRIPT)", 1)
+        # The top-level endif() is the only one at column zero; nested conditions
+        # inside the switch are indented.
+        switch_block = "\n".join(rest.split("\n")[:next(index for index, line in enumerate(rest.split("\n"))
+                                                      if line == "endif()")])
+        self.assertIn("target_sources(recorder PRIVATE runtime/hosted_fire.cpp determinism/hosted_fire.cpp)",
+                      switch_block)
+        self.assertIn("target_compile_definitions(recorder PRIVATE LVZ_AVZ_HOSTED_FIRE_AUDIT=1)", switch_block)
+        self.assertNotIn("hosted_fire", before_switch)
+
+    def test_both_fire_build_modes_are_tested(self):
+        cmake = read("CMakeLists.txt")
+        self.assertIn("add_test(NAME avz_hosted_fire COMMAND avz_hosted_fire_tests)", cmake)
+        self.assertIn("add_test(NAME avz_hosted_fire_default COMMAND avz_hosted_fire_default_tests)", cmake)
+        self.assertIn("set_tests_properties(avz_hosted_fire PROPERTIES DEPENDS avz_hosted_fire_default)", cmake)
+        default_target = cmake.split("add_executable(avz_hosted_fire_default_tests")[1].split(
+            "add_test(NAME avz_hosted_fire_default")[0]
+        self.assertNotIn("LVZ_AVZ_HOSTED_FIRE_AUDIT", default_target)
+        self.assertIn("${AVZ_SOURCES_COB_PRISTINE}", default_target)
+        hosted_target = cmake.split("add_executable(avz_hosted_fire_tests")[1].split(
+            "add_test(NAME avz_hosted_fire ")[0]
+        self.assertIn("LVZ_AVZ_HOSTED_FIRE_AUDIT=1", hosted_target)
+        self.assertIn("${AVZ_SOURCES_COB_OVERLAY}", hosted_target)
+        # The engine entry points only exist inside the game, so the test keeps
+        # counting doubles on that boundary.
+        flags = cmake.split("set(LVZ_FIRE_TEST_FLAGS")[1].split(")")[0]
+        for wrapped in ("_ZN4AAsm4FireEiii", "_ZN4AAsm12ReleaseMouseEv", "_ZN4AAsm14GridToOrdinateEii"):
+            self.assertIn(f"-Wl,--wrap={wrapped}", flags)
+        self.assertIn("${LVZ_FIRE_TEST_FLAGS}", hosted_target)
+
+    def test_writer_reader_and_documentation_agree_on_the_declared_mode(self):
+        audit = read("determinism/audit.cpp")
+        for marker in ("DrainHostedFires();", 'state["hosted_fire"]=HostedFireState();',
+                       'result["hosted_fire"]=HostedFireManifest();'):
+            self.assertIn(marker, audit)
+            self.assert_guarded(audit, marker)
+        # A recording fault invalidates the run through the runtime instead of
+        # throwing into the coroutine that fired; both halves sit in the switch.
+        runtime = read("runtime/runtime.cpp")
+        for marker in ("Json CurrentVersion() { return controller?controller->Version():Json(); }",
+                       "void ReportAuditFault(const std::string& message) { if(controller) controller->Fail(message); }"):
+            self.assertIn(marker, runtime)
+            self.assert_guarded(runtime, marker)
+        hook = read("runtime/hosted_fire.cpp")
+        self.assertIn("ReportAuditFault(error.what());", hook)
+        self.assertIn("catch (...)", hook)
+        module = read("determinism/hosted_fire.cpp")
+        default_branch = module.split("#else", 1)[1]
+        self.assertIn("bool HostedFireEnabled() { return false; }", default_branch)
+        self.assertIn("nlohmann::json HostedFireManifest() { return nlohmann::json::object(); }", default_branch)
+        for key in ("mode", "installed", "kind", "source", "hook",
+                    "original_engine_bitwise_unmodified", "semantic_change", "boundary"):
+            self.assertIn(f'{{"{key}"', module)
+        reader = read("src/llm_vs_zombies/audit_compare.py")
+        self.assertIn("hosted_fire_mode(manifest)", reader)
+        self.assertIn('raise EvidenceError("hosted fire record lacks its declared audit mode")', reader)
+        self.assertIn('raise EvidenceError("hosted fire state requires an explicit audit mode")', reader)
+        self.assertIn('raise EvidenceError("hosted fire record has no following audited boundary")', reader)
+        documentation = read("docs/avz-script-hosting.md")
+        self.assertIn("## 8.", documentation)
+        self.assertIn("hosted_fire", documentation)
+        self.assertIn("不是** `action`", documentation)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,18 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 file(GLOB AVZ_SOURCES CONFIGURE_DEPENDS avz/framework/src/*.cpp avz/framework/src/minhook/*.cpp)
+# Optional AvZ script hosted by the resident runtime. The named source must
+# define `ACoroutine lvz::hosted::Script()` (logger/avz/hosted_script.hpp); the
+# recorder launches it from inside AScript(), so frame ownership, pause and the
+# engine-call boundary stay with the runtime. Empty by default: no script is
+# linked and the recorded behaviour is identical to the current build.
+# Example: -DLVZ_AVZ_HOSTED_SCRIPT=logger/avz/hosted/atime_probe.cpp
+#
+# Declared before runtime/avz_overlay.cmake because a hosted build replaces the
+# pinned AvZ cob manager with its audit-only overlay (hosted cannon shots are
+# direct engine calls and never reach the request journal; see section 8 of
+# docs/avz-script-hosting.md) and the overlay include owns that source list.
+set(LVZ_AVZ_HOSTED_SCRIPT "" CACHE FILEPATH "Optional AvZ script compiled into the resident runtime")
 include(runtime/avz_overlay.cmake)
 set(RECORDER_SOURCES logger/avz/recorder.cpp runtime/controller.cpp runtime/runtime.cpp runtime/pipe_server.cpp determinism/audit.cpp determinism/fp_environment.cpp determinism/app_update_anchor.cpp determinism/mj_clock_anchor.cpp determinism/b0_normalization.cpp determinism/sound_counter_origin.cpp determinism/silent_audio_audit.cpp determinism/spawn_hook.cpp determinism/reanimation_audit.cpp determinism/particle_shake.cpp determinism/foley_trace.cpp recording/native_capture.cpp recording/draw_gate.cpp ${AVZ_SOURCES})
 add_library(recorder SHARED ${RECORDER_SOURCES})
@@ -18,13 +30,6 @@ target_link_libraries(recorder PRIVATE gdi32 dbghelp crypt32 bcrypt)
 # be produced without touching the default one.
 set(LVZ_RECORDER_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build" CACHE PATH "Directory recorder.dll is written to")
 set_target_properties(recorder PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${LVZ_RECORDER_OUTPUT_DIR}" LIBRARY_OUTPUT_DIRECTORY "${LVZ_RECORDER_OUTPUT_DIR}")
-# Optional AvZ script hosted by the resident runtime. The named source must
-# define `ACoroutine lvz::hosted::Script()` (logger/avz/hosted_script.hpp); the
-# recorder launches it from inside AScript(), so frame ownership, pause and the
-# engine-call boundary stay with the runtime. Empty by default: no script is
-# linked and the recorded behaviour is identical to the current build.
-# Example: -DLVZ_AVZ_HOSTED_SCRIPT=logger/avz/hosted/atime_probe.cpp
-set(LVZ_AVZ_HOSTED_SCRIPT "" CACHE FILEPATH "Optional AvZ script compiled into the resident runtime")
 if(LVZ_AVZ_HOSTED_SCRIPT)
   if(NOT IS_ABSOLUTE "${LVZ_AVZ_HOSTED_SCRIPT}")
     get_filename_component(LVZ_AVZ_HOSTED_SCRIPT "${CMAKE_SOURCE_DIR}/${LVZ_AVZ_HOSTED_SCRIPT}" ABSOLUTE)
@@ -43,6 +48,12 @@ if(LVZ_AVZ_HOSTED_SCRIPT)
     logger/avz/hosted/observe_default.cpp)
   target_compile_definitions(recorder PRIVATE LVZ_AVZ_HOSTED_SCRIPT=1)
   target_compile_definitions(recorder PRIVATE "LVZ_AVZ_HOSTED_SCRIPT_NAME=\"${LVZ_AVZ_HOSTED_SCRIPT_NAME}\"")
+  # Audit-only hosted-cannon policy: the overlay of the pinned cob manager plus
+  # the record/state module. Both exist only here, so a default build compiles
+  # neither (tests/test_avz_hosted_script.py asserts that wiring, and
+  # tests/avz_hosted_fire_tests.cpp is built both ways).
+  target_sources(recorder PRIVATE runtime/hosted_fire.cpp determinism/hosted_fire.cpp)
+  target_compile_definitions(recorder PRIVATE LVZ_AVZ_HOSTED_FIRE_AUDIT=1)
   message(STATUS "Hosting AvZ script: ${LVZ_AVZ_HOSTED_SCRIPT}")
 endif()
 # Explicitly requested lifecycle probe; never built by the default all target
@@ -241,3 +252,52 @@ target_compile_options(hosted_crash_probe_default_tests PRIVATE -Wall -Wextra -W
 target_link_options(hosted_crash_probe_default_tests PRIVATE -static)
 set_target_properties(hosted_crash_probe_default_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
 add_test(NAME hosted_crash_probe_default COMMAND hosted_crash_probe_default_tests)
+# Hosted cannon shots (issue #84, open item 2). aCobManager.Fire is a direct
+# engine call, so the runtime's request journal never sees it; the audit-only
+# overlay of the pinned AvZ cob manager adds one record per shot instead. Two
+# targets are built from one test source:
+#   * avz_hosted_fire_tests         - the overlay plus the real record path
+#     (runtime/hosted_fire.cpp, determinism/hosted_fire.cpp), i.e. a hosted
+#     recorder.dll. It must produce exactly one audit record per accepted shot
+#     and the same engine call sequence as the default build.
+#   * avz_hosted_fire_default_tests - the pristine upstream cob manager and the
+#     same record module without LVZ_AVZ_HOSTED_FIRE_AUDIT, i.e. a default
+#     recorder.dll. It writes the reference engine trace the hosted build
+#     compares against and must produce no audit record at all.
+# The engine entry points are redirected with -Wl,--wrap because the real ones
+# are inline-asm calls into PvZ at fixed RVAs that exist only in the game.
+# See tests/avz_hosted_fire_tests.cpp and docs/avz-script-hosting.md section 8.
+set(LVZ_FIRE_TRACE_ROOT "${CMAKE_BINARY_DIR}/avz-hosted-fire")
+set(LVZ_FIRE_TEST_FLAGS -static -Wl,--disable-dynamicbase
+  -Wl,--wrap=_ZN4AAsm4FireEiii -Wl,--wrap=_ZN4AAsm12ReleaseMouseEv
+  -Wl,--wrap=_ZN4AAsm14GridToOrdinateEii)
+add_executable(avz_hosted_fire_tests
+  tests/avz_hosted_fire_tests.cpp
+  runtime/hosted_fire.cpp
+  determinism/hosted_fire.cpp
+  ${AVZ_SOURCES_COB_OVERLAY})
+target_compile_definitions(avz_hosted_fire_tests PRIVATE LVZ_AVZ_HOSTED_FIRE_AUDIT=1
+  "LVZ_FIRE_TRACE_ROOT=\"${LVZ_FIRE_TRACE_ROOT}\"")
+target_include_directories(avz_hosted_fire_tests PRIVATE ${CMAKE_SOURCE_DIR} avz/framework/inc logger/avz runtime/vendor)
+target_compile_options(avz_hosted_fire_tests PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+target_link_options(avz_hosted_fire_tests PRIVATE ${LVZ_FIRE_TEST_FLAGS})
+target_link_libraries(avz_hosted_fire_tests PRIVATE gdi32 dbghelp)
+set_target_properties(avz_hosted_fire_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+add_test(NAME avz_hosted_fire COMMAND avz_hosted_fire_tests)
+
+add_executable(avz_hosted_fire_default_tests
+  tests/avz_hosted_fire_tests.cpp
+  runtime/hosted_fire.cpp
+  determinism/hosted_fire.cpp
+  ${AVZ_SOURCES_COB_PRISTINE})
+target_compile_definitions(avz_hosted_fire_default_tests PRIVATE
+  "LVZ_FIRE_TRACE_ROOT=\"${LVZ_FIRE_TRACE_ROOT}\"")
+target_include_directories(avz_hosted_fire_default_tests PRIVATE ${CMAKE_SOURCE_DIR} avz/framework/inc logger/avz runtime/vendor)
+target_compile_options(avz_hosted_fire_default_tests PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+target_link_options(avz_hosted_fire_default_tests PRIVATE ${LVZ_FIRE_TEST_FLAGS})
+target_link_libraries(avz_hosted_fire_default_tests PRIVATE gdi32 dbghelp)
+set_target_properties(avz_hosted_fire_default_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+add_test(NAME avz_hosted_fire_default COMMAND avz_hosted_fire_default_tests)
+# The hosted test compares its engine trace against the default build's, so the
+# reference has to exist first (ctest honours DEPENDS even with -j).
+set_tests_properties(avz_hosted_fire PROPERTIES DEPENDS avz_hosted_fire_default)

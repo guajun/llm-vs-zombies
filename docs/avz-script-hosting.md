@@ -129,11 +129,11 @@ mouse event and not a raw memory poke:
 * It **bypasses the runtime's action set**: `plant`/`shovel`/`spawn` go through
   `logger/avz/recorder.cpp` and the request journal, while a hosted `Fire` is a
   single engine call with no request, no `expect` version and no journal record.
-  Audit coverage for hosted cannons is therefore an open item; the options are
-  (a) audit-only instrumentation of `_BasicFire` beside the existing
-  `avz_smart.cpp` overlay hook, or (b) a first-class `fire` action in the runtime
-  protocol, which would also make the fire order expressible without AvZ script
-  code.
+  Audit coverage for hosted cannons is therefore an open item. Option (a),
+  audit-only instrumentation of `_BasicFire` beside the existing
+  `avz_smart.cpp` overlay hook, is implemented in section 8. Option (b), a
+  first-class `fire` action in the runtime protocol, would also make the fire
+  order expressible without AvZ script code, and is still not done.
 
 ## 5. Offline evidence: what it proves and what it does not
 
@@ -181,7 +181,9 @@ same formatting path runs against a real App in production.
    The hosted build now writes what the script publishes into the run directory
    (section 7), so that confirmation can be read out of a live run instead of
    only asserted offline; running the game itself is still the acceptance step.
-2. Audit policy for hosted `Fire` (see section 4).
+2. Audit policy for hosted `Fire`: the audit-only overlay, the per-boundary state
+   and the strict reader are in place (section 8). A live 12-cannon run still has
+   to show those records next to the real shots.
 3. The `INFO`-logger fault above, which blocks using AvZ logs as evidence in the
    offline harness.
 
@@ -298,3 +300,130 @@ Test-Path <run>\decisions\hosted-script.jsonl     # 默认构建录制后必须�
   覆盖 `observe_default.cpp` 的弱定义）。
 * `python -m unittest discover -s tests -p test_avz_hosted_script.py` —— `recorder.cpp` 里对
   观测文件的调用、CMake 里新增的源文件与测试目标都必须落在 `LVZ_AVZ_HOSTED_SCRIPT` 开关内。
+
+## 8. 托管炮击的审计（issue #84 open item 2，关联 #72 的 L2↔L4）
+
+`aCobManager.Fire` 不是 runtime 的动作：它经 `AAsm::Fire` 直接调引擎（§4），既不进请求
+journal，也不会产生 `action` 事件。托管跑 12 炮时，炮击因此是审计上的一个洞。本节记录补
+这个洞的做法：**只补审计、不改语义**的 overlay 钩子。
+
+### 8.1 钩子改了什么（只加一次审计调用）
+
+`runtime/avz_overlay.cmake` 在构建期对钉死的 `avz/framework/src/avz_cob_manager.cpp`
+（与 §2.5.2 同一套归一化 SHA256 校验）做**一次**文本替换，生成 overlay：
+
+```cpp
+    AGridToCoordinate(dropRow, dropCol, x, y);
+    AAsm::Fire(x, y, cobIdx);
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+    lvz::runtime::RecordHostedFire(cobIdx, plant->Id(), plant->Row() + 1, plant->Col() + 1, dropRow, dropCol);
+#endif
+    AAsm::ReleaseMouse();
+```
+
+* 锚点 `AAsm::Fire(x, y, cobIdx);` 在全文件只出现一次；锚点缺失或不唯一、上游文件哈希
+  不符，cmake 都直接 `FATAL_ERROR`，必须先复核这段 overlay 才能重建。
+* 新增的是一次**进程内审计调用**，不是引擎调用：`ReleaseMouse`/`GridToOrdinate`/`Fire`
+  的调用次数、参数、顺序与返回值全部保持原样（离线测试逐字节比对引擎调用轨迹）。
+* `_BasicFire` 提前返回（不是炮、没装填好）时不留记录，因此"记录数 = 真正打出去的炮数"。
+* 覆盖到的入口：`Fire`/`RecoverFire`/`RoofFire`/`RecoverRoofFire` 与
+  `RawFire`/`RawRoofFire` —— 它们最终都走 `_BasicFire`；延迟炮（`_DelayFire`）在真正
+  发炮的那一帧记录。
+
+### 8.2 开关
+
+* 默认构建（不带 `-DLVZ_AVZ_HOSTED_SCRIPT`）：不用这份 overlay（`AVZ_SOURCES` 仍是上游
+  原文件），不编译 `runtime/hosted_fire.cpp` / `determinism/hosted_fire.cpp`，不定义
+  `LVZ_AVZ_HOSTED_FIRE_AUDIT`。审计产物与改动前逐字节相同。
+* 托管构建：CMake 在同一个 `if(LVZ_AVZ_HOSTED_SCRIPT)` 分支里换 overlay、加这两个 TU、
+  定义 `LVZ_AVZ_HOSTED_FIRE_AUDIT=1`；`tools/build-hosted.ps1` 无需改动。
+
+### 8.3 记录形状
+
+`<run>/audit/events.jsonl` 里每次托管炮击一行，信封与 spawn/particle 的
+`controlled_boundary` 事件同形：
+
+```json
+{"schema":"lvz.audit.v1","seq":812,"kind":"hosted_fire","phase":"controlled_boundary",
+ "native_phase":"avz_basic_fire",
+ "payload":{"source":"hosted","op":"fire","plant_index":3,"plant_id":65539,
+            "plant_row":1,"plant_col":3,"target_row":2,"target_col_bits":1091567616,
+            "target_col_text":"9.000","tick":1042},
+ "version":{"epoch":1,"tick":1042,"revision":0}}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `version` / `payload.tick` | 发炮那一刻 runtime 报的边界版本；两者必须相等（读取端强制） |
+| `plant_index` | 炮在植物数组里的下标（0 基，`PlantArray() + index`） |
+| `plant_id` / `plant_row` / `plant_col` | 从活着的炮上读的植物 id 与 1 基行列（与 `events.jsonl` 的 plant 记录同一约定） |
+| `target_row` / `target_col_bits` | `aCobManager.Fire(row, col)` 的原始参数：`target_row` 是 AvZ 的 1 基行号，`target_col_bits` 是 float 列号的 IEEE-754 位 |
+| `target_col_text` | 上面这些位的三位小数显示；读取端从位重算并比对，防止两处数字漂移 |
+| `source` / `op` | 恒为 `hosted` / `fire`：这条记录不是请求动作 |
+
+这五个身份字段在本钩子里都拿得到，所以没有"不可用"占位。若将来某个入口只能拿到一部分
+（例如只有索引），约定是在 payload 里显式写 `"不可用"` 而不是省略字段——读取端要求字段
+集合精确匹配。
+
+### 8.4 逐边界 digests
+
+`audit/checksums.jsonl` 每行状态里多一个组件：
+
+```json
+"hosted_fire":{"mode":"hosted_fire_audit_v1","count":2,"digest":94143178827}
+```
+
+`count`/`digest` 在**发炮那一刻**增加，所以炮击会改变紧跟着的那次边界的组件 digest 与
+`all` digest：`tools/giant_fork_diff.py` 的逐帧 digest 对比能看到"两个世界第一次发炮
+不同"的那一帧，而不是等炮弹落地才看到差异。digest 是审计的 FNV-1a，按 §8.3 的整数字段
+顺序（`plant_index, plant_id, plant_row, plant_col, target_row, target_col_bits, tick`）
+逐 8 字节小端混合；Python 读取端独立重算（`test_hosted_fire_audit.py` 还钉了一个常量）。
+
+### 8.5 manifest 声明与严格读取
+
+托管构建的 `audit/manifest.json` 里多一块声明：
+
+```json
+"hosted_fire":{"mode":"hosted_fire_audit_v1","installed":true,"kind":"hosted_fire",
+ "source":"hosted_avz_script",
+ "hook":"avz_cob_manager._BasicFire after the reviewed AAsm::Fire call",
+ "original_engine_bitwise_unmodified":false,
+ "semantic_change":"none: audit-only; no engine call is added, removed or reordered",
+ "boundary":"the shot is bound to the next audited pre_step (its version)"}
+```
+
+`src/llm_vs_zombies/audit_compare.py` 的 `hosted_fire_mode()` 逐字段核对它，随后：
+
+* 没有声明的构建里出现 `hosted_fire` 事件或 `hosted_fire` 状态组件 → `EvidenceError`。
+* 每条记录必须被**同一版本的下一帧 `pre_step`** 接住；没有下一帧（例如关录制前最后一枪）
+  → `hosted fire record has no following audited boundary`。
+* 每个边界状态的 `count`/`digest` 必须等于"到目前为止已消费的记录"的滚动值：漏记、多记、
+  换序都会当场失败。
+* `payload.tick` 必须等于 `version.tick`；`target_col_text` 必须等于 `target_col_bits`
+  解出来的值。
+
+### 8.6 边界：这仍不是一等 `fire` 动作
+
+* 记录 `kind` 是 `hosted_fire`，**不是** `action`：没有 `request_id`、没有 `ordinal`、
+  没有 journal 条目，`engine_replay.py` 不会把它当成请求动作来重放或核对。
+* 协议里没有 `fire` op；托管脚本的发炮时机与顺序仍只由脚本自己决定，runtime 不校验。
+* 因此审计只回答"这一枪真的打出去了、什么时候、从哪门炮、往哪打"，不回答"这一枪该不该
+  打"。要把它变成可重放的一等动作，需要新协议 op + journal + replay 支持，是另一个议题。
+
+### 8.7 离线证据（不需要游戏）
+
+* `ctest -R avz_hosted_fire` —— 同一份测试源码编两次。默认构建那半边（上游原文件、无开关）
+  在同一张假图上写出参考引擎调用轨迹；托管构建那半边（overlay + 真记录路径）必须做到
+  "每条通过的炮恰好一条记录、队列只 drain 一次、状态 count/digest 与独立实现一致"，而且
+  引擎调用轨迹与默认构建**逐字节相同**（`-Wl,--wrap` 把 `AAsm::Fire`/`ReleaseMouse`/
+  `GridToOrdinate` 三个引擎入口换成计数桩，因为真实入口是固定 RVA 的内联汇编）。
+* `ctest -R avz_hosted_fire_default` —— 默认构建那半边：同一串炮，记录为 0 条，状态组件与
+  manifest 声明都不存在。
+* `python -m unittest discover -s tests -p test_hosted_fire_audit.py` —— 严格读取端：
+  声明、绑定、计数、digest、可读列、顺序、无声明证据各有反例。
+* `python -m unittest discover -s tests -p test_avz_hosted_script.py` —— 接线检查：overlay
+  锚点、两个 TU 与 `LVZ_AVZ_HOSTED_FIRE_AUDIT` 都必须落在 `LVZ_AVZ_HOSTED_SCRIPT` 开关
+  内，默认构建的 `RECORDER_SOURCES` 里不得出现它们。
+
+没证明的：真机上一次真炮击的端到端记录——假图里没有真引擎，`determinism/audit.cpp` 的
+写文件路径需要真图才能 `Initialize`；真机 digest 与离线推算的一致性属于真机验收。

@@ -90,3 +90,51 @@ string(REPLACE "        ALeftClick(x, y);"
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/avz_smart_overlay.cpp" "#include \"runtime/runtime.hpp\"\n${smart_source}")
 list(REMOVE_ITEM AVZ_SOURCES "${AVZ_SMART}")
 list(APPEND AVZ_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/avz_smart_overlay.cpp")
+
+# Hosted cannon shots (aCobManager.Fire) are direct engine calls: they reach PvZ
+# through AAsm::Fire instead of the runtime's request journal, so plant/shovel/
+# spawn audit nothing about them (issue #84, open item 2). This overlay adds one
+# call to the pinned upstream _BasicFire, immediately after the reviewed
+# AAsm::Fire line, and touches nothing else. The insertion is compiled only
+# when LVZ_AVZ_HOSTED_FIRE_AUDIT is defined, and the file itself is only used by
+# a hosted build; tests/avz_hosted_fire_tests.cpp builds it both ways.
+set(AVZ_COB_MANAGER "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_cob_manager.cpp")
+if(NOT AVZ_COB_MANAGER IN_LIST AVZ_SOURCES)
+  message(FATAL_ERROR "AvZ cob manager source is missing from AVZ_SOURCES")
+endif()
+set(AVZ_COB_MANAGER_OVERLAY "${CMAKE_CURRENT_BINARY_DIR}/avz_cob_manager_overlay.cpp")
+file(READ "${AVZ_COB_MANAGER}" cob_source)
+string(REPLACE "\r\n" "\n" cob_normalized "${cob_source}")
+string(SHA256 cob_hash "${cob_normalized}")
+if(NOT cob_hash STREQUAL "f985ac3366d815a3cdd9268a09e8a6d7134f396c62ab68cd130f440ee8185a21")
+  message(FATAL_ERROR "Pinned AvZ cob manager source changed; review the hosted-fire audit overlay before rebuilding")
+endif()
+set(cob_fire_call "    AAsm::Fire(x, y, cobIdx);")
+string(FIND "${cob_source}" "${cob_fire_call}" cob_fire_position)
+if(cob_fire_position LESS 0)
+  message(FATAL_ERROR "Reviewed cannon call site is missing")
+endif()
+string(LENGTH "${cob_fire_call}" cob_fire_length)
+math(EXPR cob_fire_end "${cob_fire_position}+${cob_fire_length}")
+string(SUBSTRING "${cob_source}" ${cob_fire_end} -1 cob_fire_tail)
+string(FIND "${cob_fire_tail}" "${cob_fire_call}" duplicate_cob_fire_call)
+if(NOT duplicate_cob_fire_call EQUAL -1)
+  message(FATAL_ERROR "Reviewed cannon call site is not unique")
+endif()
+string(REPLACE "${cob_fire_call}"
+  "${cob_fire_call}\n#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT\n    lvz::runtime::RecordHostedFire(cobIdx, plant->Id(), plant->Row() + 1, plant->Col() + 1, dropRow, dropCol);\n#endif"
+  cob_source "${cob_source}")
+file(WRITE "${AVZ_COB_MANAGER_OVERLAY}"
+  "#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT\n#include \"runtime/hosted_fire.hpp\"\n#endif\n${cob_source}")
+# The two lists a test can pick from: the pristine upstream file (what the
+# default build compiles) and the same list with the audit overlay swapped in
+# (what a hosted build compiles).
+set(AVZ_SOURCES_COB_PRISTINE "${AVZ_SOURCES}")
+set(AVZ_SOURCES_COB_OVERLAY "${AVZ_SOURCES}")
+list(REMOVE_ITEM AVZ_SOURCES_COB_OVERLAY "${AVZ_COB_MANAGER}")
+list(APPEND AVZ_SOURCES_COB_OVERLAY "${AVZ_COB_MANAGER_OVERLAY}")
+if(LVZ_AVZ_HOSTED_SCRIPT)
+  # Declared before this include by CMakeLists.txt: the recorder's source list is
+  # fixed by add_library() below, so the overlay decision happens here.
+  set(AVZ_SOURCES "${AVZ_SOURCES_COB_OVERLAY}")
+endif()

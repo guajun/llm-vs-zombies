@@ -37,6 +37,14 @@ PARTICLE_SHAKE_MODE = "deterministic_particle_shake_v1"
 DRAW_SCHEDULE_MODE = "deterministic_draw_schedule_v1"
 ENGINE_CALL_MODE = "controlled_engine_call_v1"
 ENGINE_CALL_RAW = "engine-call-raw.jsonl"
+HOSTED_FIRE_MODE = "hosted_fire_audit_v1"
+HOSTED_FIRE_KIND = "hosted_fire"
+# The shot's integer fields, in the native digest's canonical order. `tick` is
+# also the envelope version's tick; `target_col_text` is display only and is
+# re-derived from `target_col_bits` below.
+_HOSTED_FIRE_FIELDS = ("plant_index", "plant_id", "plant_row", "plant_col",
+                       "target_row", "target_col_bits", "tick")
+_HOSTED_FIRE_PAYLOAD_KEYS = {"source", "op", "target_col_text", *_HOSTED_FIRE_FIELDS}
 AUDIT_FILES = ("manifest.json", "events.jsonl", "checksums.jsonl", "state-deltas.jsonl")
 _POINTER_CACHE_SIZE = 16384
 _POINTER_CACHE_MAX_CHARS = 512
@@ -311,6 +319,33 @@ def validate_engine_origin(value):
         raise EvidenceError("initial engine call origin is not an actual healthy fresh tracker")
 
 
+def hosted_fire_mode(manifest):
+    """Hosted AvZ cannon shots (issue #84): audit-only, never journaled actions.
+
+    A DLL compiled with `LVZ_AVZ_HOSTED_FIRE_AUDIT` declares the mode below and
+    writes one `kind == "hosted_fire"` event per shot plus a comparable
+    per-boundary state component. This is deliberately not the `action` kind: a
+    hosted shot has no request id, no ordinal and no journal entry, and
+    equating it with an action would let a script's fire order pass as a
+    replayed request. Any build without the switch writes neither, and both
+    halves of the evidence are refused here unless the mode declares them.
+    """
+    spec = manifest.get("hosted_fire")
+    if spec is None:
+        return None
+    required = {"mode": HOSTED_FIRE_MODE, "installed": True, "kind": HOSTED_FIRE_KIND,
+        "source": "hosted_avz_script",
+        "hook": "avz_cob_manager._BasicFire after the reviewed AAsm::Fire call",
+        "original_engine_bitwise_unmodified": False,
+        "semantic_change": "none: audit-only; no engine call is added, removed or reordered",
+        "boundary": "the shot is bound to the next audited pre_step (its version)"}
+    if (not isinstance(spec, dict) or set(spec) != set(required)
+            or any(type(spec.get(key)) is not type(value) or spec[key] != value
+                   for key, value in required.items())):
+        raise EvidenceError("unsupported or undeclared hosted fire audit mode")
+    return HOSTED_FIRE_MODE
+
+
 def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     """Resolve supported evidence files without trusting a manifest path."""
     directory = Path(directory)
@@ -318,6 +353,7 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     draw_mode(manifest)
     app_update_anchor.mode(manifest)
     mj_clock_anchor.mode(manifest)
+    hosted_fire_mode(manifest)
     counter_mode = sound_counter.mode(manifest)
     fp_mode = fp_environment.mode(manifest)
     coverage = manifest.get("coverage", {})
@@ -1053,6 +1089,62 @@ class _ParticleEvidence:
             raise EvidenceError("particle shake hook health/count is incomplete or unhealthy")
 
 
+class _HostedFireEvidence:
+    """One audit record per hosted cannon shot, bound to its actual boundary.
+
+    The hook runs inside the script coroutine, between two audited boundaries:
+    it is written with the controller version the runtime reported at the engine
+    call, and it must therefore be followed by that version's audited pre_step.
+    Every frame then has to show the running count/digest, so a shot whose
+    record was dropped, duplicated or reordered cannot pass as a clean run.
+    """
+    def __init__(self):
+        self.count = 0
+        self.rolling = 14695981039346656037
+        self.pending = []
+
+    def event(self, event):
+        payload = event["payload"]
+        if (event.get("phase") != "controlled_boundary" or event.get("native_phase") != "avz_basic_fire"
+                or not isinstance(payload, dict) or set(payload) != _HOSTED_FIRE_PAYLOAD_KEYS):
+            raise EvidenceError("invalid hosted fire record envelope or payload fields")
+        if payload.get("source") != "hosted" or payload.get("op") != "fire":
+            raise EvidenceError("hosted fire record lost its source/op marker")
+        if any(type(payload.get(key)) is not int for key in _HOSTED_FIRE_FIELDS):
+            raise EvidenceError("hosted fire record fields must be integers")
+        if any(not 0 <= payload.get(key) <= 0xffffffff
+               for key in ("plant_index", "plant_id", "plant_row", "plant_col", "target_col_bits", "tick")):
+            raise EvidenceError("hosted fire record has a negative or oversized identity field")
+        if not -0x80000000 <= payload["target_row"] <= 0x7fffffff:
+            raise EvidenceError("hosted fire target row is out of range")
+        if payload["tick"] != event["version"]["tick"]:
+            raise EvidenceError("hosted fire tick differs from the version it is bound to")
+        readable = struct.unpack("<f", struct.pack("<I", payload["target_col_bits"]))[0]
+        text = payload.get("target_col_text")
+        if not isinstance(text, str) or text != f"{readable:.3f}":
+            raise EvidenceError("hosted fire readable column differs from its IEEE-754 bits")
+        self.count += 1
+        self.rolling = _hosted_fire_digest(self.rolling, payload)
+        self.pending.append(event)
+
+    def frame(self, frame):
+        for event in self.pending:
+            before = event["version"]
+            if (frame.kind != "pre_step" or before["epoch"] != frame.version["epoch"]
+                    or before["tick"] != frame.version["tick"] or before["revision"] > frame.version["revision"]):
+                raise EvidenceError("hosted fire record is not bound to its next audited pre-step")
+        self.pending.clear()
+        state = frame.state.get("hosted_fire")
+        if (not isinstance(state, dict) or state.get("mode") != HOSTED_FIRE_MODE
+                or type(state.get("count")) is not int or state["count"] != self.count
+                or type(state.get("digest")) is not int or state["digest"] != self.rolling):
+            raise EvidenceError("hosted fire state count/digest differs from the verified records")
+
+    def finish(self):
+        if self.pending:
+            raise EvidenceError("hosted fire record has no following audited boundary")
+
+
 class _EventSummary:
     def __init__(self):
         self.tail = deque(maxlen=7)
@@ -1164,6 +1256,12 @@ def _particle_digest(previous, payload):
     values = [payload[key] for key in ("callsite_rva", "particle_id", "factor", "canonical_seed", "age", "duration", "crossfade_duration")]
     values += [payload["pool"][key] for key in ("used", "capacity", "free_head", "count", "next_key")]
     return _fnv_continue(previous, struct.pack("<12Q", *values))
+
+
+def _hosted_fire_digest(previous, payload):
+    """Native canonical word order; runtime epoch/revision never enter state."""
+    values = [payload[key] for key in _HOSTED_FIRE_FIELDS]
+    return _fnv_continue(previous, struct.pack("<7Q", *[value & 0xffffffffffffffff for value in values]))
 
 
 class _AnimationDecoder:
@@ -1409,6 +1507,7 @@ class _AuditStreamDecoder:
         self.frames = _FrameDecoder(reuse_state=reuse_state, engine_calls=self.calls is not None)
         self.animation = _AnimationDecoder(manifest) if RAW_ANIMATIONS in files else None
         self.particle = _ParticleEvidence() if PARTICLE_SHAKE_RAW in files else None
+        self.hosted_fire = _HostedFireEvidence() if hosted_fire_mode(manifest) else None
         self.draw = _DrawEvidence(manifest) if draw_mode(manifest) else None
         self.summary = _EventSummary()
         self.pending = []
@@ -1456,6 +1555,10 @@ class _AuditStreamDecoder:
                 self.peak_pending = max(self.peak_pending, len(self.pending))
             elif self.last_frame is not None:
                 raise EvidenceError("particle shake lost its controlled boundary after recording started")
+        elif event["kind"] == HOSTED_FIRE_KIND:
+            if self.hosted_fire is None:
+                raise EvidenceError("hosted fire record lacks its declared audit mode")
+            self.hosted_fire.event(event)
         elif event["kind"] == "particle_shake_closed":
             if self.particle is None:
                 raise EvidenceError("particle shake close has no declared engine mode")
@@ -1518,6 +1621,10 @@ class _AuditStreamDecoder:
         result = replace(frame, particle_seeds=tuple(self.pending), spawn_events=tuple(self.pending_spawns))
         self.pending.clear()
         self.pending_spawns.clear()
+        if self.hosted_fire is not None:
+            self.hosted_fire.frame(frame)
+        elif "hosted_fire" in frame.state:
+            raise EvidenceError("hosted fire state requires an explicit audit mode")
         self.last_frame = AuditFrame(frame.seq, frame.kind, frame.version, frame.payload, {}, {})
         return result
 
@@ -1527,6 +1634,8 @@ class _AuditStreamDecoder:
             self.calls.finish()
         if self.draw:
             self.draw.finish()
+        if final and self.hosted_fire is not None:
+            self.hosted_fire.finish()
         if final and self.pending:
             raise EvidenceError("particle shake calls have no following audited boundary")
         if final and self.pending_spawns:

@@ -13,6 +13,9 @@
 #include "particle_shake.hpp"
 #include "runtime/engine_call.hpp"
 #include "foley_trace.hpp"
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+#include "hosted_fire.hpp"
+#endif
 #ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
 #include "tests/flag_drop_live.hpp"
 #endif
@@ -95,6 +98,21 @@ void DrainAndCheckSpawns() {
         throw std::runtime_error("ZombieInitialize capture incomplete; strict experiment stopped");
     }
 }
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+// Hosted cannon shots are queued at the engine boundary (aCobManager.Fire is
+// not a runtime action, so no request owns them) and land here in the order
+// they happened, before the boundary's own event. Each record carries the
+// version the runtime reported at the shot, so a trailing shot with no
+// following audited pre_step stays visible to the strict reader instead of
+// being dropped or back-dated.
+void DrainHostedFires() {
+    auto records = DrainHostedFireEvents(sequence);
+    if (records.empty()) return;
+    sequence += records.size();
+    for (auto& record : records)
+        Write(events, record);
+}
+#endif
 void SetObservedSpawnBoundary(const Json& version,uint64_t engineCallId) {
     if(!version.is_object() || !version.contains("tick") || !version.contains("revision")
         || !version.contains("epoch")) throw std::runtime_error("Missing controlled spawn boundary version");
@@ -267,6 +285,11 @@ Json ProbeTarget() {
         {"engine_call_boundary",lvz::runtime::EngineCallManifest()},{"foley_trace",foleytrace::Manifest()},
         {"fixed_fp",fpenv::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+    // Declares the audit-only hosted-cannon policy of this DLL. A reader refuses
+    // hosted_fire records (or a hosted_fire state component) without it.
+    result["hosted_fire"]=HostedFireManifest();
+#endif
     if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();
         result["mj_clock_anchor"]=MjClockAnchorManifest();result["b0_normalization"]=B0NormalizationManifest();
         result["sound_counter"]=SoundCounterManifest();}
@@ -432,6 +455,12 @@ Json CaptureState() {
         {"draw_schedule",lvz::recording::DrawScheduleSnapshot()},
         {"app",{{"game_mode",Read<int32_t>(app+0x7f8)},{"ui",Read<int32_t>(app+0x7fc)},
             {"mj_clock",Read<uint32_t>(app+0x838)}}}};
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+    // Comparable count/digest of every hosted shot so far: a shot changes the
+    // very next boundary's digest, which is what tools/giant_fork_diff.py and
+    // the per-boundary checksums read.
+    state["hosted_fire"]=HostedFireState();
+#endif
     if(silentaudio::Enabled())state["sound_effects"]=silentaudio::Snapshot();
     capturedFp=fpMonitor->Capture();
     state["fp_environment"]={{"x87_control",capturedFp.x87},{"mxcsr_control",capturedFp.mxcsr&fpenv::MxcsrControlMask}};
@@ -466,6 +495,9 @@ Json CaptureState() {
 }
 void Audit(const std::string& kind,const Json& payload,const Json& observation) {
     RequireThread();
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+    DrainHostedFires();
+#endif
     foleytrace::DrainAndCheck(kind=="recording_closed"||kind=="engine_call_closed");
     // Drain before assigning a new request/step label so menu/preview spawns
     // cannot acquire the version of a command that has not run yet.
@@ -553,6 +585,12 @@ void Flush() {
 void Shutdown() {
     if(!initialized) return;
     RequireThread();DrainAndCheckSpawns();DrainAndCheckParticleShake();
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+    // A shot that never reached its next audited pre_step is written here and
+    // then rejected by the strict reader ("hosted fire has no following audited
+    // boundary"): fail closed rather than hide the shot.
+    DrainHostedFires();
+#endif
     foleytrace::Shutdown();
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","fp_environment_closed"},
         {"version",lastObservationVersion},{"payload",fpMonitor->Close()}});
@@ -573,5 +611,8 @@ void Shutdown() {
     if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()||fpRaw.fail()) throw std::runtime_error("Audit output close failed");
     initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
+#ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
+    ResetHostedFire();
+#endif
 }
 }
