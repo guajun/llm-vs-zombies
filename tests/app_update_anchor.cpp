@@ -95,8 +95,17 @@ int main(){try{
         Check(!b.ShouldStep()&&!Now(b,Req(b,"forbidden-warm","prepare_render"))["ok"],"fault admitted warm");
         Check(bad.events.back()["kind"]=="app_update_anchor_failed"&&!bad.events.back()["payload"]["anchor"]["before_state"].is_null(),"failure lost pre-write state");
         Check(Now(b,Req(b,"close","stop_recording"))["ok"]&&bad.closed,"fault evidence could not close");}
+    // Two worlds with different actual counters and one declared target.
+    Fake worldE;worldE.count=1395;Controller e(worldE);e.Boundary();Seed(e);
+    auto worldEResult=Set(e,"common-target",1500);Check(worldEResult["ok"]&&worldE.count==1500,"declared target write failed for the first world");
+    Fake worldF;worldF.count=1422;Controller g(worldF);g.Boundary();Seed(g);
+    auto worldFResult=Set(g,"common-target",1500);Check(worldFResult["ok"]&&worldF.count==1500,"declared target write failed for the second world");
+    Check(worldEResult["result"]["anchor"]["before"]==1395&&worldFResult["result"]["anchor"]["before"]==1422
+        &&worldEResult["result"]["anchor"]["requested"]==1500&&worldFResult["result"]["anchor"]["requested"]==1500
+        &&worldEResult["result"]["anchor"]["after"]==worldFResult["result"]["anchor"]["after"]
+        &&worldFResult["result"]["anchor"]["after"]==1500,"cross-run declared target/readback mismatch");
     Fake source;Controller s(source);s.Boundary();Seed(s);auto noop=Set(s,"self-anchor",source.count);Check(noop["ok"]&&noop["result"]["anchor"]["before_state"]==noop["result"]["anchor"]["after_state"],"source no-op did not record actual equal states");
     for(uint32_t edge:{0u,uint32_t(INT32_MAX)}){Fake value;Controller v(value);v.Boundary();Seed(v);Check(Set(v,"edge",edge)["ok"]&&value.count==edge,"signed permitted boundary rejected");}
     Fake original;original.enabled=false;Controller o(original);o.Boundary();Seed(o);Check(Now(o,Req(o,"ordinary-warm","prepare_render"))["ok"],"ordinary audio warm compatibility changed");
-    std::cout<<"App counter field write, complete evidence, actual seed, empty audio, demo, lifecycle/idempotence and failure fixtures passed\n";return 0;
+    std::cout<<"App counter field write, cross-run declared target, complete evidence, actual seed, empty audio, demo, lifecycle/idempotence and failure fixtures passed\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

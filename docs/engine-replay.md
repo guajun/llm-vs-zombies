@@ -266,11 +266,11 @@ demo 明确使用 synthetic counter，创建两个独立计数器实例并经过
 
 `initial_app_update_anchor_v1` 是独立的初始化合同，不修改上述音效 v1 规格。只有 hello/game 明确声明 `app_update_anchor`、两个对应 capability 都为 true、recipe 保存同配置与目标计数时才启用。旧音效来源没有该声明时继续按原语义读入，不能自动升级或删去 App 计数差异。原来的 `clock_restore` 和三项 `CaptureClocks` 格式保持不变。
 
-源和冷启动都在实际播种后、首个 warm 前调用一次 `app_update_anchor`；目标范围是 `0..2147483647`。成功原生事件 `app_update_anchored` 保存完整 before/after 游戏状态、真实原计数、请求目标、实际读回值和相邻 revision。读取器独立核验：只允许 `/sound_effects/app_update_count` 变化，RNG 必须仍与该原生 `rng_seeded` 事件完整相符，历史/参数/分配数及其余字段不能变化。暖机必须使用紧邻下一 revision；B0 观察必须确认 `app_update_anchored:true`，其实际 App 计数与配方目标一致。缺失、重复、晚到、失败事件，或者锚定后再改 seed/clocks，都会使严格轨迹失败。
+源和冷启动都在实际播种后、首个 warm 前调用一次 `app_update_anchor`；目标范围是 `0..2147483647`，值来自**计划/配方里声明的固定目标**（evaluation `Plan.app_update_count`），不是本 run 当场的观测计数。运行声明了该能力却没有显式声明目标时 `initialization.apply_recipe` 在发出任何请求之前拒绝启动，报错指明要声明的字段；本 run 自己的读数只作为回执里的真实 `before`。成功原生事件 `app_update_anchored` 保存完整 before/after 游戏状态、真实原计数、请求目标、实际读回值和相邻 revision。读取器独立核验：只允许 `/sound_effects/app_update_count` 变化，`after` 必须等于声明目标，RNG 必须仍与该原生 `rng_seeded` 事件完整相符，历史/参数/分配数及其余字段不能变化。暖机必须使用紧邻下一 revision；B0 观察必须确认 `app_update_anchored:true`，其实际 App 计数与配方目标一致。缺失、重复、晚到、失败事件，或者锚定后再改 seed/clocks，都会使严格轨迹失败。
 
-原版 demo 的录制/播放标志（`+0x510/+0x511`）必须实际为零。回执保留这两个 byte、`+0x578/+0x49c` 的 uint32 和 `+0x4a0` 的 byte 原值，前后必须相同；不会为这些关联字段添加偏移。完整回执留在已绑定的原生事件及 SessionTrace 中。跨运行允许实际校准前 App 计数不同，例如源 1295、冷启动 1294，但各自必须真实写入并读回共同目标 1295。比较锚定后的完整状态、原始 demo 字段、请求值及映射后的版本；报告另列双方真实 before，不把它们伪称相等。所有 B0 和后续 pre/post 状态仍逐项比较真实原始 App 计数。
+原版 demo 的录制/播放标志（`+0x510/+0x511`）必须实际为零。回执保留这两个 byte、`+0x578/+0x49c` 的 uint32 和 `+0x4a0` 的 byte 原值，前后必须相同；不会为这些关联字段添加偏移。完整回执留在已绑定的原生事件及 SessionTrace 中。跨运行允许实际校准前 App 计数不同，例如世界 e4 1395、世界 f4 1422，但两个世界必须在自己的 plan 里声明同一个 `app_update_count` 目标（`evaluation plan --app-update-count`），并各自真实写入、读回该共同目标。比较锚定后的完整状态、原始 demo 字段、请求值及映射后的版本；报告另列双方真实 before 与共同目标，不把它们伪称相等。所有 B0 和后续 pre/post 状态仍逐项比较真实原始 App 计数。早于本改造、把来源自身读数记为目标的旧配方/旧归档继续按原语义读入与重放，不会被自动改写。
 
-`test_app_update_anchor.py` 用模拟器覆盖完整回放、seek 0/2、原始 before 旁证、状态外溢修改、demo 守卫、缺/重复/晚事件及旧能力兼容。这些离线检查不代替新构建的真实冷启动验证，也不修改已失败的旧来源归档。
+`test_app_update_anchor.py` 用模拟器覆盖完整回放、seek 0/2、原始 before 旁证、两个世界「真实 before 不同、声明目标相同」的 B0 相等、越界目标、状态外溢修改、demo 守卫、缺/重复/晚事件、能力已声明但缺目标时 `apply_recipe` 拒启动，以及旧能力与旧自记录配方兼容。这些离线检查不代替新构建的真实冷启动验证，也不修改已失败的旧来源归档。
 
 `initial_mj_clock_anchor_v1` 是第二个独立的初始化合同，同样不修改音效 v1 规格。只有 hello/game 明确声明 `mj_clock_anchor`、两个 capability 都为 true、recipe 保存同配置与固定目标时才启用；旧来源没有该声明时继续按原语义读入。配方保存的是实验声明的**固定目标**（evaluation `Plan.mj_clock`），不是运行时当场计数：运行声明了该能力却没有声明目标时 `initialization.apply_recipe` 直接拒绝启动，运行器必须在两个世界声明同一个值。
 

@@ -60,6 +60,11 @@ class Plan:
     pause_points: tuple = ((1000, 1.0), (2500, 5.0))
     strategy: str | None = None
     audio_mode: str = "original"
+    # Declared fixed common B(0) target for LawnApp+0x484 (mUpdateCount), the
+    # counter behind /sound_effects/app_update_count. Required (and identical
+    # across worlds) whenever the runtime declares the initial App update
+    # anchor; a run's own observed counter is never accepted as the target.
+    app_update_count: int | None = None
     # Fixed common B(0) target for LawnApp+0x838. Required (and identical
     # across worlds) whenever the runtime declares the fixed MJ clock anchor;
     # a run's own current counter is never accepted as the target.
@@ -101,6 +106,8 @@ class Plan:
             last = point[0]
         if self.tier == "strict" and (self.cold_starts < 10 or not self.strategy):
             raise ValueError("strict requires at least 10 cold starts per seed and an explicit strategy file")
+        if self.app_update_count is not None and (type(self.app_update_count) is not int or not 0 <= self.app_update_count <= 0x7fffffff):
+            raise ValueError("app_update_count must be an integer in 0..2147483647")
         if self.mj_clock is not None and (type(self.mj_clock) is not int or not 0 <= self.mj_clock <= 0x7fffffff):
             raise ValueError("mj_clock must be an integer in 0..2147483647")
         return self
@@ -538,7 +545,7 @@ def _recovery_probe(root: Path, name: str, plan: Plan, seed: int, *, lifecycle=N
     from .client import WindowsNamedPipeStream, connect
     with live_session(root, name, plan, seed, lifecycle=lifecycle) as (run, launcher, client, trace):
         _require_production_runtime(client)
-        recipe = apply_recipe(client, seed, mj_clock=plan.mj_clock)
+        recipe = apply_recipe(client, seed, app_update_count=plan.app_update_count, mj_clock=plan.mj_clock)
         before = client.observe()
         budget = BoundaryBudget(root, plan, report_path=run / "evaluation-resources.json")
         budget.check(before["version"], force=True)
@@ -819,7 +826,7 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                     with live_session(root, source_run.name, plan, seed, lifecycle=source_lifecycle) as (run, launcher, client, trace):
                         _require_production_runtime(client)
                         case["run"] = str(run)
-                        recipe = apply_recipe(client, seed, mj_clock=plan.mj_clock)
+                        recipe = apply_recipe(client, seed, app_update_count=plan.app_update_count, mj_clock=plan.mj_clock)
                         # apply_recipe rewrites observations/initial.json with the
                         # B0-bound observation; the scenario gate follows it so the
                         # recorded hash cannot go stale.
@@ -973,6 +980,10 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("--tier", choices=("smoke", "strict"), default="smoke")
     sample.add_argument("--strategy")
     sample.add_argument("--audio-mode", choices=("original", sound_effects.MODE), default="original")
+    sample.add_argument("--app-update-count", type=int, default=None,
+                        help="Declared fixed B(0) target for LawnApp+0x484; required by a runtime that declares the initial App update anchor")
+    sample.add_argument("--mj-clock", type=int, default=None,
+                        help="Declared fixed B(0) target for LawnApp+0x838; required by a runtime that declares the fixed MJ clock anchor")
     sample.add_argument("--seeds", default="0,1,42", help="ordered comma-separated uint32 seeds")
     sample.add_argument("--tick-budget", type=int)
     sample.add_argument("--cold-starts", type=int)
@@ -1006,7 +1017,8 @@ def main(argv: list[str] | None = None) -> int:
                         min_free_bytes=args.min_free_bytes, packaging_reserve_bytes=args.packaging_reserve_bytes,
                         disk_check_ticks=args.disk_check_ticks, pause_points=args.pause_points,
                         strategy=str(Path(args.strategy).resolve()) if args.strategy else None,
-                        audio_mode=args.audio_mode).validate()
+                        audio_mode=args.audio_mode, app_update_count=args.app_update_count,
+                        mj_clock=args.mj_clock).validate()
             write_json(args.output, asdict(plan))
             print(args.output)
             return 0

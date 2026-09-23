@@ -111,12 +111,19 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     fp_mode = fp_environment.negotiate(hello)
     if app_update_count is not None and app_anchor_mode is None:
         raise RuntimeError("runtime has no declared initial App update anchor capability")
+    if app_anchor_mode is not None and app_update_count is None:
+        # The whole point of this capability is a target the experiment chose.
+        # Anchoring the run's own observed counter reproduces the cross-run
+        # asymmetry that this initialization exists to remove.
+        raise RuntimeError("runtime declares the initial App update anchor; declare the fixed B(0) app_update_count target "
+                           "explicitly (evaluation plan --app-update-count N / Plan.app_update_count); the run's own "
+                           "current value is not accepted")
     if mj_clock_mode is not None and mj_clock is None:
         # The whole point of this capability is a target the experiment chose.
         # Recording the run's own current counter would recreate the cross-run
         # asymmetry of the App update counter.
         raise RuntimeError("runtime declares the fixed MJ clock anchor; declare the fixed B(0) target explicitly "
-                           "(the run's own current value is not accepted)")
+                           "(evaluation plan --mj-clock N / Plan.mj_clock); the run's own current value is not accepted")
     if mj_clock is not None and mj_clock_mode is None:
         raise RuntimeError("runtime has no declared fixed MJ clock anchor capability")
     if (anchor is not None or mode == DRAW_MODE) and capabilities.get("clock_restore") is not True:
@@ -177,7 +184,9 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         verify_seeded_rng(seeded, seed)
     app_receipt = None
     if app_anchor_mode:
-        target = seeded["state"]["sound_effects"]["app_update_count"] if app_update_count is None else app_update_count
+        # The declared target is the plan/API argument. The run's own readback
+        # is never a target; it is only the real ``before`` of this receipt.
+        target = app_update_count
         if type(target) is not int or not 0 <= target <= 0x7fffffff:
             raise ValueError("initial App update count must be an integer in 0..2147483647")
         before_version = copy.deepcopy(client.version)
@@ -296,7 +305,8 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     return recipe
 
 
-def ensure_render_prepared(client, seed: int = 0, *, mj_clock: int | None = None) -> dict | None:
+def ensure_render_prepared(client, seed: int = 0, *, mj_clock: int | None = None,
+                          app_update_count: int | None = None) -> dict | None:
     """Prepare an attached ready new-mode game; reconnecting never reseeds it."""
     hello = client.hello_result if client.hello_result is not None else client.hello()
     sound_effects.negotiate(hello)
@@ -311,4 +321,4 @@ def ensure_render_prepared(client, seed: int = 0, *, mj_clock: int | None = None
         return None
     if observation.get("game_ui") != 3:
         return None  # The REPL can still inspect/loading-initialize the process.
-    return apply_recipe(client, seed, mj_clock=mj_clock)
+    return apply_recipe(client, seed, mj_clock=mj_clock, app_update_count=app_update_count)

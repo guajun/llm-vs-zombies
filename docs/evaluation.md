@@ -33,7 +33,9 @@ python -m llm_vs_zombies.evaluation run work/strict-plan.json --output experimen
 
 strict 默认每个种子要求 10 次冷启动：一次录制策略轨迹，九次冷启动后重算同一轨迹，**不是让 LLM 再回答九次**。另有恢复测试专用进程，不能拿它凑十次完整重放。默认上限 200000 tick，达到上限仍未完成两旗即不满足通关门槛。源未完成两旗时封存真实结果并跳过九次重放；smoke 的正常来源仍运行一次真实 cold 和恢复探针。首个 cold 失败后停止派发该种子尚未开始的重放，已运行的 cold 完成正常关闭和证据保留。这里的 baseline 是公开候选策略，命令可执行并不证明它已能赢完整两旗。
 
-`plan` 支持 `--seeds 0,1,42`、`--tick-budget`、`--cold-starts`、`--cold-workers 1|2`、`--timeout-seconds`、`--wall-budget-seconds`、`--cold-wall-budget-seconds`、`--min-free-bytes`、`--packaging-reserve-bytes`、`--disk-check-ticks` 和 `--pause-points '[[1000,1],[2500,5]]'`。strict 生成默认单请求超时600秒、源墙钟预算86400秒、每次cold墙钟预算86400秒；smoke 单请求/源默认仍为90/3600秒。已有计划保持其显式值，不自动延长。strict 不能降低十次冷启动要求。策略相对路径相对于计划文件所在目录；生成命令会保存当时解析的绝对路径。
+`plan` 支持 `--seeds 0,1,42`、`--tick-budget`、`--cold-starts`、`--cold-workers 1|2`、`--timeout-seconds`、`--wall-budget-seconds`、`--cold-wall-budget-seconds`、`--min-free-bytes`、`--packaging-reserve-bytes`、`--disk-check-ticks`、`--app-update-count`、`--mj-clock` 和 `--pause-points '[[1000,1],[2500,5]]'`。strict 生成默认单请求超时600秒、源墙钟预算86400秒、每次cold墙钟预算86400秒；smoke 单请求/源默认仍为90/3600秒。已有计划保持其显式值，不自动延长。strict 不能降低十次冷启动要求。策略相对路径相对于计划文件所在目录；生成命令会保存当时解析的绝对路径。
+
+`--app-update-count` 与 `--mj-clock` 声明的是**固定的 B(0) 归一化目标**（范围 `0..2147483647`），分别对应 `/sound_effects/app_update_count`（`LawnApp+0x484`）与 `/app/mj_clock`（`LawnApp+0x838`）。运行时声明了对应能力却没有声明目标时，初始化在任何请求之前拒绝启动；目标值不回退到本 run 的观测计数，因为那只保证世界内一致，跨世界必然不同。并行世界必须在各自的计划里声明**同一个值**；缺省仍是 `null`，旧计划不会被自动填值，也不会被自动升级。
 
 `cold_workers` 默认 `1`，仅接受整数 `1` 或 `2`；旧计划缺失此字段时仍串行。`2` 在 Windows 上最多同时运行两个独立冷重放宿主，source、不同种子和 recovery 仍顺序执行。默认 smoke 只有一次 cold；若要两次 cold，可同时设置 `--cold-starts 3`。每个 worker 都独立对源轨迹执行完整核验并保留原请求预算；其窗口、关闭、宿主、资源及归档门槛各自进入总报告。并发不会降低 strict 条件。配置、资源边界和回执见[并行冷重放](parallel-cold.md)。
 
