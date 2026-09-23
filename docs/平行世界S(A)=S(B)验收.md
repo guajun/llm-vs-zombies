@@ -105,3 +105,56 @@ holes U\C = 1565, dangling C\U = 0, conflicts = 0
 - `experiments/runs/world-e10` / `-s42-c0` / `-c1`
 - `experiments/runs/world-f10` / `-s42-c0` / `-c1`
 - 计划：`work/m1-world6.json`
+
+## 独立检出复验（P3，2026-09-24）
+
+前面的复验都在**同一个检出**里跑两个世界。这一节回答另一件事：**两个互不相干的检出**各自准备、各自构建，用同一个 plan，是否也得到同一条 S 轨迹——也就是 `docs/并行实验约定.md` 里"独立检出 + 最后联合实验结果"这条路本身能不能用。
+
+| 项 | 值 |
+|---|---|
+| 检出 | `work/p3-world-c`（走网络装 AvZ 子模块）与 `work/p3-world-d`（`-Offline` + 本地镜像） |
+| 准备 | 各自 `tools/prepare-checkout.ps1` 自检 pass（518.8 s / 525.1 s），ctest 21/21 |
+| 代码 | 两个 HEAD 都是 `d419e91cd72db5b96abee915ae38f83cda033dbe` |
+| 计划 | `work/p3.json`（同一份，schema `lvz.evaluation-plan.v2`，2000 tick、seed 42、smoke 档、`sound_effects_allocation_none_v1`） |
+| 归一化表 | `/sound_effects/app_update_count=1500` 先、`/app/mj_clock=1340` 后，两边逐字相同 |
+| 执行方式 | **串行**（并发跑两个世界会撞 `private_launch` 的窗口观察，见 #19/#21） |
+| 命令 | `python -m llm_vs_zombies.evaluation run work/p3.json --output experiments/runs/p3-{c3,d3}` |
+| 用时 | 721.3 s / 855.4 s（后者与离线测试、构建并行，机器更挤） |
+
+### 结果
+
+| 项 | 结果 |
+|---|---|
+| 门槛 | 两个世界 19 条里，除 smoke 主动排除的 `full_cycle` / `ten_cold_starts` 外**全 pass**（含 `private_launch`、`archive_integrity`、`scenario`、`engine_replay`） |
+| 归档 | 两边都是 `records=4375`、`states=201`、`last_tick=5151` |
+| 冷重放 | 各自 source → replay 都 pass（`cold_starts_verified = 2/2`） |
+| 逐边界 digests | **4000 / 4000 全同**：`digest_difference_count = 0`、`first_digest_difference = null` |
+| 状态差 | `boundaries_with_any_difference = 0`，**B(0) 无差异**（报告里 `baseline` 为空） |
+| 整文件字节 | 不同（`plain_equal = false`）——差异只在 `/payload/request_id` 这个**每 run 的请求标签**上（4000 条），不是状态 |
+| 两个世界的 B(0) | `mj_clock = 1340`、`app_update_count = 1500`，都等于声明表里的共同目标 |
+
+比对命令（只读，不启动游戏）：
+
+```powershell
+python tools/compare_worlds.py --a work/p3-world-c/experiments/runs/p3-c3-s42-c0 `
+                               --b work/p3-world-d/experiments/runs/p3-d3-s42-c0 `
+                               --json work/p3-c3-d3-diff.json
+```
+
+### 结论
+
+`S(A) == S(B)` 不依赖"两个世界跑在同一个检出里"：**独立检出这条路本身是可用的**，两个全新克隆各自 `prepare-checkout` 之后直接跑就得到同一条轨迹，不需要给世界之间加锁。
+
+### 不声称什么
+
+- 不等于严格档（仍是 smoke：`full_cycle`、`ten_cold_starts` 未过）
+- 不等于覆盖全部内部状态（未覆盖字段见 `docs/determinism.md` 与配方完整性检查的 1565 条 `/board/<原始地址>`）
+- **不等于并发跑得通**：本次是串行；并发仍会撞窗口观察（#19/#21）
+- 计划里 `reason` 写的是 `P3 concurrent acceptance`——那是这套 plan 最初的用途标签，本次是串行执行
+
+### 本次证据位置
+
+- `work/p3-world-c/experiments/runs/p3-c3*`、`work/p3-world-d/experiments/runs/p3-d3*`（worktree 内，gitignored）
+- 比对报告：`work/p3-c3-d3-diff.json`（`compare_worlds.py --json` 的完整输出）
+- 计划：`work/p3-world-{c,d}/work/p3.json`
+- 准备日志：`work/p3-evidence/world-{c,d}-prepare.log`
