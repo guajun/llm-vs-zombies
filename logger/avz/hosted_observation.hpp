@@ -13,6 +13,9 @@
 //   Open()   - the run lock is held, before the first frame
 //   Sample() - once per granted frame, after AvZ's RunScript()
 //   Flush()  - segment boundaries and close
+// Every line is flushed as it is written (issue #88: the batched writer left a
+// 0-byte file behind when the game died mid-run), so this evidence survives a
+// crash on the frame it describes.
 //   Close()  - capture closed
 // Without the switch this translation unit compiles to four inert functions
 // and a build never calls them, let alone creates the file;

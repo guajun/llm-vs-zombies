@@ -2,21 +2,24 @@
 set(AVZ_SCRIPT "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_script.cpp")
 set(AVZ_HOOK "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_hook.cpp")
 set(AVZ_CARD "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_card.cpp")
+set(AVZ_COROUTINE "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_coroutine.cpp")
 # The transformed script source is the frame entry the resident runtime drives;
 # the hosted-script test links the very same generated file.
 set(AVZ_SCRIPT_OVERLAY "${CMAKE_CURRENT_BINARY_DIR}/avz_script_overlay.cpp")
 file(READ "${AVZ_SCRIPT}" script_source)
 file(READ "${AVZ_HOOK}" hook_source)
 file(READ "${AVZ_CARD}" card_source)
+file(READ "${AVZ_COROUTINE}" coroutine_source)
 # Git checkouts can use LF or CRLF. Review the same source bytes after only
 # normalizing line endings; do not disable source identity checks for CI.
-foreach(source_name script hook card)
+foreach(source_name script hook card coroutine)
   string(REPLACE "\r\n" "\n" ${source_name}_source "${${source_name}_source}")
   string(SHA256 ${source_name}_hash "${${source_name}_source}")
 endforeach()
 if(NOT script_hash STREQUAL "9457a13e056aa785d8efb5de8616a19c04107b75d60c9607eea9b778d8134d7b" OR
    NOT hook_hash STREQUAL "2376e147e671b6ef8dbbae33811b654f92e29c7f18c4d9989d394cd4c5537134" OR
-   NOT card_hash STREQUAL "d377619432d1c1a5bd060d851a3be4f46bc0768094bb2a401fbfcc67a84ff1d0")
+   NOT card_hash STREQUAL "d377619432d1c1a5bd060d851a3be4f46bc0768094bb2a401fbfcc67a84ff1d0" OR
+   NOT coroutine_hash STREQUAL "8840adfd08b113828b4485a6e89120d96c77e1cb96ac68127860198b4b025cfb")
   message(FATAL_ERROR "Pinned AvZ hook/script source changed; review runtime boundary overlay before rebuilding")
 endif()
 string(REPLACE "static ALogger<AMsgBox> logger;" "static lvz::runtime::DiagnosticLogger logger;" script_source "${script_source}")
@@ -52,8 +55,29 @@ string(REPLACE "        __aig.hInstance = hinstDLL;"
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/avz_hook_overlay.cpp" "#include \"determinism/audit.hpp\"\n${hook_source}")
 string(REPLACE "    AWaitForFight(selectInterval == 0);" "    if (!lvz::runtime::Started()) AWaitForFight(selectInterval == 0);" card_source "${card_source}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/avz_card_overlay.cpp" "#include \"runtime/runtime.hpp\"\n${card_source}")
-list(REMOVE_ITEM AVZ_SOURCES "${AVZ_SCRIPT}" "${AVZ_HOOK}" "${AVZ_CARD}")
-list(APPEND AVZ_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/avz_script_overlay.cpp" "${CMAKE_CURRENT_BINARY_DIR}/avz_hook_overlay.cpp" "${CMAKE_CURRENT_BINARY_DIR}/avz_card_overlay.cpp")
+# __AWait::await_suspend() (issue #88): the original
+#     if (!AConnect(_time, func)) func();
+# assumes AConnect() only runs the operation when it succeeds. Push() also runs
+# it when the requested time is already due ("现在要立即运行的操作") and then
+# reports failure, so that line resumed the coroutine a second time - inside
+# await_suspend, which runs AWaitForFight() and can cross the card-select ->
+# fight transition, the very step that moves ANowTime from UNINIT to due. The
+# second resume ran the body past its next co_await while that wait's operation
+# stayed queued; when the leftover fired after the body had returned, it called
+# resume() on a destroyed coroutine frame (access violation in RunOperation).
+# The overlay decides the immediate case once, so every co_await resumes exactly
+# once and no operation outlives the suspension point it belongs to.
+set(await_suspend_needle "        if (!AConnect(_time, func))\n            func();")
+string(FIND "${coroutine_source}" "${await_suspend_needle}" await_suspend_position)
+if(await_suspend_position LESS 0)
+  message(FATAL_ERROR "Reviewed co_await suspension site is missing")
+endif()
+string(REPLACE "${await_suspend_needle}"
+  "        if (ANowTime(_time.wave) >= _time.time) {\n            func();\n        } else if (!AConnect(_time, func)) {\n            func();\n        }"
+  coroutine_source "${coroutine_source}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/avz_coroutine_overlay.cpp" "#include \"runtime/runtime.hpp\"\n${coroutine_source}")
+list(REMOVE_ITEM AVZ_SOURCES "${AVZ_SCRIPT}" "${AVZ_HOOK}" "${AVZ_CARD}" "${AVZ_COROUTINE}")
+list(APPEND AVZ_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/avz_script_overlay.cpp" "${CMAKE_CURRENT_BINARY_DIR}/avz_hook_overlay.cpp" "${CMAKE_CURRENT_BINARY_DIR}/avz_card_overlay.cpp" "${CMAKE_CURRENT_BINARY_DIR}/avz_coroutine_overlay.cpp")
 set(AVZ_SMART "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_smart.cpp")
 file(READ "${AVZ_SMART}" smart_source)
 string(REPLACE "\r\n" "\n" smart_source "${smart_source}")

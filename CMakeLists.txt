@@ -42,7 +42,10 @@ if(LVZ_AVZ_HOSTED_SCRIPT)
   # The observation writer and the weak default publisher exist only in a
   # hosted build; the name below is what the activation line in
   # <run>/decisions/hosted-script.jsonl reports.
-  target_sources(recorder PRIVATE logger/avz/hosted_observation.cpp logger/avz/hosted/observe_default.cpp)
+  # hosted_crash_probe.cpp is the same shape: it is the first-chance exception
+  # log (issue #88), and a default build links neither it nor its handler.
+  target_sources(recorder PRIVATE logger/avz/hosted_observation.cpp logger/avz/hosted_crash_probe.cpp
+    logger/avz/hosted/observe_default.cpp)
   target_compile_definitions(recorder PRIVATE LVZ_AVZ_HOSTED_SCRIPT=1)
   target_compile_definitions(recorder PRIVATE "LVZ_AVZ_HOSTED_SCRIPT_NAME=\"${LVZ_AVZ_HOSTED_SCRIPT_NAME}\"")
   # Audit-only hosted-cannon policy: the overlay of the pinned cob manager plus
@@ -231,6 +234,24 @@ target_link_options(hosted_observation_default_tests PRIVATE -static)
 set_target_properties(hosted_observation_default_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
 add_test(NAME hosted_observation_default COMMAND hosted_observation_default_tests)
 
+# Hosted first-chance exception log (<run>/decisions/hosted-crash-probe.log).
+# Same two-way build as the observation writer: the hosted target raises a real
+# access violation in a child process and reads the line it left behind, the
+# default target asserts the file is never created.
+add_executable(hosted_crash_probe_tests tests/hosted_crash_probe_tests.cpp logger/avz/hosted_crash_probe.cpp)
+target_compile_definitions(hosted_crash_probe_tests PRIVATE LVZ_AVZ_HOSTED_SCRIPT=1)
+target_include_directories(hosted_crash_probe_tests PRIVATE logger/avz)
+target_compile_options(hosted_crash_probe_tests PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+target_link_options(hosted_crash_probe_tests PRIVATE -static)
+set_target_properties(hosted_crash_probe_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+add_test(NAME hosted_crash_probe COMMAND hosted_crash_probe_tests)
+
+add_executable(hosted_crash_probe_default_tests tests/hosted_crash_probe_tests.cpp logger/avz/hosted_crash_probe.cpp)
+target_include_directories(hosted_crash_probe_default_tests PRIVATE logger/avz)
+target_compile_options(hosted_crash_probe_default_tests PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+target_link_options(hosted_crash_probe_default_tests PRIVATE -static)
+set_target_properties(hosted_crash_probe_default_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+add_test(NAME hosted_crash_probe_default COMMAND hosted_crash_probe_default_tests)
 # Hosted cannon shots (issue #84, open item 2). aCobManager.Fire is a direct
 # engine call, so the runtime's request journal never sees it; the audit-only
 # overlay of the pinned AvZ cob manager adds one record per shot instead. Two
