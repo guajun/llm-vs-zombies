@@ -68,6 +68,28 @@ class Plan:
     # v1 scalar keys app_update_count/mj_clock are read by Plan.load and never
     # written back: they become entries whose reason records the legacy origin.
     b0_normalization: tuple = ()
+    # Scenario and run length. ``scenario`` names a launcher registry entry
+    # (reference save, card order, expected Board::Scene()); the default is the
+    # only scenario that existed before this field, so a plan without it keeps
+    # today's behaviour. ``flags_to_complete`` is how many flags the source run
+    # finishes before it stops by itself; the ``full_cycle`` gate stays "at
+    # least one flag completed" either way.
+    scenario: str = "liangyi"
+    flags_to_complete: int = 1
+
+    def scenario_spec(self):
+        """The launcher registry entry this plan's scenario names.
+
+        An unknown scenario fails here, before any process is started or any
+        evidence directory is created.
+        """
+        from .launcher import scenario_spec
+        return scenario_spec(self.scenario)
+
+    @property
+    def expected_scene(self) -> int:
+        """``Board::Scene()`` the loaded board must report (liangyi: 3 = fog)."""
+        return self.scenario_spec().expected_scene
 
     def table(self) -> list:
         """The declared table in canonical, validated entry form."""
@@ -83,6 +105,7 @@ class Plan:
             raise ValueError("b0_normalization must be an ordered array of entries")
         if self.schema != PLAN_SCHEMA or self.tier not in {"smoke", "strict"}:
             raise ValueError("unsupported evaluation schema or tier")
+        self.scenario_spec()
         self.table()
         if not isinstance(self.seeds, (tuple, list)) or not self.seeds or len(set(self.seeds)) != len(self.seeds):
             raise ValueError("seeds must be a nonempty set of explicitly ordered unique uint32 values")
@@ -92,6 +115,8 @@ class Plan:
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be an integer in 1..{maximum}")
+        if type(self.flags_to_complete) is not int or not 1 <= self.flags_to_complete <= 100:
+            raise ValueError("flags_to_complete must be an integer in 1..100")
         if type(self.cold_workers) is not int or self.cold_workers not in (1, 2):
             raise ValueError("cold_workers must be 1 or 2")
         if self.chunk_ticks > self.tick_budget:
@@ -185,10 +210,24 @@ def readiness(plan: Plan, checks: dict[str, dict]) -> dict:
             "scope": "tested game/runtime/scenario/seed set/trajectory; audit schema has documented uncovered fields"}
 
 
-def full_cycle_completed(initial: dict, final: dict, maximum_wave: int) -> bool:
+def completed_flags(initial: dict, final: dict) -> int | None:
+    """Flags finished since the initial observation, or None when unobserved."""
     before, after = initial.get("completed_rounds"), final.get("completed_rounds")
-    return (type(before) is int and type(after) is int and after > before
-            and maximum_wave >= 20 and final.get("scene") == 3)
+    return after - before if type(before) is int and type(after) is int else None
+
+
+def full_cycle_completed(initial: dict, final: dict, maximum_wave: int, flags_to_complete: int = 1,
+                         expected_scene: int = 3) -> bool:
+    """At least ``flags_to_complete`` flags were finished, after reaching wave 20.
+
+    The default (one flag, the historic scene 3) is the definition this gate has
+    always used. ``expected_scene`` comes from the scenario registry, because a
+    scenario's board is not necessarily fog, and ``flags_to_complete`` only
+    decides how long the source run keeps playing.
+    """
+    flags = completed_flags(initial, final)
+    return (flags is not None and flags >= flags_to_complete
+            and maximum_wave >= 20 and final.get("scene") == expected_scene)
 
 
 def profile_fingerprint() -> dict:
@@ -315,14 +354,14 @@ class ScriptStrategy:
 @contextmanager
 def live_session(root: Path, name: str, plan: Plan, seed: int = 0, *, lifecycle: dict | None = None):
     from .cli import create_run
-    from .launcher import start, stop
+    from .launcher import scenario_spec, start, stop
     from .client import connect
     from .session import SessionTrace
     free = shutil.disk_usage(root).free
     if free < plan.min_free_bytes:
         raise BoundaryStop("disk_reserve_stop", {"phase": "before_launch", "free_bytes": free,
                                                  "min_free_bytes": plan.min_free_bytes})
-    run = create_run(root, root / "experiments/configs/liangyi.json", name)
+    run = create_run(root, root / scenario_spec(plan.scenario).config, name)
     if lifecycle is not None:
         lifecycle["created_run"] = str(run)
     state, client, trace, runtime_monitor = None, None, None, None
@@ -345,7 +384,7 @@ def live_session(root: Path, name: str, plan: Plan, seed: int = 0, *, lifecycle:
         try:
             with monitor:
                 state = start(root, run, timeout=plan.timeout_seconds, seed=seed, defer_preparation=True,
-                              audio_mode=plan.audio_mode)
+                              audio_mode=plan.audio_mode, scenario=plan.scenario)
                 monitor.bind_pid(state["pid"])
         finally:
             windows = retain("launch_observer", lambda: monitor.result(state["pid"] if state is not None else None))
@@ -509,12 +548,14 @@ def _coverage_passed(report):
 def _play_source(client, trace, strategy_path, plan, seed, initial_observation, first, run, budget):
     observation = first["observation"]
     maximum_wave = max(initial_observation["wave"], observation["wave"])
+    expected_scene = plan.expected_scene
     strategy = ScriptStrategy(client, trace, strategy_path, plan.chunk_ticks)
     pauses = PauseSchedule(client, run, plan.pause_points)
     pauses.after_step(observation, skip_reason=budget.stop["reason"] if budget.stop else None)
     stalled = decisions = failed_actions = 0
     while True:
-        if full_cycle_completed(initial_observation, observation, maximum_wave):
+        if full_cycle_completed(initial_observation, observation, maximum_wave, plan.flags_to_complete,
+                                expected_scene):
             outcome = "full_cycle_completed"
             break
         if observation["game_ui"] != 3:
@@ -557,7 +598,11 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
             break
     return {"final_observation": observation, "maximum_wave": maximum_wave, "decisions": decisions,
             "failed_actions": failed_actions, "outcome": outcome,
-            "full_cycle": full_cycle_completed(initial_observation, observation, maximum_wave),
+            # The gate stays "at least one flag"; flags_to_complete only decides
+            # when the loop above stops by itself.
+            "full_cycle": full_cycle_completed(initial_observation, observation, maximum_wave, 1, expected_scene),
+            "flags_completed": completed_flags(initial_observation, observation),
+            "flags_to_complete": plan.flags_to_complete,
             "resources": budget.report(), "pause_probes": pauses.finish()}
 
 
@@ -860,7 +905,9 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                         # apply_recipe rewrites observations/initial.json with the
                         # B0-bound observation; the scenario gate follows it so the
                         # recorded hash cannot go stale.
-                        add("scenario", launcher.get("scenario_verified") is True, "actual Scene 3/layout/card verification", run / "observations/initial.json")
+                        add("scenario", launcher.get("scenario_verified") is True,
+                            f"actual Scene {plan.expected_scene}/layout/card verification",
+                            run / "observations/initial.json")
                         write_json(run / "initialization-recipe.json", recipe)
                         add("fixed_rng", True, recipe, run / "initialization-recipe.json")
                         budget = BoundaryBudget(root, plan, report_path=run / "evaluation-resources.json")
@@ -885,7 +932,10 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                         add("pause_invariance", _coverage_passed(ending["pause_probes"]), ending["pause_probes"], run / "pause-probes-during-play.json")
                         add("full_cycle", ending["full_cycle"], {"maximum_wave": ending["maximum_wave"],
                             "initial_rounds": initial_observation.get("completed_rounds"),
-                            "final_rounds": ending["final_observation"].get("completed_rounds")}, run / "experiment-end.json")
+                            "final_rounds": ending["final_observation"].get("completed_rounds"),
+                            "flags_completed": ending.get("flags_completed"),
+                            "flags_to_complete": plan.flags_to_complete,
+                            "expected_scene": plan.expected_scene}, run / "experiment-end.json")
                         source_completed = True
                 except Exception as error:
                     primary = error_detail(error, prefer_report=True)
@@ -1009,6 +1059,12 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("output", type=Path)
     sample.add_argument("--tier", choices=("smoke", "strict"), default="smoke")
     sample.add_argument("--strategy")
+    sample.add_argument("--scenario", default="liangyi",
+                        help="Scenario registry name (liangyi, jingdian12); an unknown name is rejected "
+                             "before the plan is written")
+    sample.add_argument("--flags-to-complete", type=int, default=1, metavar="1..100",
+                        help="Flags the source run finishes before stopping (default 1). A long run "
+                             "(two flags, pool endless) needs flags-to-complete 2 plus a large tick budget")
     sample.add_argument("--audio-mode", choices=("original", sound_effects.MODE), default="original")
     sample.add_argument("--b0-normalize", action="append", default=None, metavar="JSON",
                         help="Declared B(0) normalization entry as a JSON object {field, target, reason}; "
@@ -1057,7 +1113,8 @@ def main(argv: list[str] | None = None) -> int:
                         min_free_bytes=args.min_free_bytes, packaging_reserve_bytes=args.packaging_reserve_bytes,
                         disk_check_ticks=args.disk_check_ticks, pause_points=args.pause_points,
                         strategy=str(Path(args.strategy).resolve()) if args.strategy else None,
-                        audio_mode=args.audio_mode, b0_normalization=tuple(table)).validate()
+                        audio_mode=args.audio_mode, b0_normalization=tuple(table),
+                        scenario=args.scenario, flags_to_complete=args.flags_to_complete).validate()
             write_json(args.output, asdict(plan))
             print(args.output)
             if plan.b0_normalization:

@@ -15,7 +15,7 @@
 .\tools\launch-experiment.ps1 -Name headless-001
 ```
 
-最后一条命令创建新 run、复制私有环境、后台启动、注入统一 runtime，并通过 IPC 选择模式与卡片。成功结果包含 `pid`、`creation_time`、`endpoint`、`hello`、`initial_observation`。初始化只在观察确认实际 `Scene==3`、4 曾/6 花/2 伞与指定卡序一致后返回 ready。使用 `-NoInitialize` 可仅启动并建立 IPC，供诊断或其他受控初始化流程使用。重复实验使用新的 Name。
+最后一条命令创建新 run、复制私有环境、后台启动、注入统一 runtime，并通过 IPC 选择模式与卡片。成功结果包含 `pid`、`creation_time`、`endpoint`、`hello`、`initial_observation`。对默认 scenario `liangyi`，初始化只在观察确认实际 `Scene==3`、4 曾/6 花/2 伞与指定卡序一致后返回 ready；其它 scenario 按各自注册表规则校验（`launcher` CLI 的 `--scenario`，见下）。使用 `-NoInitialize` 可仅启动并建立 IPC，供诊断或其他受控初始化流程使用。重复实验使用新的 Name。
 
 ```powershell
 .\tools\launch-experiment.ps1 -Name headless-001 -Stop
@@ -23,14 +23,29 @@
 
 Stop 校验 PID、进程创建时间与完整引擎路径，仅终止本 run 创建的进程。结束实验前应由客户端调用 runtime 的停止记录方法，让日志完整落盘；强制终止不是正常录制收尾。
 
+## Scenario 注册表
+
+`src/llm_vs_zombies/launcher.py` 的 `SCENARIOS` 把"名称 → 存档 + 运行配置 + 期望卡片顺序 + 期望场景 + 校验规则"放在一处；默认是 `liangyi`，缺省行为与只有两仪时逐字相同：
+
+| scenario | 存档 | 运行配置 | 卡序 | 期望场景 | 校验 |
+|---|---|---|---|---|---|
+| `liangyi` | `experiments/scenarios/liangyi/game1_13.dat` | `experiments/configs/liangyi.json` | `[16,30,14,63,15,2,20,17,8,27]` | `Scene()==3`（雾夜）| 精确阵型（4 曾/6 花/2 伞/6 南瓜/8 荷叶）+ 卡序 |
+| `jingdian12` | `experiments/scenarios/jingdian12/game1_13.dat` | `experiments/configs/jingdian12.json` | `[14,63,35,15,16,17,2,27,30,8]` | `Scene()==2`（泳池）| 战斗 + 卡序 + 至少 12 门玉米加农炮（刻意宽松）|
+
+- 固定输入（`REQUIRED_INPUTS`）由所选 scenario 推导：公共游戏文件加该 scenario 的存档，全部按 `dependencies.lock.json` 核对 SHA256 与尺寸；`launcher.json.input_hashes` 与 `scenario` 字段记录本次实际使用的那一份。
+- run 目录的 `config.json` 声明了 `scenario_save` 时，`prepare` 会核对它与所选 scenario 的存档一致：拿 A 场景的配置建 run、再用 B 场景启动，会在复制沙盒前报错，不会出现 inputs 与沙盒来自两个场景的混合证据。
+- `verify_scenario()` 按 scenario 分派，使用注册表的期望场景号而不是写死的 3。`jingdian12` 的阵型细节**故意**不校验（真机载入前没有可靠形状），收紧待真机；见 `experiments/scenarios/jingdian12/README.md`。
+- 未知 scenario 名在任何进程启动前报错，并列出已知名称。
+- 评测侧入口：`evaluation plan --scenario jingdian12`（写进 plan 的 `scenario` 字段，缺省 `liangyi`）；`evaluation run` 连同 `launcher` 的 `--scenario` 一起透传。长局用法见 `docs/evaluation.md`。
+
 ## 隔离与初始化流程
 
 1. 所有固定本地输入先核对 SHA256 与尺寸。recorder.dll 还必须与本 run 创建时的绑定哈希一致。
 2. 资源、引擎、bootstrap、runtime 复制进 `experiments/runs/<name>/sandbox`。原版会自行改变工作目录，因此不用仅设置 cwd 的方式假装隔离。复制后的资源逐文件记入哈希清单；每局有独立 `recorder.cfg`，不会依赖全局激活状态。
-3. 生成单个 `Experiment` 用户的合成档案（ID 1、已通关、10 卡槽），并放置原始两仪参考存档；完全不读取、复制或修改玩家真实 `users.dat`。固定档案只定义进度和选择条件，不代表已固定完整 RNG。
+3. 生成单个 `Experiment` 用户的合成档案（ID 1、已通关、10 卡槽），并放置所选 scenario 的参考存档（缺省为原始两仪存档）；完全不读取、复制或修改玩家真实 `users.dat`。固定档案只定义进度和选择条件，不代表已固定完整 RNG。
 4. 原始引擎以 `CREATE_SUSPENDED` 创建，主线程恢复前注入 bootstrap 并完成显式初始化。远程线程每一步最多等待 10 秒，失败终止刚创建的进程。bootstrap 安装失败不会继续启动游戏。
 5. bootstrap 只改本进程主 EXE 的导入表：`GetProcAddress` 获取的 `SHGetFolderPathA/W` 将常见 appdata 路径重定向到私有目录；PopCap 注册表入口重定向到 `HKCU\Software\LLMVsZombies\<PID>-<creation time>`；游戏 mutex 添加 PID；阻止显示/激活窗口与切换显示模式；屏蔽外部程序启动和阻塞消息框，错误写入日志。没有全局 hook，没有替换系统 DLL。原窗口与 DirectDraw 仍存在。
-6. 按已记录的 PID/创建时间/EXE 路径注入该 run 自己的 runtime.dll，然后连接 `\\.\pipe\llm-vs-zombies-<pid>`。游戏线程执行 `initialize`，使用 mode 13 与完整卡序 `[16,30,14,63,15,2,20,17,8,27]`；63 为模仿冰。客户端轮询实际初始化状态，错误与超时均停止自己创建的进程并保留证据。
+6. 按已记录的 PID/创建时间/EXE 路径注入该 run 自己的 runtime.dll，然后连接 `\\.\pipe\llm-vs-zombies-<pid>`。游戏线程执行 `initialize`，使用所选 scenario 的 mode 与完整卡序（缺省 `liangyi` 为 mode 13 与 `[16,30,14,63,15,2,20,17,8,27]`，63 为模仿冰）。客户端轮询实际初始化状态，错误与超时均停止自己创建的进程并保留证据。
 
 现阶段只支持已锁定 1.0.0.1051 引擎。引擎的动态 API 路径、存档格式和窗口行为需要该版本实机证据支持；不得把主 EXE IAT 隔离泛化成适用于任意游戏/任意插件的安全沙箱。DLL 使用 ANSI 路径的原版约束仍在，启动器拒绝过长或当前系统编码不可表示的实验路径。
 

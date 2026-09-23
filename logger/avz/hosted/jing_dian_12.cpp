@@ -8,11 +8,23 @@
 // stop key), so the hosted build takes the coroutine body and launches it from
 // there - see logger/avz/hosted_script.hpp.
 //
-// Two things to know before enabling this in a live run:
-//   * ASetZombies/ASelectCards configure the level. The runtime's own
-//     `initialize` request also selects cards, and the runtime refuses a card
-//     list whose size does not match the seed slots, so the hosted script
-//     should either keep them identical to the request or drop these two calls.
+// What this copy takes from the tutorial, and what it deliberately leaves out
+// (docs/avz-script-hosting.md section 3):
+//   * `ASetZombies` is KEPT: the zombie generation list has no other path into
+//     the level. The runtime's `initialize` request only enters the game mode
+//     and selects cards; nothing else would set this list.
+//   * `ASelectCards` is DROPPED: the runtime's `initialize` request owns card
+//     selection (the launcher's scenario registry declares the exact order),
+//     and the runtime refuses a list whose size does not match the seed slots.
+//     Leaving the tutorial call in would be a second, competing selection of
+//     the same ten slots, made from inside the level-load path that the
+//     overlay already skips (`lvz::runtime::Started()` returns before
+//     `AWaitForFight`). The card order to compare against is the registry's:
+//     experiments/scenarios/jingdian12/README.md.
+//   * The rest of the body (the `ATime` waits, `AutoSetList`, the P6 firing
+//     loop) is verbatim.
+//
+// One more thing to know before enabling this in a live run:
 //   * `aCobManager.Fire` is a direct engine call (AAsm::Fire -> PvZ 0x466D50),
 //     not one of the runtime's `plant`/`shovel`/`spawn` actions: it is not in
 //     the request journal, so a hosted run's fires are not audited as actions.
@@ -35,18 +47,6 @@ ACoroutine Script() {
         ABY_23, // 白眼
         AHY_32, // 红眼
         ATT_18, // 跳跳
-    });
-    ASelectCards({
-        AICE_SHROOM,   // 寒冰菇
-        AM_ICE_SHROOM, // 模仿寒冰菇
-        ACOFFEE_BEAN,  // 咖啡豆
-        ADOOM_SHROOM,  // 毁灭菇
-        ALILY_PAD,     // 荷叶
-        ASQUASH,       // 倭瓜
-        ACHERRY_BOMB,  // 樱桃炸弹
-        ABLOVER,       // 三叶草
-        APUMPKIN,      // 南瓜头
-        APUFF_SHROOM,  // 小喷菇
     });
 
     co_await ATime(1, -599);
