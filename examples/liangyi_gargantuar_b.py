@@ -17,12 +17,14 @@ Fixed order after the B(0) marker:
 5. TAIL     advance TAIL_CHUNK_TICKS per decision until the budget is spent.
 
 ``examples/liangyi_gargantuar_b.py`` is this file with the single fork constant
-``FORK_EXTRA_PUFF_COL`` set to a column instead of ``None``. Branch B then inserts
-exactly one extra puff-shroom request (``advance_ticks=0``, same tick as the shared
-plant) after stage 3. Every other request has the same method, action list and
-advance budget as its counterpart in the other script, so A and B share one prefix
-and diverge by one request only. Observed board versions naturally differ after the
-fork because the two branches no longer hold the same state.
+``PUFF_COL`` set to another column. The bait puff lands one column further along the
+gargantuar's path, so the two branches share one request prefix and diverge from the
+plant request onward. Both files issue the same number of requests with the same
+methods and advance budgets; only the plant column differs. A second puff-shroom in
+the same tick is not usable as a fork: the seed card is on cooldown right after the
+first plant, and the engine rejects it with ``card_not_usable``. Observed board
+versions naturally differ after the fork because the two branches no longer hold the
+same state.
 
 Geometry the stage ticks must satisfy (all from ``work/replay-research``, the
 binary-verified decompilation of the pinned engine):
@@ -57,11 +59,7 @@ PUFF_TYPE = 8              # APlantType APUFF_SHROOM (小喷菇)
 # Scenario geometry, 1-based lawn coordinates.
 GIANT_ROW = 6              # row the gargantuar is spawned into
 GIANT_COL = 9              # column the gargantuar appears inside
-PUFF_COL = 7               # column of the shared bait puff-shroom
-
-# Fork point. Branch A sends no extra action; branch B plants one more puff-shroom
-# at this column and is otherwise request-for-request identical.
-FORK_EXTRA_PUFF_COL = 6
+PUFF_COL = 6               # bait column, and the fork constant (branch A uses 7)
 
 # Stage tick counts.
 APPROACH_TICKS = 400       # spawn -> puff planted
@@ -116,10 +114,8 @@ class GargantuarScenario:
             self.plant_tick = tick
             return {"actions": [_plant(PUFF_TYPE, GIANT_ROW, PUFF_COL)], "advance_ticks": 0}
         if not self.fork_done:
+            # The fork is the bait column itself (PUFF_COL); branch A sets it to 7.
             self.fork_done = True
-            if FORK_EXTRA_PUFF_COL is not None:
-                # Fork point: branch B only. Same tick, same row, one extra plant.
-                return {"actions": [_plant(PUFF_TYPE, GIANT_ROW, FORK_EXTRA_PUFF_COL)], "advance_ticks": 0}
         smash = tick - self.plant_tick
         if smash < SMASH_TICKS:
             return {"actions": [], "advance_ticks": _step(SMASH_TICKS - smash, ADVANCE_CHUNK_TICKS, remaining)}
