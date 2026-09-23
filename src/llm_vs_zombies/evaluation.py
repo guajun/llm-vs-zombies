@@ -278,6 +278,22 @@ def private_launch_passed(state: dict) -> bool | None:
     return True if status == "pass" else False if status == "fail" else None
 
 
+def infrastructure_components(item: dict, runtime_status, launcher: dict, host: dict, resource) -> dict:
+    """Name each evidence source the replay-eligibility aggregate depends on.
+
+    The aggregate itself is unchanged; this only makes an unproven component
+    attributable, so a skipped replay names what actually failed instead of
+    implying that the recording was broken.
+    """
+    def state(passed) -> str:
+        return "pass" if passed is True else "fail" if passed is False else "unverified"
+    return {"recording": state(item.get("passed_recording")),
+            "runtime_windows": state(runtime_status),
+            "private_launch": state(private_launch_passed(launcher)),
+            "host_identity": state(host.get("matches_archive") is True and host.get("unchanged") is True),
+            "resource_limits": state(isinstance(resource, dict) and resource.get("stop") is None)}
+
+
 def _write_report(output: Path, report: dict, plan: Plan) -> None:
     report["readiness"] = readiness(plan, report["checks"])
     write_json(output / "evaluation.json", report)
@@ -733,9 +749,10 @@ def _retain_session(plan, output, case, add, run, role, lifecycle, *, primary=No
     resource = read_optional(run / "evaluation-resources.json")
     add("resource_limits", isinstance(resource, dict) and resource.get("stop") is None,
         {"role": role, "resources": resource}, run / "evaluation-resources.json")
-    item["infrastructure_passed"] = (item.get("passed_recording") is True and passed is True
-        and private_launch_passed(launcher) is True and host.get("matches_archive") is True
-        and host.get("unchanged") is True and isinstance(resource, dict) and resource.get("stop") is None)
+    item["infrastructure_components"] = infrastructure_components(item, passed, launcher, host, resource)
+    item["infrastructure_failures"] = sorted(name for name, value
+        in item["infrastructure_components"].items() if value != "pass")
+    item["infrastructure_passed"] = not item["infrastructure_failures"]
     # The external receipt and sealed run stay immutable after their hashes
     # are attached to gates. The aggregate also appears in the seed case.
     return item, trajectory
@@ -820,8 +837,13 @@ def run_cold_attempt(root, plan, output, seed, repeat, trajectory):
             cold_retained = {"infrastructure_passed": False}
     equal = replay_result is not None and replay_result.get("equal") is True
     passed = equal and cold_retained["infrastructure_passed"] and cold_error is None
+    failed_gates = sorted(name for name, items in gates.items()
+                          if any(item["status"] != "pass" for item in items))
+    if not equal:
+        failed_gates.append("engine_replay")
     case["cold_starts"].append({"kind": "replay", "run": str(cold_run),
-        "report": str(destination / "replay-report.json"), "passed": passed, "error": cold_error})
+        "report": str(destination / "replay-report.json"), "passed": passed, "error": cold_error,
+        "failed_gates": failed_gates})
     add("engine_replay", equal, {"seed": seed, "repeat": repeat}, destination / "replay-report.json")
     case["cold_starts"][0]["passed"] = passed and all(
         gates[name] and all(item["status"] == "pass" for item in gates[name]) for name in COLD_GATES)
@@ -953,7 +975,14 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                 case["cold_starts"].append({"run": str(source_run), "kind": "source", "passed": source_passed})
                 if not source_passed:
                     case["status"] = "failed" if source_run.exists() else "startup_failed"
-                    case["replays_skipped"] = "source infrastructure or recording did not pass"
+                    blockers = list(retained.get("infrastructure_failures") or [])
+                    if trajectory is None:
+                        blockers.insert(0, "replayable_trace")
+                    if not source_completed:
+                        blockers.insert(0, "source_play_loop")
+                    case["replay_blockers"] = blockers
+                    case["replays_skipped"] = ("source infrastructure or recording did not pass: "
+                        + ", ".join(blockers)) if blockers else "source infrastructure or recording did not pass"
                     continue
                 if plan.tier == "strict" and case.get("full_cycle") is not True:
                     case.update(status="incomplete", replays_skipped="strict source did not complete two flags")
@@ -981,7 +1010,9 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                         case.setdefault("error", result["error"])
                     if not result["attempt"]["passed"]:
                         all_cold = False
-                        case["replays_skipped"] = "stopped scheduling after failed cold; all in-flight attempts retained"
+                        blockers = list(result["attempt"].get("failed_gates") or [])
+                        case["replays_skipped"] = ("stopped scheduling after failed cold; all in-flight attempts retained"
+                            + (": " + ", ".join(blockers) if blockers else ""))
                 if not all_cold:
                     case["status"] = "failed"
                     continue
