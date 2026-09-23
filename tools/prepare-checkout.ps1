@@ -174,24 +174,50 @@ function Get-FileSha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-# runtime/avz_overlay.cmake reads each file, replaces CRLF with LF and only then
-# hashes it, so the evidence below normalizes bytes the same way. A lone CR is
-# counted separately: CRCRLF (a CRLF file checked out with core.autocrlf=true)
-# is the one line-ending shape that survives normalization and really does
-# change the pinned hash.
+# runtime/avz_overlay.cmake reads each file with file(READ), replaces CRLF with
+# LF and only then hashes it. The evidence below must use the very same steps:
+# a hand-rolled "normalized SHA256" is easy to get wrong (dropping the LF while
+# replacing the pair, or decoding bytes differently) and then reports a content
+# change that never happened, which is the failure mode §2.5 warns about.
+# Get-CMakeOverlayHashes therefore asks CMake itself to hash the files, and
+# Get-SourceStats only adds byte counts for the report.
+function Get-SourceStats([string]$Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $index = 0
+    $crlfPairs = 0
+    $loneCr = 0
+    $normalizedLength = 0
+    while ($index -lt $bytes.Length) {
+        $current = $bytes[$index]
+        if ($current -eq 13 -and ($index + 1) -lt $bytes.Length -and $bytes[$index + 1] -eq 10) {
+            $crlfPairs++
+            $normalizedLength++
+            $index += 2
+            continue
+        }
+        if ($current -eq 13) { $loneCr++ }
+        $normalizedLength++
+        $index++
+    }
+    return [pscustomobject]@{
+        bytes             = $bytes.Length
+        normalized_bytes  = $normalizedLength
+        crlf_pairs        = $crlfPairs
+        lone_cr           = $loneCr
+    }
+}
+
+# Fallback for machines without cmake: the same three steps as the overlay.
 function Get-NormalizedSha256([string]$Path) {
     $bytes = [IO.File]::ReadAllBytes($Path)
     $normalized = New-Object 'System.Collections.Generic.List[byte]' ($bytes.Length)
     $index = 0
-    $crlfPairs = 0
-    $loneCr = 0
     while ($index -lt $bytes.Length) {
         if ($bytes[$index] -eq 13 -and ($index + 1) -lt $bytes.Length -and $bytes[$index + 1] -eq 10) {
-            $crlfPairs++
+            $normalized.Add([byte]10)
             $index += 2
             continue
         }
-        if ($bytes[$index] -eq 13) { $loneCr++ }
         $normalized.Add($bytes[$index])
         $index++
     }
@@ -201,12 +227,52 @@ function Get-NormalizedSha256([string]$Path) {
     } finally {
         $sha.Dispose()
     }
-    return [pscustomobject]@{
-        sha256     = (-join ($digest | ForEach-Object { $_.ToString('x2') }))
-        bytes      = $bytes.Length
-        crlf_pairs = $crlfPairs
-        lone_cr    = $loneCr
+    return (-join ($digest | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Get-CMakeOverlayHashes {
+    param([string]$Root, $Pins)
+    $cmake = Get-Command cmake -ErrorAction SilentlyContinue
+    if (!$cmake) { return $null }
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($name in $Pins.Keys) {
+        $full = (Join-Path $Root ($Pins[$name].path -replace '/', '\')).Replace('\', '/')
+        $lines.Add("set(source_$name `"$full`")")
     }
+    $lines.Add('set(pinned_sources ' + (($Pins.Keys | ForEach-Object { $_ }) -join ' ') + ')')
+    $lines.Add('foreach(source_name ${pinned_sources})')
+    $lines.Add('  if(NOT EXISTS "${source_${source_name}}")')
+    $lines.Add('    message(STATUS "pin ${source_name} missing")')
+    $lines.Add('    continue()')
+    $lines.Add('  endif()')
+    $lines.Add('  file(READ "${source_${source_name}}" ${source_name}_source)')
+    $lines.Add('  string(REPLACE "\r\n" "\n" ${source_name}_source "${${source_name}_source}")')
+    $lines.Add('  string(SHA256 ${source_name}_hash "${${source_name}_source}")')
+    $lines.Add('  message(STATUS "pin ${source_name} ${${source_name}_hash}")')
+    $lines.Add('endforeach()')
+    $probe = Join-Path ([IO.Path]::GetTempPath()) ('lvz-overlay-hash-' + [guid]::NewGuid().ToString('N') + '.cmake')
+    Set-Content -LiteralPath $probe -Value ($lines -join "`n") -Encoding utf8
+    try {
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = @(& $cmake.Source -P $probe 2>&1 | ForEach-Object { $_.ToString() })
+            $code = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previous
+        }
+    } finally {
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0) { return $null }
+    $hashes = @{}
+    foreach ($line in $output) {
+        if ($line -match '^--\s+pin\s+([a-z_]+)\s+([0-9a-f]{64})\s*$') {
+            $hashes[$matches[1]] = $matches[2]
+        }
+    }
+    if ($hashes.Count -eq 0) { return $null }
+    return [pscustomobject]@{ method = 'cmake'; hashes = $hashes }
 }
 
 function Get-AvzOverlayPins {
@@ -241,31 +307,41 @@ function Get-AvzOverlayPins {
 function Get-AvzOverlayEvidence {
     param([string]$Root)
     $pins = Get-AvzOverlayPins -Root $Root
+    $digest = Get-CMakeOverlayHashes -Root $Root -Pins $pins
+    $method = 'powershell'
+    if ($digest) { $method = $digest.method }
     $items = New-Object 'System.Collections.Generic.List[object]'
     foreach ($name in $pins.Keys) {
         $relative = $pins[$name].path
         $path = Join-Path $Root ($relative -replace '/', '\')
         $item = [ordered]@{
-            name     = $relative
-            pin      = $name
-            expected = $pins[$name].expected
-            present  = $false
-            match    = $false
+            name            = $relative
+            pin             = $name
+            expected        = $pins[$name].expected
+            present         = $false
+            match           = $false
+            sha256_normalized = $null
         }
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             $item.present = $true
-            $hash = Get-NormalizedSha256 -Path $path
-            $item.sha256_normalized = $hash.sha256
-            $item.bytes = $hash.bytes
-            $item.crlf_pairs = $hash.crlf_pairs
-            $item.lone_cr = $hash.lone_cr
-            $item.match = ($hash.sha256 -eq $pins[$name].expected)
+            $stats = Get-SourceStats -Path $path
+            $item.bytes = $stats.bytes
+            $item.normalized_bytes = $stats.normalized_bytes
+            $item.crlf_pairs = $stats.crlf_pairs
+            $item.lone_cr = $stats.lone_cr
+            if ($digest) {
+                $item.sha256_normalized = $digest.hashes[$name]
+            } else {
+                $item.sha256_normalized = Get-NormalizedSha256 -Path $path
+            }
+            $item.match = ($item.sha256_normalized -eq $pins[$name].expected)
         }
         $items.Add([pscustomobject]$item)
     }
     return [pscustomobject]@{
-        overlay = 'runtime/avz_overlay.cmake'
-        items   = $items.ToArray()
+        overlay      = 'runtime/avz_overlay.cmake'
+        hash_method  = $method
+        items        = $items.ToArray()
     }
 }
 
@@ -282,10 +358,11 @@ function Assert-AvzOverlayPins {
     $changed = @($evidence.items | Where-Object { -not $_.match })
     if ($changed.Count -gt 0) {
         $lines = $changed | ForEach-Object {
-            ("{0}: expected {1} got {2} (bytes={3} crlf_pairs={4} lone_cr={5})" -f `
-                    $_.name, $_.expected, $_.sha256_normalized, $_.bytes, $_.crlf_pairs, $_.lone_cr)
+            ("{0}: expected {1} got {2} (bytes={3} normalized_bytes={4} crlf_pairs={5} lone_cr={6})" -f `
+                    $_.name, $_.expected, $_.sha256_normalized, $_.bytes, $_.normalized_bytes, $_.crlf_pairs, $_.lone_cr)
         }
-        throw ("Pinned AvZ sources really differ from runtime/avz_overlay.cmake:`n  " + ($lines -join "`n  "))
+        throw ("Pinned AvZ sources really differ from runtime/avz_overlay.cmake " +
+            "(hashes computed the way the overlay does, $($evidence.hash_method)):`n  " + ($lines -join "`n  "))
     }
     return $evidence
 }
