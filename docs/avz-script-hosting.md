@@ -234,8 +234,9 @@ SHA256 与默认构建不同，而 run 的 `manifest.json` 绑定的是建 run �
   那一帧的 tick，不是下一帧。
 * 只在脚本发布的文本发生变化时写行；相同的帧不重复写。被 controller 停住（暂停、未授予
   帧）时 `RunTotal()` 根本不会运行，因此不会有行——文件不长就说明没有被推动。
-* 写入走与 `events.jsonl` 同一个 `BufferedWriter`（game 线程、64 KiB 批量、段边界 flush），
-  不新增线程、不引入新的同步或时序依赖。
+* 写入走与 `events.jsonl` 同一个 `BufferedWriter`，但**每写一行就 flush**（#88 之前是 64 KiB
+  批量、只在段边界落盘，真机崩溃时留下的是 0 字节文件）。不新增线程、不引入新的同步或时序
+  依赖；代价是 game 线程每帧最多一次小写入，只在状态变化时发生。
 * 默认构建（没有 `LVZ_AVZ_HOSTED_SCRIPT`）里这条路径整条不存在：`hosted_observation.cpp`
   不参与编译，AfterTick 采样钩子也不注册。
 
@@ -253,6 +254,31 @@ SHA256 与默认构建不同，而 run 的 `manifest.json` 绑定的是建 run �
 ```powershell
 Get-Content <run>\decisions\hosted-script.jsonl | Select-String 'hosted_script_state'
 ```
+
+### 7.6 首异常记录与协程等待修复（#88）
+
+托管构建还会写 `<run>\decisions\hosted-crash-probe.log`：`logger/avz/hosted_crash_probe.cpp`
+在 DLL 加载时注册一个**向量化异常处理器（VEH）**，把每个 first-chance 异常的 code、地址、
+模块+RVA、线程号、以及 recorder 最近一帧的 `tick/segment` 与脚本发布状态写进去，每行
+`WriteFile` + `FlushFileBuffers`。处理器只观测、不处理（永远 `EXCEPTION_CONTINUE_SEARCH`），
+游戏与 AvZ 的处理路径与之前逐字节相同；`tests/hosted_crash_probe_tests.cpp` 用一个真的触发
+访问违例的子进程验证"行已落盘 + 进程仍以同一个异常码退出"，默认构建则验证不生成任何文件。
+
+用这份证据定位到的根因（#88）：`avz_coroutine.cpp` 的 `__AWait::await_suspend()` 结尾是
+`if (!AConnect(_time, func)) func();`，而 `__AOpQueueManager::Push()` 在自己判定"时间已到"
+时**已经运行过一次**该操作并返回 `nullopt`，于是同一次 `co_await` 会恢复协程两次：一次在
+`await_suspend` 内部（此时 `AWaitForFight()` 正把游戏从选卡界面推进战斗，`ANowTime` 从
+UNINIT 变成"已到"），一次在它返回之后。第二次恢复让协程跑过下一个 `co_await`，而那个等待
+的操作仍留在队列里；协程体结束时栈帧被销毁（`final_suspend()` = `suspend_never`），残留操作
+到期后对已释放的协程帧调用 `resume()` → 0xc0000005，随后 AvZ 自己的 `ASeh::DoHandleDebugEvent`
+也崩在里面（所以没有 crash.txt）。
+
+`runtime/avz_overlay.cmake` 因此对 `avz_coroutine.cpp` 做了一处 overlay（子模块保持原样、
+哈希仍然钉住）：在 `await_suspend` 里先判一次"是否已到"，已到就只运行一次 `func()`，否则
+才走 `AConnect`，失败再运行一次。真机验证：修前 `hosted-c1` 在 tick 3251 崩、观测是
+`resumes 0→2→3`；修后 `hosted-c5`（源跑 + 冷重放）都在 3151/3201/3251 各恢复一次
+（`resumes 1→2→3`、`finished=1, clock_at_finish=3251`），crash-probe 里只有游戏自己的
+`0x40010006`（OutputDebugString）记录，没有访问违例。
 
 ### 7.5 验证默认构建不受影响
 

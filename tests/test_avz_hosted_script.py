@@ -81,9 +81,11 @@ class HostedObservabilityTests(unittest.TestCase):
         recorder_sources = cmake.split("set(RECORDER_SOURCES ")[1].split("\n")[0]
         self.assertNotIn("hosted", recorder_sources)
         before_switch, switch_block = cmake.split("if(LVZ_AVZ_HOSTED_SCRIPT)", 1)
-        self.assertIn("target_sources(recorder PRIVATE logger/avz/hosted_observation.cpp "
-                      "logger/avz/hosted/observe_default.cpp)", switch_block)
+        self.assertIn("logger/avz/hosted_observation.cpp", switch_block)
+        self.assertIn("logger/avz/hosted_crash_probe.cpp", switch_block)
+        self.assertIn("logger/avz/hosted/observe_default.cpp", switch_block)
         self.assertNotIn("hosted_observation.cpp", before_switch)
+        self.assertNotIn("hosted_crash_probe.cpp", before_switch)
         self.assertNotIn("observe_default.cpp", before_switch)
         writer = read("logger/avz/hosted_observation.cpp")
         self.assertIn("bool Enabled() { return false; }", writer.split("#else", 1)[1])
@@ -120,6 +122,46 @@ class HostedObservabilityTests(unittest.TestCase):
         self.assertIn("-DLVZ_AVZ_HOSTED_SCRIPT=$scriptPath", build_hosted)
         self.assertIn("recorder_sha256", build_hosted)
         self.assertIn("Get-FileHash", build_hosted)
+
+
+class HostedCrashProbeTests(unittest.TestCase):
+    """The first-chance exception log exists only in a hosted build (issue #88)."""
+
+    def assert_guarded(self, text: str, marker: str):
+        index = text.index(marker)
+        guard = text.rindex("#ifdef LVZ_AVZ_HOSTED_SCRIPT", 0, index)
+        self.assertNotIn("#endif", text[guard:index], f"{marker} is outside the build switch")
+
+    def test_recorder_uses_the_crash_probe_only_under_the_switch(self):
+        recorder = read("logger/avz/recorder.cpp")
+        for marker in ("hosted_crash_probe::Open(", "hosted_crash_probe::Context(",
+                       "hosted_crash_probe::Close()", '#include "hosted_crash_probe.hpp"'):
+            self.assertIn(marker, recorder, marker)
+            if not marker.startswith("#include"):
+                self.assert_guarded(recorder, marker)
+
+    def test_the_handler_never_handles_the_exception(self):
+        probe = read("logger/avz/hosted_crash_probe.cpp")
+        # A vectored handler that returned anything but CONTINUE_SEARCH would
+        # change the game's and AvZ's handling; the probe only witnesses.
+        self.assertIn("return EXCEPTION_CONTINUE_SEARCH;", probe)
+        self.assertNotIn("CONTINUE_EXECUTION", probe)
+        self.assertNotIn("EXCEPTION_EXECUTE_HANDLER", probe)
+        self.assertIn("AddVectoredExceptionHandler(1, Handler)", probe)
+
+    def test_crash_log_lives_in_the_archive_scoped_decisions_directory(self):
+        header = read("logger/avz/hosted_crash_probe.hpp")
+        self.assertIn('kRelativePath = "decisions/hosted-crash-probe.log"', header)
+        self.assertIn("bool Enabled() { return false; }",
+                      read("logger/avz/hosted_crash_probe.cpp").split("#else", 1)[1])
+
+    def test_both_build_modes_of_the_probe_are_tested(self):
+        cmake = read("CMakeLists.txt")
+        self.assertIn("add_test(NAME hosted_crash_probe COMMAND hosted_crash_probe_tests)", cmake)
+        self.assertIn("add_test(NAME hosted_crash_probe_default COMMAND hosted_crash_probe_default_tests)", cmake)
+        default_target = cmake.split("add_executable(hosted_crash_probe_default_tests")[1]
+        self.assertNotIn("LVZ_AVZ_HOSTED_SCRIPT",
+                         default_target.split("add_test(NAME hosted_crash_probe_default")[0])
 
 
 if __name__ == "__main__":

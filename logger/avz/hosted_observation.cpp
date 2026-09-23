@@ -60,12 +60,19 @@ void Open(const std::filesystem::path& runDirectory, const std::string& id,
     }
     isOpen = true;
     writer.Append(Line("hosted_script_active", tick, 0, ""));
+    // One line, one flush. The batch writer would hold this state in memory
+    // until 64 KiB or a segment boundary, and issue #88 showed exactly what
+    // that costs: the live crash left a 0-byte file and nothing to read.
+    writer.Flush();
 }
 
 void Sample(int tick, int segment, const std::string& fields) {
     if (!isOpen || isClosed || fields == lastFields) return;
     lastFields = fields;
     writer.Append(Line("hosted_script_state", tick, segment, fields));
+    // Per-line flush: the state a crash should be read against is on disk
+    // before the frame ends, not at the next 64 KiB batch.
+    writer.Flush();
 }
 
 void Flush() {

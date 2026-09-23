@@ -2,6 +2,7 @@
 #include "buffered_writer.hpp"
 #include "hosted_script.hpp"
 #include "hosted_observation.hpp"
+#include "hosted_crash_probe.hpp"
 #include "runtime/runtime.hpp"
 #include "runtime/diagnostics.hpp"
 #include "runtime/spawn_action.hpp"
@@ -45,6 +46,9 @@ void SampleHosted() {
     hostedFields.clear();
     lvz::hosted::Observe(hostedFields);
     hosted_observation::Sample(Clock(), std::max(0, segment), hostedFields);
+    // The crash probe carries the same state into any exception line it writes,
+    // so a fault is read against the last frame the script actually saw.
+    hosted_crash_probe::Context(Clock(), std::max(0, segment), hostedFields);
 }
 #endif
 
@@ -78,6 +82,13 @@ void OpenRun() {
     runId = runDir.filename().string();
     runLock = CreateFileW((runDir / "capture.lock").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (runLock == INVALID_HANDLE_VALUE) throw std::runtime_error("Run already locked; create a fresh run");
+#ifdef LVZ_AVZ_HOSTED_SCRIPT
+    // The crash log is opened first, under the run lock: any fault from here on
+    // - including one while the other writers open their files - is on disk
+    // with its faulting address. A probe that cannot open must not fail the
+    // run; the recorder stays the authority on whether the run is valid.
+    try { hosted_crash_probe::Open(runDir, runId); } catch (...) {}
+#endif
     try {
         writer.Open(runDir / "events.jsonl");
 #ifdef LVZ_AVZ_HOSTED_SCRIPT
@@ -190,6 +201,7 @@ void Close(bool stopRuntime=true) {
     writer.Close(); stopped=true;
 #ifdef LVZ_AVZ_HOSTED_SCRIPT
     hosted_observation::Close();
+    hosted_crash_probe::Close();
 #endif
     if (runLock != INVALID_HANDLE_VALUE) { CloseHandle(runLock); runLock=INVALID_HANDLE_VALUE; }
     std::filesystem::remove(runDir / "capture.lock");
