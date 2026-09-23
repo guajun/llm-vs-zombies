@@ -99,12 +99,25 @@ cmake --build build/hosted --target recorder
   symbol table contains `lvz::hosted::Script()` plus its coroutine
   `.resume`/`.destroy` frames; the default build contains none of them.
 
-Two behaviours of that script need a decision before the live run:
+What the hosted copy takes from the tutorial, and what it leaves out (decided
+when the scenario registry landed, `docs/launcher.md`):
 
-* `ASetZombies`/`ASelectCards` also configure the level, while the runtime's
-  `initialize` request selects cards itself and refuses a list whose size does
-  not match the seed slots. Keep them identical or drop them from the hosted
-  copy.
+* `ASetZombies` is **kept**: it is the tutorial's zombie generation list, and
+  nothing else pushes that list into the level. The runtime's `initialize`
+  request only enters the game mode and selects cards.
+* `ASelectCards` is **dropped**: `initialize` selects the cards itself and
+  refuses a list whose size does not match the seed slots, so the tutorial call
+  would be a second, competing write into the same ten slots - from inside the
+  level-load path the overlay already skips (`lvz::runtime::Started()` returns
+  before `AWaitForFight`). The order to compare against is declared once, in
+  the launcher's scenario registry
+  (`src/llm_vs_zombies/launcher.py`, `SCENARIOS["jingdian12"].cards` =
+  `[14, 63, 35, 15, 16, 17, 2, 27, 30, 8]`, i.e. the tutorial's `ASelectCards`
+  converted through `avz/framework/inc/avz_types.h`); `verify_scenario()`
+  compares the loaded seed slots against it, and
+  `experiments/scenarios/jingdian12/README.md` carries the same table. The
+  decision is restated in the file header of
+  `logger/avz/hosted/jing_dian_12.cpp`.
 * `aCobManager.Fire` is not a runtime action (next section).
 
 ## 4. What `aCobManager.Fire` really is
@@ -186,6 +199,12 @@ same formatting path runs against a real App in production.
    to show those records next to the real shots.
 3. The `INFO`-logger fault above, which blocks using AvZ logs as evidence in the
    offline harness.
+4. Scenario confirmation for `jingdian12`: the registry's `expected_scene = 2`
+   (pool) is a static read of the save, not a live observation, and its layout
+   check is deliberately loose (fight state + card order + at least 12 cob
+   cannons). The first live load has to confirm the scene and the board before
+   the check is tightened; see
+   `experiments/scenarios/jingdian12/README.md`.
 
 ## 7. 真机运行 / live run
 

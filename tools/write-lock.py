@@ -8,7 +8,9 @@ root = Path(__file__).resolve().parents[1]
 paths = ["game/original/PlantsVsZombies.exe", "game/original/PlantsVsZombies.dat",
          "game/original/main.pak", "game/original/bass.dll",
          "avz/framework/release/env2/2.9.2_2026_06_26.zip", "avz/runtime/bin/injector.exe",
-         "experiments/scenarios/liangyi/game1_13.dat"]
+         "experiments/scenarios/liangyi/game1_13.dat",
+         # One entry per scenario in src/llm_vs_zombies/launcher.py's registry.
+         "experiments/scenarios/jingdian12/game1_13.dat"]
 files = []
 for relative in paths:
     path = root / relative

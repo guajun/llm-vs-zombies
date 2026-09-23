@@ -6,6 +6,7 @@ simulation. Live acceptance remains necessary for a particular game build.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
@@ -26,15 +27,88 @@ REFERENCE_LAYOUT = {
     30: {(2, 1), (2, 2), (3, 6), (4, 6), (5, 1), (5, 2)},
     16: {(3, 1), (3, 2), (3, 3), (3, 6), (4, 1), (4, 2), (4, 3), (4, 6)},
 }
-REQUIRED_INPUTS = ("game/original/PlantsVsZombies.exe", "game/original/PlantsVsZombies.dat",
-                   "game/original/main.pak", "game/original/bass.dll",
-                   "game/local-engine/PlantsVsZombies.exe", "experiments/scenarios/liangyi/game1_13.dat")
+# 经典十二炮的卡序来自教程 jing_dian_12_co_await.cpp 的 ASelectCards，逐项按
+# avz/framework/inc/avz_types.h 的 APlantType 取值换算成本仓库的观察 id：模仿者卡片
+# 记作 49 + 被模仿的种子（AM_ICE_SHROOM = 14 -> 63），与观察里
+# `type == 48 ? imitator_type + 49 : type` 的写法一致。
+#   寒冰菇 AICE_SHROOM=14、模仿寒冰菇 AM_ICE_SHROOM=63、咖啡豆 ACOFFEE_BEAN=35、
+#   毁灭菇 ADOOM_SHROOM=15、荷叶 ALILY_PAD=16、倭瓜 ASQUASH=17、
+#   樱桃炸弹 ACHERRY_BOMB=2、三叶草 ABLOVER=27、南瓜头 APUMPKIN=30、小喷菇 APUFF_SHROOM=8
+JINGDIAN12_CARDS = [14, 63, 35, 15, 16, 17, 2, 27, 30, 8]
+# avz_types.h: ACOB_CANNON = 47（玉米加农炮）。
+COB_CANNON = 47
+COMMON_INPUTS = ("game/original/PlantsVsZombies.exe", "game/original/PlantsVsZombies.dat",
+                 "game/original/main.pak", "game/original/bass.dll",
+                 "game/local-engine/PlantsVsZombies.exe")
 
 
-def verify_inputs(root: Path) -> dict[str, str]:
+@dataclass(frozen=True)
+class Scenario:
+    """One loadable reference scenario: its save, its cards, and what "loaded" means.
+
+    ``layout`` (if non-empty) is an exact, complete expectation per plant type;
+    ``min_plants`` only requires at least N living plants of a type. Both are
+    checked against the observation of the loaded board, never against the save
+    file, and both are deliberately conservative for a scenario whose board has
+    not been confirmed live yet.
+    """
+
+    name: str
+    save: str
+    config: str
+    cards: tuple[int, ...]
+    game_mode: int
+    expected_scene: int
+    scene_label: str
+    layout: dict = field(default_factory=dict)
+    min_plants: dict = field(default_factory=dict)
+    note: str = ""
+
+    def inputs(self) -> tuple[str, ...]:
+        """The hash-locked local prerequisites of this scenario, in lock order."""
+        return (*COMMON_INPUTS, self.save)
+
+
+SCENARIOS = {
+    "liangyi": Scenario(
+        name="liangyi",
+        save="experiments/scenarios/liangyi/game1_13.dat",
+        config="experiments/configs/liangyi.json",
+        cards=tuple(DEFAULT_CARDS),
+        game_mode=13,
+        expected_scene=3,
+        scene_label="fog",
+        layout=REFERENCE_LAYOUT,
+        note="官方两仪参考存档：雾夜（Scene 3）、4 曾/6 花/2 伞 + 固定卡序"),
+    "jingdian12": Scenario(
+        name="jingdian12",
+        save="experiments/scenarios/jingdian12/game1_13.dat",
+        config="experiments/configs/jingdian12.json",
+        cards=tuple(JINGDIAN12_CARDS),
+        game_mode=13,
+        expected_scene=2,
+        scene_label="pool",
+        min_plants={COB_CANNON: 12},
+        note="AvZ 教程经典十二炮：泳池无尽（Board::Scene()==2，待真机确认）、至少 12 门玉米加农炮"),
+}
+
+
+def scenario_spec(name: str = "liangyi") -> Scenario:
+    """Registry lookup; an unknown scenario fails closed with the known list."""
+    try:
+        return SCENARIOS[name]
+    except (KeyError, TypeError):
+        raise ValueError(f"unknown scenario {name!r}; known scenarios: {', '.join(sorted(SCENARIOS))}") from None
+
+
+REQUIRED_INPUTS = scenario_spec("liangyi").inputs()
+
+
+def verify_inputs(root: Path, scenario: str = "liangyi") -> dict[str, str]:
+    spec = scenario_spec(scenario)
     locked = {item["path"]: item for item in read_json(root / "dependencies.lock.json")["files"]}
     verified = {}
-    for name in REQUIRED_INPUTS:
+    for name in spec.inputs():
         if name not in locked:
             raise ValueError(f"required input is absent from dependencies.lock.json: {name}")
         path = root / name
@@ -65,15 +139,24 @@ def synthetic_profile() -> dict[str, bytes]:
     return {"users.dat": users, "user1.dat": struct.pack("<205I", *values)}
 
 
-def prepare(root: Path, run: Path, *, audio_mode: str = "original") -> dict:
+def prepare(root: Path, run: Path, *, audio_mode: str = "original", scenario: str = "liangyi") -> dict:
     audio_mode = sound_effects.configured(audio_mode)
+    spec = scenario_spec(scenario)
     root, run = root.resolve(), run.resolve()
     if not run.is_relative_to(root / "experiments/runs"):
         raise ValueError("experiment run must be under this project's experiments/runs")
     manifest = read_json(run / "manifest.json")
     if manifest["status"] != "recording" or (run / "events.jsonl").exists():
         raise ValueError("launcher requires a fresh recording run")
-    inputs = verify_inputs(root)
+    # A run created from a scenario config records which save it was created
+    # for; the sandbox must not stage a different scenario's board than the one
+    # the archive claims.
+    configuration = read_json(run / "config.json") if (run / "config.json").is_file() else {}
+    declared = configuration.get("scenario_save")
+    if declared and str(declared).replace("\\", "/") != spec.save:
+        raise ValueError(f"run was created for scenario save {declared}, not {spec.save}; create a new run "
+                         f"with experiments/configs/{spec.name}.json")
+    inputs = verify_inputs(root, scenario)
     recorder = root / "build/recorder.dll"
     if not recorder.is_file() or sha256(recorder) != manifest["implementation"]["recorder_sha256"]:
         raise ValueError("recorder DLL differs from the build bound to this run; create a new run")
@@ -103,7 +186,7 @@ def prepare(root: Path, run: Path, *, audio_mode: str = "original") -> dict:
         userdata.mkdir(parents=True)
         for name, content in profiles.items():
             (userdata / name).write_bytes(content)
-        shutil.copy2(root / "experiments/scenarios/liangyi/game1_13.dat", userdata / "game1_13.dat")
+        shutil.copy2(root / spec.save, userdata / "game1_13.dat")
     module = sandbox / "modules"
     module.mkdir()
     for helper in helpers:
@@ -120,7 +203,7 @@ def prepare(root: Path, run: Path, *, audio_mode: str = "original") -> dict:
     state = {"schema": 1, "run": str(run), "sandbox": str(sandbox), "engine": str(game / "PlantsVsZombies.exe"),
              "native_launcher": str(module / "lvz-launcher.exe"), "bootstrap": str(module / "lvz-bootstrap.dll"),
              "runtime": str(module / "recorder.dll"), "headless_mode": "hidden_window",
-             "status": "prepared", "audio_mode": audio_mode, "input_hashes": inputs,
+             "status": "prepared", "audio_mode": audio_mode, "scenario": spec.name, "input_hashes": inputs,
              "module_hashes": {p.name: sha256(p) for p in module.iterdir() if p.suffix in (".dll", ".exe")},
              "profile_hashes": {name: hashlib.sha256(content).hexdigest() for name, content in profiles.items()},
              "resource_hashes": {p.relative_to(game).as_posix(): sha256(p) for p in game.rglob("*") if p.is_file()},
@@ -158,11 +241,13 @@ def stop(run: Path) -> dict:
 
 def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90.0, seed: int = 0,
           defer_preparation: bool = False, audio_mode: str = "original", mj_clock: int | None = None,
-          app_update_count: int | None = None, b0_normalize: list | None = None) -> dict:
+          app_update_count: int | None = None, b0_normalize: list | None = None,
+          scenario: str = "liangyi") -> dict:
     from .client import connect
     from .session import SessionTrace
     from . import b0_normalization as b0
     from . import fp_environment
+    spec = scenario_spec(scenario)
     if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
         raise ValueError("seed must be uint32")
     if type(defer_preparation) is not bool:
@@ -180,7 +265,7 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
     # the same evidence to different paths.
     root, run = Path(root).resolve(), Path(run).resolve()
     audio_mode = sound_effects.configured(audio_mode)
-    state = prepare(root, run, audio_mode=audio_mode)
+    state = prepare(root, run, audio_mode=audio_mode, scenario=spec.name)
     state["audio_mode"] = audio_mode
     state["initialization_seed"] = seed
     state["preparation_deferred"] = defer_preparation
@@ -207,7 +292,9 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
                         raise TimeoutError(f"game did not reach the main menu: game_ui={observation['game_ui']}")
                     time.sleep(0.1)
                     observation = client.observe()
-                configured = client.request("initialize", {"game_mode": 13, "cards": DEFAULT_CARDS, "seed": seed}, expect=observation["version"])
+                configured = client.request("initialize",
+                                            {"game_mode": spec.game_mode, "cards": list(spec.cards), "seed": seed},
+                                            expect=observation["version"])
                 if fp_mode:
                     activation = fp_environment.activation(configured.get("fixed_fp"), client.hello_result["game"])
                     if activation["version"] != observation["version"]:
@@ -223,7 +310,7 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"scenario initialization timed out: {initialization}")
                     time.sleep(0.1)
-                verify_scenario(observation)
+                verify_scenario(observation, spec.name)
                 if fp_mode:
                     ready_fp = fp_environment.evidence(client.request("audit_snapshot"), client.hello_result["game"])
                     if ready_fp["activation"] != state["fixed_fp_activation"]:
@@ -282,18 +369,29 @@ def verify_audio_activation(state: dict, hello: dict) -> None:
     sound_effects.receipt(state.get("audio_activation"), spec, pre_resume=True)
 
 
-def verify_scenario(observation: dict) -> None:
-    if observation.get("game_ui") != 3 or observation.get("scene") != 3:
-        raise ValueError("loaded scenario is not an active Scene 3 fog fight")
+def verify_scenario(observation: dict, scenario: str = "liangyi") -> None:
+    """Check the loaded board against the selected scenario's registry entry.
+
+    The card order and the fight scene come from the registry; the layout rules
+    are per scenario and may be exact (liangyi) or deliberately loose while a
+    board has not been confirmed live (jingdian12).
+    """
+    spec = scenario_spec(scenario)
+    if observation.get("game_ui") != 3 or observation.get("scene") != spec.expected_scene:
+        raise ValueError(f"loaded scenario is not an active Scene {spec.expected_scene} {spec.scene_label} fight")
     plants = observation.get("plants", [])
-    for kind, required in REFERENCE_LAYOUT.items():
+    for kind, required in spec.layout.items():
         matching = [p for p in plants if p.get("type") == kind]
         actual = {(p.get("row"), p.get("col")) for p in matching}
         if actual != required or len(matching) != len(required):
             raise ValueError(f"reference layout mismatch: plant type {kind} expected {sorted(required)}, observed {sorted(actual)}")
+    for kind, minimum in spec.min_plants.items():
+        matching = [p for p in plants if p.get("type") == kind]
+        if len(matching) < minimum:
+            raise ValueError(f"scenario requires at least {minimum} plant type {kind}, observed {len(matching)}")
     seeds = observation.get("seeds", [])
     selected = [s.get("imitator_type") + 49 if s.get("type") == 48 else s.get("type") for s in seeds]
-    if selected != DEFAULT_CARDS:
+    if selected != list(spec.cards):
         raise ValueError(f"selected card order differs from the experiment definition: {selected}")
 
 
@@ -305,6 +403,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-initialize", action="store_true")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--scenario", default="liangyi",
+                        help="Reference scenario from the launcher registry (liangyi, jingdian12); "
+                             "an unknown name is rejected before any process starts")
     parser.add_argument("--audio-mode", choices=("original", sound_effects.MODE), default="original",
                         help="Explicit SFX allocation semantics; original remains the default")
     parser.add_argument("--defer-preparation", action="store_true",
@@ -321,12 +422,14 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "stop":
             result = stop(arguments.run.resolve())
         elif arguments.command == "prepare":
-            result = prepare(arguments.root, arguments.run, audio_mode=arguments.audio_mode)
+            result = prepare(arguments.root, arguments.run, audio_mode=arguments.audio_mode,
+                             scenario=arguments.scenario)
         else:
             result = start(arguments.root, arguments.run, initialize=not arguments.no_initialize,
                            timeout=arguments.timeout, seed=arguments.seed, defer_preparation=arguments.defer_preparation,
                            audio_mode=arguments.audio_mode, mj_clock=arguments.mj_clock,
                            app_update_count=arguments.app_update_count,
+                           scenario=arguments.scenario,
                            b0_normalize=[json.loads(item) for item in (arguments.b0_normalize or [])])
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

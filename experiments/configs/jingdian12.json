@@ -1,0 +1,15 @@
+{
+  "scenario": "jingdian12-avz-tutorial",
+  "state_interval_ticks": 10,
+  "ticks_per_game_second": 100,
+  "observation_mode": "full_memory",
+  "target_waves": 20,
+  "end_condition": "evaluation plan or explicit stop_recording; target_waves describes one two-flag cycle",
+  "allow_rerecord": false,
+  "zombie_generation": "hosted jing_dian_12 script sets ASetZombies; recorder does not call ASetZombies",
+  "game_rng_seed": null,
+  "rng_control": "launcher/evaluation initialization recipe is authoritative; global MT and game-thread CRT only",
+  "recording_mode": "sampled_entities_and_actions_plus_each_native_tick_audit",
+  "scenario_save": "experiments/scenarios/jingdian12/game1_13.dat",
+  "notes": "Registered as launcher scenario jingdian12. The isolated launcher copies the AvZ tutorial save into a private profile, enters game mode 13, sends the tutorial card order and verifies fight state, card order and at least 12 cob cannons. The exact layout check is deliberately loose until a live load confirms the board (see experiments/scenarios/jingdian12/README.md)."
+}

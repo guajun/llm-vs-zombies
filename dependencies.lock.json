@@ -49,6 +49,11 @@
       "size": 333612
     },
     {
+      "path": "experiments/scenarios/jingdian12/game1_13.dat",
+      "sha256": "5d5165dc46cf30c69358bb55e85d8b94d7b114ce251cf410019f7f1c3d2a7b25",
+      "size": 275364
+    },
+    {
       "path": "game/local-engine/PlantsVsZombies.exe",
       "sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322",
       "size": 3007800

@@ -586,6 +586,27 @@ try {
         [pscustomobject]@{ path = $referenceSavePath; sha256 = $actual; expected = $expected; match = ($actual -eq $expected) }
     }
 
+    Invoke-Step 'jingdian12 save' {
+        $relative = 'experiments/scenarios/jingdian12/game1_13.dat'
+        $save = Join-Path $projectRoot ($relative -replace '/', '\')
+        if (!(Test-Path -LiteralPath $save -PathType Leaf)) {
+            if ($VerifyOnly) { throw "$relative is missing; re-run without -VerifyOnly" }
+            $tutorial = Join-Path $avzDirectory 'tutorial\scripts\jing_dian_12\game1_13.dat'
+            if (!(Test-Path -LiteralPath $tutorial -PathType Leaf)) {
+                throw "tutorial save not found: $tutorial (initialise the submodule first)"
+            }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $save) | Out-Null
+            Copy-Item -LiteralPath $tutorial -Destination $save
+        }
+        $expected = Get-LockedFileHash $relative
+        $actual = Get-FileSha256 -Path $save
+        if ($expected -and $actual -ne $expected) {
+            throw "$relative hash mismatch: expected $expected got $actual"
+        }
+        Write-Host "   $relative $actual"
+        [pscustomobject]@{ path = $relative; sha256 = $actual; expected = $expected; match = ($actual -eq $expected) }
+    }
+
     Invoke-Step 'toolchain' {
         if (Test-Path -LiteralPath $compilerPath -PathType Leaf) {
             Write-Host "   compiler already present: $compilerPath"
