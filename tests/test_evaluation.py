@@ -130,23 +130,30 @@ class EvaluationTests(unittest.TestCase):
             path.write_text(json.dumps({"seeds": [42], "strategy": "policies/policy.py"}))
             self.assertEqual(Plan.load(path).strategy, str((directory / "policies/policy.py").resolve()))
 
-    def test_plan_declares_the_fixed_b0_targets_and_legacy_plans_stay_nullable(self):
+    def test_plan_declares_the_unified_b0_table_and_reads_v1_plans_as_old(self):
+        from llm_vs_zombies import b0_normalization as b0
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "plan.json"
             path.write_text("{}")
-            legacy = Plan.load(path)
-            self.assertIsNone(legacy.app_update_count)
-            self.assertIsNone(legacy.mj_clock)
+            self.assertEqual(Plan.load(path).b0_normalization, ())
             path.write_text(json.dumps({"app_update_count": 1500, "mj_clock": 2048}))
             declared = Plan.load(path)
-            self.assertEqual((declared.app_update_count, declared.mj_clock), (1500, 2048))
+            self.assertEqual([(item["field"], item["target"]) for item in declared.b0_normalization],
+                             [(b0.APP_UPDATE_FIELD, 1500), (b0.MJ_CLOCK_FIELD, 2048)])
+            self.assertEqual([item["reason"] for item in declared.b0_normalization],
+                             ["legacy Plan.app_update_count", "legacy Plan.mj_clock"])
+            self.assertEqual(declared.schema, "lvz.evaluation-plan.v2")
             for name in ("app_update_count", "mj_clock"):
                 for value in (-1, 0x80000000, True, 1.0, "1500", [1500]):
                     path.write_text(json.dumps({name: value}))
                     with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
                         Plan.load(path)
+            path.write_text(json.dumps({"schema": "lvz.evaluation-plan.v2", "mj_clock": None,
+                                        "b0_normalization": [{"field": b0.MJ_CLOCK_FIELD, "target": 2048,
+                                                              "reason": "declared"}]}))
+            self.assertEqual(len(Plan.load(path).b0_normalization), 1)
 
-    def test_plan_command_carries_the_declared_b0_targets(self):
+    def test_plan_command_carries_the_declared_b0_table_and_keeps_the_aliases(self):
         from llm_vs_zombies import evaluation
         import contextlib
         import io
@@ -155,8 +162,13 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(evaluation.main(["plan", str(path), "--audio-mode", MODE,
                                               "--app-update-count", "1500", "--mj-clock", "2048"]), 0)
             value = json.loads(path.read_text())
-            self.assertEqual((value["app_update_count"], value["mj_clock"], value["audio_mode"]), (1500, 2048, MODE))
-            self.assertEqual((Plan.load(path).app_update_count, Plan.load(path).mj_clock), (1500, 2048))
+            self.assertEqual(value["audio_mode"], MODE)
+            self.assertEqual(value["schema"], "lvz.evaluation-plan.v2")
+            self.assertEqual([(item["field"], item["target"], item["reason"]) for item in value["b0_normalization"]],
+                             [("/sound_effects/app_update_count", 1500, "legacy flag --app-update-count"),
+                              ("/app/mj_clock", 2048, "legacy flag --mj-clock")])
+            self.assertEqual([(item["field"], item["target"]) for item in Plan.load(path).b0_normalization],
+                             [("/sound_effects/app_update_count", 1500), ("/app/mj_clock", 2048)])
             path.unlink()
             for option in ("--app-update-count", "--mj-clock"):
                 stderr = io.StringIO()

@@ -26,6 +26,7 @@ Json Controller::Observe() { auto value=backend_.Observe(); value["version"]=Ver
     if(backend_.RequiresRenderPreparation())value["render_prepared"]=backend_.RenderPrepared();
     if(backend_.SupportsAppUpdateAnchor())value["app_update_anchored"]=backend_.AppUpdateAnchored();
     if(backend_.SupportsMjClockAnchor())value["mj_clock_anchored"]=backend_.MjClockAnchored();
+    if(backend_.SupportsB0Normalization())value["b0_normalized"]=backend_.B0Normalized();
     if(backend_.SupportsSoundCounterOrigin())value["counter_origin_bound"]=backend_.SoundCounterBound();return value; }
 Json Controller::Status() const {
     return {{"state",!fault_.empty()?"audit_failed":(!storageFault_.empty()||!journal_.Fault().empty()?"dedup_storage_failed":(pending_?"stepping":(terminalFrozen_?"terminal_frozen":(ready_?"paused_at_boundary":"outside_fight"))))},
@@ -417,7 +418,7 @@ void Controller::Request(const Json& req,Reply reply) {
             terminalReply_.reset();
             reply(Success(id,{{"rebound",true},{"previous_branch_id",from},{"branch",BranchIdentity()}}));return;
         }
-        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render"&&method!="app_update_anchor"&&method!="mj_clock_anchor"&&method!="sound_counter_origin") {
+        if(method!="commit"&&method!="advance"&&method!="pause"&&method!="cancel"&&method!="initialize"&&method!="rng_restore"&&method!="rng_seed"&&method!="clock_restore"&&method!="capture_frame"&&method!="stop_recording"&&method!="prepare_render"&&method!="app_update_anchor"&&method!="mj_clock_anchor"&&method!="b0_normalization"&&method!="sound_counter_origin") {
             reply(Error(id,"unsupported_method","Method is not implemented")); return;
         }
         if(terminalReply_&&terminalReply_->id==id) {
@@ -507,7 +508,7 @@ void Controller::Request(const Json& req,Reply reply) {
             // audit or the action dedup budget. Expired IDs remain tombstones.
             reply(std::move(response));return;
         }
-        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||method=="app_update_anchor"||method=="mj_clock_anchor"||method=="sound_counter_origin"||req.contains("expect")) {
+        if(method=="commit"||method=="advance"||method=="initialize"||method=="rng_restore"||method=="rng_seed"||method=="clock_restore"||method=="stop_recording"||method=="prepare_render"||method=="app_update_anchor"||method=="mj_clock_anchor"||method=="b0_normalization"||method=="sound_counter_origin"||req.contains("expect")) {
             if(!req.contains("expect") || req["expect"]!=Version()) {
                 reply(Error(id,"stale_observation","expect must exactly match epoch, tick and revision")); return;
             }
@@ -559,6 +560,10 @@ void Controller::Request(const Json& req,Reply reply) {
             Complete(id,Success(id,{{"bound",true},{"counter_origin",std::move(receipt)},{"observation",Observe()}}));return;
         }
         if(method=="app_update_anchor") {
+            if(backend_.SupportsB0Normalization()) {
+                Complete(id,Error(id,"legacy_anchor_retired","This runtime declares the unified B(0) normalization table; "
+                    "the per-field anchors are retired and cannot be mixed with it"));return;
+            }
             if(params.size()!=1||!params.contains("app_update_count")||!params["app_update_count"].is_number_integer()) {
                 Complete(id,Error(id,"invalid_params","app_update_count must be the only parameter, an integer in 0..2147483647"));return;
             }
@@ -593,6 +598,10 @@ void Controller::Request(const Json& req,Reply reply) {
             Complete(id,Success(id,{{"anchored",true},{"anchor",std::move(receipt)},{"observation",Observe()}}));return;
         }
         if(method=="mj_clock_anchor") {
+            if(backend_.SupportsB0Normalization()) {
+                Complete(id,Error(id,"legacy_anchor_retired","This runtime declares the unified B(0) normalization table; "
+                    "the per-field anchors are retired and cannot be mixed with it"));return;
+            }
             if(params.size()!=1||!params.contains("mj_clock")||!params["mj_clock"].is_number_integer()) {
                 Complete(id,Error(id,"invalid_params","mj_clock must be the only parameter, an integer in 0..2147483647"));return;
             }
@@ -628,12 +637,54 @@ void Controller::Request(const Json& req,Reply reply) {
             Audit("mj_clock_anchored",{{"request_id",id},{"anchor",receipt}});
             Complete(id,Success(id,{{"anchored",true},{"anchor",std::move(receipt)},{"observation",Observe()}}));return;
         }
+        if(method=="b0_normalization") {
+            // The table is validated here as well as in the primitive: a shape,
+            // range, duplicate-field or ordering error is a precondition
+            // rejection that writes nothing and consumes no revision.
+            if(params.size()!=1||!params.contains("entries")||!params["entries"].is_array()) {
+                Complete(id,Error(id,"invalid_params","entries must be the only parameter, a nonempty ordered array"));return;
+            }
+            const auto& entries=params["entries"];
+            if(entries.empty()||entries.size()>2) {
+                Complete(id,Error(id,"invalid_params","the B(0) table must hold one or two declared entries"));return;
+            }
+            if(!ready_||terminalFrozen_||inStep_||tick_!=0||engineCalls_.Health().at("entered_calls")!=0
+                ||!backend_.SupportsB0Normalization()||backend_.RenderPrepared()||backend_.B0Normalized()
+                ||(backend_.SupportsSoundCounterOrigin()&&!backend_.SoundCounterBound())) {
+                Complete(id,Error(id,"b0_normalization_rejected","B(0) normalization requires an unused prewarm paused silent fight "
+                    "after the counter origin, tick zero and no entered engine call"));return;
+            }
+            const auto beforeVersion=Version();Json result;
+            try {result=backend_.NormalizeB0(entries);}
+            catch(const std::exception& error){
+                // An unexpected backend exception cannot establish whether a
+                // write occurred. Invalidate the boundary and freeze truthfully.
+                ++revision_;Fail(std::string("B(0) normalization failed: ")+error.what());
+                Audit("b0_normalization_failed",{{"request_id",id},{"before_version",beforeVersion},
+                    {"after_version",Version()},{"message",error.what()}});
+                Complete(id,Error(id,"b0_normalization_failed",error.what()));return;
+            }
+            if(!result.value("ok",false)&&!result.value("write_attempted",false)) {
+                Complete(id,Error(id,"b0_normalization_rejected",result.value("error",std::string("B(0) normalization rejected"))));return;
+            }
+            ++revision_;backend_.InvalidateFrame("b0_normalization");
+            auto receipt=result.at("normalization");receipt["before_version"]=beforeVersion;receipt["after_version"]=Version();
+            if(!result.value("ok",false)) {
+                Fail(result.value("error",std::string("B(0) normalization post-write verification failed")));
+                Audit("b0_normalization_failed",{{"request_id",id},{"normalization",receipt},
+                    {"message",result.value("error",std::string())}});
+                Complete(id,Error(id,"b0_normalization_failed",result.value("error",std::string("B(0) normalization failed"))));return;
+            }
+            Audit("b0_normalized",{{"request_id",id},{"normalization",receipt}});
+            Complete(id,Success(id,{{"normalized",true},{"normalization",std::move(receipt)},{"observation",Observe()}}));return;
+        }
         if(method=="prepare_render") {
             if(!params.empty()) {Complete(id,Error(id,"invalid_params","prepare_render takes no parameters"));return;}
             if(!ready_||terminalFrozen_||inStep_||tick_!=0) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing requires a paused ready fight at tick zero"));return;}
             if(!backend_.RequiresRenderPreparation()||backend_.RenderPrepared()) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing is unavailable or has already completed"));return;}
             if(backend_.SupportsAppUpdateAnchor()&&!backend_.AppUpdateAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Explicit App update anchor must precede warm drawing"));return;}
             if(backend_.SupportsMjClockAnchor()&&!backend_.MjClockAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Fixed MJ clock anchor must precede warm drawing"));return;}
+            if(backend_.SupportsB0Normalization()&&!backend_.B0Normalized()) {Complete(id,Error(id,"render_prepare_rejected","The declared B(0) normalization table must precede warm drawing"));return;}
             ++revision_;
             Audit("render_preparing",{{"request_id",id}});
             Json receipt;
@@ -649,6 +700,7 @@ void Controller::Request(const Json& req,Reply reply) {
         if(method=="rng_restore"||method=="rng_seed"||method=="clock_restore") {
             if((backend_.SupportsAppUpdateAnchor()&&backend_.AppUpdateAnchored())
                 ||(backend_.SupportsMjClockAnchor()&&backend_.MjClockAnchored())
+                ||(backend_.SupportsB0Normalization()&&backend_.B0Normalized())
                 ||(backend_.SupportsSoundCounterOrigin()&&backend_.SoundCounterBound())) {
                 Complete(id,Error(id,"initialization_sealed","RNG/clock initialization is sealed by the explicit counter/App boundary"));return;
             }

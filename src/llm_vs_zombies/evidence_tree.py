@@ -92,7 +92,14 @@ def content_identity(manifest) -> str:
 
 
 def root_identity(*, game, artifacts, init_recipe, image_sha256=None) -> dict:
-    """Root identity: game/asset digests, the initialization recipe, optional image digest."""
+    """Root identity: game/asset digests, the initialization recipe, optional image digest.
+
+    The B(0) normalization table enters as ordered ``(field, target)`` pairs:
+    ``reason`` is review text, and binding it here would split one logical root
+    into two and reject the merge of worlds that declared the same targets with
+    different wording.
+    """
+    from . import b0_normalization
     if not isinstance(game, dict) or not game:
         raise EvidenceError("root identity requires the game identity")
     digests(artifacts, label="root artifact")
@@ -101,7 +108,7 @@ def root_identity(*, game, artifacts, init_recipe, image_sha256=None) -> dict:
     if image_sha256 is not None:
         digest(image_sha256, "root image digest")
     return {"game": copy.deepcopy(game), "artifacts": copy.deepcopy(artifacts),
-            "init_recipe": copy.deepcopy(init_recipe), "image_sha256": image_sha256}
+            "init_recipe": b0_normalization.identity_recipe(init_recipe), "image_sha256": image_sha256}
 
 
 def normalize_identity(value) -> dict:

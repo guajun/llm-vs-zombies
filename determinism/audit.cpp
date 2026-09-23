@@ -1,5 +1,6 @@
 #include "audit.hpp"
 #include "app_update_anchor.hpp"
+#include "b0_normalization.hpp"
 #include "mj_clock_anchor.hpp"
 #include "sound_counter_origin.hpp"
 #include "silent_audio_audit.hpp"
@@ -267,7 +268,8 @@ Json ProbeTarget() {
         {"fixed_fp",fpenv::Manifest()},
         {"original_engine_replay_verified",false}, {"coverage",Coverage()}};
     if(silentaudio::Enabled()){result["sound_effects"]=silentaudio::Manifest();result["app_update_anchor"]=AppUpdateAnchorManifest();
-        result["mj_clock_anchor"]=MjClockAnchorManifest();result["sound_counter"]=SoundCounterManifest();}
+        result["mj_clock_anchor"]=MjClockAnchorManifest();result["b0_normalization"]=B0NormalizationManifest();
+        result["sound_counter"]=SoundCounterManifest();}
 #ifdef LVZ_FLAG_DROP_LIVE_FIXTURE
     result["test_fixture"]=lvz::flagfixture::Manifest();
 #endif

@@ -158,18 +158,23 @@ def stop(run: Path) -> dict:
 
 def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90.0, seed: int = 0,
           defer_preparation: bool = False, audio_mode: str = "original", mj_clock: int | None = None,
-          app_update_count: int | None = None) -> dict:
+          app_update_count: int | None = None, b0_normalize: list | None = None) -> dict:
     from .client import connect
     from .session import SessionTrace
+    from . import b0_normalization as b0
     from . import fp_environment
     if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
         raise ValueError("seed must be uint32")
     if type(defer_preparation) is not bool:
         raise ValueError("defer_preparation must be boolean")
-    if app_update_count is not None and (type(app_update_count) is not int or not 0 <= app_update_count <= 0x7fffffff):
-        raise ValueError("declared initial App update count must be an integer in 0..2147483647")
-    if mj_clock is not None and (type(mj_clock) is not int or not 0 <= mj_clock <= 0x7fffffff):
-        raise ValueError("fixed initial MJ clock target must be an integer in 0..2147483647")
+    # --mj-clock / --app-update-count stay readable as transitional aliases for
+    # single-entry tables; an explicit --b0-normalize table never mixes with them.
+    table = [b0.entry(item) for item in (b0_normalize or [])]
+    if table and (mj_clock is not None or app_update_count is not None):
+        raise ValueError("--b0-normalize cannot be mixed with the transitional "
+                         "--app-update-count/--mj-clock aliases")
+    if not table:
+        table = b0.alias_entries(app_update_count=app_update_count, mj_clock=mj_clock, source="flag")
     # The CLI may pass a project-relative --run. Resolve the archive base once so
     # the session trace, launcher.json and the initialization recipe cannot bind
     # the same evidence to different paths.
@@ -228,7 +233,7 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
                 if not defer_preparation:
                     from .initialization import apply_recipe
                     state["initialization_recipe"] = apply_recipe(client, seed, run=run, scenario_verified=True,
-                                                                  mj_clock=mj_clock, app_update_count=app_update_count)
+                                                                  b0_normalization=table or None)
                     observation = client.observation
                     state["hello"] = client.hello_result
                 else:
@@ -305,9 +310,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--defer-preparation", action="store_true",
                         help="Leave seeded/warm boundary preparation to the evaluation or replay recipe")
     parser.add_argument("--app-update-count", type=int, default=None,
-                        help="Declared fixed B(0) target for LawnApp+0x484; required by a runtime that declares the initial App update anchor")
+                        help="Transitional alias for --b0-normalize with field /sound_effects/app_update_count")
     parser.add_argument("--mj-clock", type=int, default=None,
-                        help="Fixed B(0) target for LawnApp+0x838; required by a runtime that declares the fixed MJ clock anchor")
+                        help="Transitional alias for --b0-normalize with field /app/mj_clock")
+    parser.add_argument("--b0-normalize", action="append", default=None, metavar="JSON",
+                        help="Declared B(0) normalization entry as a JSON object {field, target, reason}; "
+                             "repeatable, applied in command-line order")
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "stop":
@@ -318,7 +326,8 @@ def main(argv: list[str] | None = None) -> int:
             result = start(arguments.root, arguments.run, initialize=not arguments.no_initialize,
                            timeout=arguments.timeout, seed=arguments.seed, defer_preparation=arguments.defer_preparation,
                            audio_mode=arguments.audio_mode, mj_clock=arguments.mj_clock,
-                           app_update_count=arguments.app_update_count)
+                           app_update_count=arguments.app_update_count,
+                           b0_normalize=[json.loads(item) for item in (arguments.b0_normalize or [])])
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as error:

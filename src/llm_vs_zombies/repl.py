@@ -97,9 +97,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--script", type=Path, help="Execute a file with game/plant/shovel in scope, then exit")
     parser.add_argument("--seed", type=int, default=0, help="Seed used only for an unprepared ready controlled-draw game")
     parser.add_argument("--app-update-count", type=int, default=None,
-                        help="Declared fixed B(0) target for LawnApp+0x484; required by a runtime that declares the initial App update anchor")
+                        help="Transitional alias for --b0-normalize with field /sound_effects/app_update_count")
     parser.add_argument("--mj-clock", type=int, default=None,
-                        help="Declared fixed B(0) target for LawnApp+0x838; required by a runtime that declares the fixed MJ clock anchor")
+                        help="Transitional alias for --b0-normalize with field /app/mj_clock")
+    parser.add_argument("--b0-normalize", action="append", default=None, metavar="JSON",
+                        help="Declared B(0) normalization entry as a JSON object {field, target, reason}; "
+                             "repeatable, applied in command-line order")
     parser.add_argument("--defer-preparation", action="store_true",
                         help="Leave one-time render preparation to an explicit initialization recipe")
     args = parser.parse_args(argv)
@@ -109,9 +112,16 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 with connect(pid=args.pid, endpoint=args.endpoint, trace=trace, timeout=args.timeout) as game:
                     if not args.defer_preparation:
+                        from . import b0_normalization as b0
                         from .initialization import ensure_render_prepared
-                        ensure_render_prepared(game, args.seed, mj_clock=args.mj_clock,
-                                               app_update_count=args.app_update_count)
+                        table = [b0.entry(json.loads(item)) for item in (args.b0_normalize or [])]
+                        if table and (args.mj_clock is not None or args.app_update_count is not None):
+                            raise ValueError("--b0-normalize cannot be mixed with the transitional "
+                                             "--app-update-count/--mj-clock aliases")
+                        if not table:
+                            table = b0.alias_entries(app_update_count=args.app_update_count,
+                                                     mj_clock=args.mj_clock, source="flag")
+                        ensure_render_prepared(game, args.seed, b0_normalization=table or None)
                     console = RecordedConsole(game, trace)
                     if args.script:
                         return 0 if console.execute_cell(args.script.read_text(encoding="utf-8"), str(args.script)) else 1
