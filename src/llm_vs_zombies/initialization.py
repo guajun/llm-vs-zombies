@@ -144,23 +144,27 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
             if item["field"] not in declared:
                 raise RuntimeError(f"plan declares B(0) normalization field {item['field']} outside the "
                                    f"runtime-declared closed field set {list(declared)}")
-    if app_update_count is not None and app_anchor_mode is None:
-        raise RuntimeError("runtime has no declared initial App update anchor capability")
-    if app_anchor_mode is not None and app_update_count is None:
-        # The whole point of this capability is a target the experiment chose.
-        # Anchoring the run's own observed counter reproduces the cross-run
-        # asymmetry that this initialization exists to remove.
-        raise RuntimeError("runtime declares the initial App update anchor; declare the fixed B(0) app_update_count target "
-                           "explicitly (evaluation plan --app-update-count N / Plan.app_update_count); the run's own "
-                           "current value is not accepted")
-    if mj_clock_mode is not None and mj_clock is None:
-        # The whole point of this capability is a target the experiment chose.
-        # Recording the run's own current counter would recreate the cross-run
-        # asymmetry of the App update counter.
-        raise RuntimeError("runtime declares the fixed MJ clock anchor; declare the fixed B(0) target explicitly "
-                           "(evaluation plan --mj-clock N / Plan.mj_clock); the run's own current value is not accepted")
-    if mj_clock is not None and mj_clock_mode is None:
-        raise RuntimeError("runtime has no declared fixed MJ clock anchor capability")
+    # The unified table is authoritative whenever the runtime offers it: the
+    # legacy scalar arguments are folded into that table above, so the per-field
+    # capability checks below apply only to a runtime without the unified shape.
+    if not b0_mode:
+        if app_update_count is not None and app_anchor_mode is None:
+            raise RuntimeError("runtime has no declared initial App update anchor capability")
+        if app_anchor_mode is not None and app_update_count is None:
+            # The whole point of this capability is a target the experiment chose.
+            # Anchoring the run's own observed counter reproduces the cross-run
+            # asymmetry that this initialization exists to remove.
+            raise RuntimeError("runtime declares the initial App update anchor; declare the fixed B(0) app_update_count target "
+                               "explicitly (evaluation plan --app-update-count N / Plan.app_update_count); the run's own "
+                               "current value is not accepted")
+        if mj_clock_mode is not None and mj_clock is None:
+            # The whole point of this capability is a target the experiment chose.
+            # Recording the run's own current counter would recreate the cross-run
+            # asymmetry of the App update counter.
+            raise RuntimeError("runtime declares the fixed MJ clock anchor; declare the fixed B(0) target explicitly "
+                               "(evaluation plan --mj-clock N / Plan.mj_clock); the run's own current value is not accepted")
+        if mj_clock is not None and mj_clock_mode is None:
+            raise RuntimeError("runtime has no declared fixed MJ clock anchor capability")
     if (anchor is not None or mode == DRAW_MODE) and capabilities.get("clock_restore") is not True:
         raise RuntimeError("runtime lacks clock_restore needed by the recorded initialization recipe")
     observation = client.observe()
@@ -249,7 +253,7 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         seeded = normalized
         verify_seeded_rng(seeded, seed)
         before_clock = clock_anchor(seeded)
-    if app_anchor_mode:
+    if app_anchor_mode and not b0_mode:
         # The declared target is the plan/API argument. The run's own readback
         # is never a target; it is only the real ``before`` of this receipt.
         target = app_update_count
@@ -275,7 +279,7 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         seeded = anchored
         verify_seeded_rng(seeded, seed)
     mj_receipt = None
-    if mj_clock_mode:
+    if mj_clock_mode and not b0_mode:
         before_version = copy.deepcopy(client.version)
         if seeded.get("version") != before_version:
             raise RuntimeError("MJ clock anchor requires the current App-anchored audit boundary")
