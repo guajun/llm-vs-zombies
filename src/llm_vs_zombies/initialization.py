@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 from . import sound_effects
+from . import b0_normalization as b0
 from . import app_update_anchor
 from . import mj_clock_anchor
 from . import sound_counter
@@ -92,23 +93,54 @@ def _persist(client, run: Path, hello: dict, recipe: dict, evidence: dict,
 
 def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | None = None,
                  scenario_verified: bool | None = None, app_update_count: int | None = None,
-                 mj_clock: int | None = None) -> dict:
+                 mj_clock: int | None = None, b0_normalization: list | None = None) -> dict:
     if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
         raise ValueError("seed must be uint32")
-    if app_update_count is not None and (type(app_update_count) is not int or not 0 <= app_update_count <= 0x7fffffff):
-        raise ValueError("initial App update count must be an integer in 0..2147483647")
-    if mj_clock is not None and (type(mj_clock) is not int or not 0 <= mj_clock <= 0x7fffffff):
-        raise ValueError("fixed initial MJ clock target must be an integer in 0..2147483647")
+    # The legacy scalar arguments stay readable, but they are transitional
+    # aliases: internally they produce ordinary ordered table entries whose
+    # reason records where the target came from. They are never a fallback to
+    # a value this run happens to observe.
+    if b0_normalization is not None and (app_update_count is not None or mj_clock is not None):
+        raise ValueError("declare either the unified B(0) normalization table or the transitional "
+                         "app_update_count/mj_clock aliases, never both")
+    aliases = b0.alias_entries(app_update_count=app_update_count, mj_clock=mj_clock,
+                              source="api") if (app_update_count is not None
+                                                or mj_clock is not None) else []
     hello = client.hello()
     capabilities = hello["capabilities"]
     if capabilities.get("rng_seed") is not True:
         raise RuntimeError("runtime has no implemented rng_seed capability; planned seed is not evidence")
     mode = draw_mode(hello)
     sound_mode = sound_effects.negotiate(hello)
+    b0_mode = b0.negotiate(hello)
     app_anchor_mode = app_update_anchor.negotiate(hello)
     mj_clock_mode = mj_clock_anchor.negotiate(hello)
     counter_mode = sound_counter.negotiate(hello)
     fp_mode = fp_environment.negotiate(hello)
+    if b0_mode and (app_anchor_mode or mj_clock_mode):
+        raise RuntimeError("runtime declares both the unified B(0) normalization and a legacy per-field anchor; "
+                           "one run cannot mix the two shapes")
+    if not b0_mode and b0_normalization is not None:
+        raise RuntimeError("runtime has no declared unified B(0) normalization capability")
+    table = list(aliases)
+    if b0_mode:
+        if b0_normalization is not None and list(b0_normalization):
+            table = b0.entries(list(b0_normalization))
+        if not table:
+            raise RuntimeError("runtime declares the unified B(0) normalization; declare the fixed common target "
+                               "of every declared field explicitly (evaluation plan --b0-normalize "
+                               "'{\"field\": ..., \"target\": ..., \"reason\": ...}'); an empty table, a null target "
+                               "and the run's own observed value are not accepted")
+        declared = b0.declared_fields(hello["game"])
+        undeclared = [field for field in declared if field not in {item["field"] for item in table}]
+        if undeclared:
+            raise RuntimeError("runtime declares B(0) normalization fields the plan did not declare: "
+                               + ", ".join(undeclared)
+                               + "; declare a fixed common target for each of them before any initialization request")
+        for item in table:
+            if item["field"] not in declared:
+                raise RuntimeError(f"plan declares B(0) normalization field {item['field']} outside the "
+                                   f"runtime-declared closed field set {list(declared)}")
     if app_update_count is not None and app_anchor_mode is None:
         raise RuntimeError("runtime has no declared initial App update anchor capability")
     if app_anchor_mode is not None and app_update_count is None:
@@ -183,6 +215,37 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         seeded = counted
         verify_seeded_rng(seeded, seed)
     app_receipt = None
+    normalization_receipt = None
+    if b0_mode:
+        # One table, one revision, one receipt. Both worlds execute the same
+        # declared writes; the run's own pre-value is only the real ``before``.
+        if counter_mode and counter_receipt is None:
+            raise RuntimeError("B(0) normalization requires the actual sound counter origin")
+        before_version = copy.deepcopy(client.version)
+        if seeded.get("version") != before_version:
+            raise RuntimeError("B(0) normalization requires the current seeded audit boundary")
+        result = client.request("b0_normalization", {"entries": table}, expect=before_version)
+        expected_version = {**before_version, "revision": before_version["revision"] + 1}
+        if (result.get("normalized") is not True or client.version != expected_version
+                or result.get("observation", {}).get("version") != expected_version
+                or result.get("observation", {}).get("b0_normalized") is not True):
+            raise RuntimeError("B(0) normalization did not establish the exact next initialization boundary")
+        normalization_receipt = b0.receipt(result.get("normalization"), hello["game"], requested=table,
+            before_version=before_version, after_version=expected_version, seed=seed)
+        if normalization_receipt["before_state"] != seeded["state"]:
+            raise RuntimeError("B(0) normalization before-state differs from its actual seeded snapshot")
+        normalized = client.request("audit_snapshot")
+        expected_clock = copy.deepcopy(before_clock)
+        for item in table:
+            if item["field"] == b0.MJ_CLOCK_FIELD:
+                expected_clock["mj_clock"] = item["target"]
+        if (normalized.get("version") != expected_version
+                or normalized.get("state") != normalization_receipt["after_state"]
+                or clock_anchor(normalized) != expected_clock):
+            raise RuntimeError("B(0) normalization readback differs from its actual receipt")
+        seeded = normalized
+        verify_seeded_rng(seeded, seed)
+        before_clock = clock_anchor(seeded)
     if app_anchor_mode:
         # The declared target is the plan/API argument. The run's own readback
         # is never a target; it is only the real ``before`` of this receipt.
@@ -244,6 +307,10 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
                                           "mj_clock": mj_receipt["requested"]}
     if counter_receipt is not None:
         recipe["sound_counter"] = {"configuration": copy.deepcopy(hello["game"]["sound_counter"])}
+    if normalization_receipt is not None:
+        recipe[b0.METHOD] = {
+            "configuration": copy.deepcopy(hello["game"][b0.METHOD]),
+            "entries": normalization_receipt["requested"]}
     prepared = None
     snapshot = seeded
     if mode == DRAW_MODE:
@@ -296,6 +363,8 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
         evidence[mj_clock_anchor.METHOD] = mj_receipt
     if counter_receipt is not None:
         evidence["sound_counter"] = counter_receipt
+    if normalization_receipt is not None:
+        evidence[b0.METHOD] = normalization_receipt
     trace = getattr(client, "trace", None)
     if trace is not None:
         trace.emit("initialization_prepared", {"recipe": recipe, "evidence": evidence})
@@ -306,10 +375,12 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
 
 
 def ensure_render_prepared(client, seed: int = 0, *, mj_clock: int | None = None,
-                          app_update_count: int | None = None) -> dict | None:
+                          app_update_count: int | None = None,
+                          b0_normalization: list | None = None) -> dict | None:
     """Prepare an attached ready new-mode game; reconnecting never reseeds it."""
     hello = client.hello_result if client.hello_result is not None else client.hello()
     sound_effects.negotiate(hello)
+    b0.negotiate(hello)
     app_update_anchor.negotiate(hello)
     mj_clock_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
@@ -321,4 +392,5 @@ def ensure_render_prepared(client, seed: int = 0, *, mj_clock: int | None = None
         return None
     if observation.get("game_ui") != 3:
         return None  # The REPL can still inspect/loading-initialize the process.
-    return apply_recipe(client, seed, mj_clock=mj_clock, app_update_count=app_update_count)
+    return apply_recipe(client, seed, mj_clock=mj_clock, app_update_count=app_update_count,
+                        b0_normalization=b0_normalization)

@@ -125,6 +125,16 @@ Additional negotiated methods:
   contracts are in [counter origin](../docs/sound-counter-origin-native.md),
   [App anchor](../docs/app-update-anchor-native.md) and
   [fixed MJ clock anchor](../docs/mj-clock-anchor-native.md).
+- `b0_normalization`: the unified one-table form of the two anchors above.
+  Params `{"entries":[{"field":...,"target":...,"reason":...}, ...]}` with the
+  declared field set (`/sound_effects/app_update_count`, then `/app/mj_clock`),
+  exact `expect`, a bound counter origin and no warm draw yet. The whole table
+  is written once in the declared order, consumes exactly one revision and
+  records one `lvz.b0-normalization.v1` receipt (`b0_normalized`; failures keep
+  the partial write and record `b0_normalization_failed`). A runtime that
+  declares it rejects the legacy per-field RPCs (`legacy_anchor_retired`).
+  Contract and the read-only recipe completeness checker:
+  [B(0) normalization](../docs/b0-normalization-native.md).
 - `prepare_render`: exact expect, seeded ready fight at tick zero; verifies RNG
   and performs the one warm draw. Capture B(0) after this succeeds. Actions and
   advancement before preparation are rejected.

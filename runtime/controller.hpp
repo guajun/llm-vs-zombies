@@ -40,6 +40,11 @@ struct Backend {
     virtual bool SupportsMjClockAnchor() const { return false; }
     virtual bool MjClockAnchored() const { return false; }
     virtual Json AnchorMjClock(uint32_t) { return {{"ok",false},{"error","unsupported"}}; }
+    // One declared B(0) normalization table replaces the per-field anchors.
+    // A runtime that declares this capability never accepts the legacy paths.
+    virtual bool SupportsB0Normalization() const { return false; }
+    virtual bool B0Normalized() const { return false; }
+    virtual Json NormalizeB0(const Json&) { return {{"ok",false},{"error","unsupported"}}; }
     virtual bool SupportsSoundCounterOrigin()const {return false;}
     virtual bool SoundCounterBound()const {return false;}
     virtual Json BindSoundCounterOrigin(){return {{"ok",false},{"error","unsupported"}};}

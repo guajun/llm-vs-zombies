@@ -23,6 +23,7 @@ from typing import Any
 
 from .records import finish, read_json, sha256, write_json
 from .initialization import apply_recipe, clock_anchor
+from . import b0_normalization as b0
 from . import sound_effects
 from . import fp_environment
 from .app_update_anchor import target_from_recipe
@@ -32,7 +33,8 @@ from .evaluation_support import (BoundaryBudget, BoundaryStop, ReplayBoundaryCli
     cleanup_passed, error_detail, finalize_run, host_sources)
 
 SCHEMA = "lvz.evaluation.v1"
-PLAN_SCHEMA = "lvz.evaluation-plan.v1"
+PLAN_SCHEMA = "lvz.evaluation-plan.v2"
+LEGACY_PLAN_SCHEMA = "lvz.evaluation-plan.v1"
 LIVE_GATES = ("private_launch", "runtime_windows", "session_cleanup", "archive_integrity", "host_identity", "resource_limits",
               "scenario", "fixed_rng", "initial_state", "single_step",
               "pause_invariance", "disconnect_recovery", "failure_recovery", "recording",
@@ -60,20 +62,28 @@ class Plan:
     pause_points: tuple = ((1000, 1.0), (2500, 5.0))
     strategy: str | None = None
     audio_mode: str = "original"
-    # Declared fixed common B(0) target for LawnApp+0x484 (mUpdateCount), the
-    # counter behind /sound_effects/app_update_count. Required (and identical
-    # across worlds) whenever the runtime declares the initial App update
-    # anchor; a run's own observed counter is never accepted as the target.
-    app_update_count: int | None = None
-    # Fixed common B(0) target for LawnApp+0x838. Required (and identical
-    # across worlds) whenever the runtime declares the fixed MJ clock anchor;
-    # a run's own current counter is never accepted as the target.
-    mj_clock: int | None = None
+    # Declared B(0) normalization table: ordered {field, target, reason}
+    # entries. Every field the runtime declares must be declared here with a
+    # fixed common target; a run's own observed value is never accepted. The
+    # v1 scalar keys app_update_count/mj_clock are read by Plan.load and never
+    # written back: they become entries whose reason records the legacy origin.
+    b0_normalization: tuple = ()
+
+    def table(self) -> list:
+        """The declared table in canonical, validated entry form."""
+        if self.b0_normalization is None:
+            return []
+        if not isinstance(self.b0_normalization, (tuple, list)):
+            raise ValueError("b0_normalization must be an ordered array of entries")
+        return b0.entries(list(self.b0_normalization)) if self.b0_normalization else []
 
     def validate(self) -> "Plan":
         sound_effects.configured(self.audio_mode)
+        if self.b0_normalization is None or not isinstance(self.b0_normalization, (tuple, list)):
+            raise ValueError("b0_normalization must be an ordered array of entries")
         if self.schema != PLAN_SCHEMA or self.tier not in {"smoke", "strict"}:
             raise ValueError("unsupported evaluation schema or tier")
+        self.table()
         if not isinstance(self.seeds, (tuple, list)) or not self.seeds or len(set(self.seeds)) != len(self.seeds):
             raise ValueError("seeds must be a nonempty set of explicitly ordered unique uint32 values")
         if any(type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF for seed in self.seeds):
@@ -106,10 +116,6 @@ class Plan:
             last = point[0]
         if self.tier == "strict" and (self.cold_starts < 10 or not self.strategy):
             raise ValueError("strict requires at least 10 cold starts per seed and an explicit strategy file")
-        if self.app_update_count is not None and (type(self.app_update_count) is not int or not 0 <= self.app_update_count <= 0x7fffffff):
-            raise ValueError("app_update_count must be an integer in 0..2147483647")
-        if self.mj_clock is not None and (type(self.mj_clock) is not int or not 0 <= self.mj_clock <= 0x7fffffff):
-            raise ValueError("mj_clock must be an integer in 0..2147483647")
         return self
 
     @classmethod
@@ -119,6 +125,28 @@ class Plan:
             value["seeds"] = tuple(value["seeds"])
         if value.get("strategy") and not Path(value["strategy"]).is_absolute():
             value["strategy"] = str((path.parent / value["strategy"]).resolve())
+        declared = value.pop("b0_normalization", None)
+        legacy = {name: value.pop(name) for name in ("app_update_count", "mj_clock") if name in value}
+        schema = value.get("schema")
+        if schema == LEGACY_PLAN_SCHEMA or (schema is None and legacy):
+            # v1 is read, never written. ``mj_clock``/``app_update_count`` map to
+            # ordered table entries; a null scalar stays "not declared" and is
+            # rejected later, at the first runtime boundary that needs it.
+            if declared is not None:
+                raise ValueError("a v1 plan cannot declare the v2 b0_normalization table")
+            for name, item in legacy.items():
+                if item is not None and (type(item) is not int or not 0 <= item <= 0x7fffffff):
+                    raise ValueError(f"{name} must be an integer in 0..2147483647")
+            value["schema"] = PLAN_SCHEMA
+            value["b0_normalization"] = tuple(b0.alias_entries(
+                app_update_count=legacy.get("app_update_count"), mj_clock=legacy.get("mj_clock"), source="plan"))
+        elif schema == PLAN_SCHEMA:
+            if any(item is not None for item in legacy.values()):
+                raise ValueError("a v2 plan cannot mix the v1 scalar keys app_update_count/mj_clock "
+                                 "into an explicit b0_normalization table")
+            value["b0_normalization"] = tuple(declared or ())
+        elif declared is not None:
+            raise ValueError("unsupported evaluation plan schema")
         return cls(**value).validate()
 
 
@@ -545,7 +573,7 @@ def _recovery_probe(root: Path, name: str, plan: Plan, seed: int, *, lifecycle=N
     from .client import WindowsNamedPipeStream, connect
     with live_session(root, name, plan, seed, lifecycle=lifecycle) as (run, launcher, client, trace):
         _require_production_runtime(client)
-        recipe = apply_recipe(client, seed, app_update_count=plan.app_update_count, mj_clock=plan.mj_clock)
+        recipe = apply_recipe(client, seed, b0_normalization=list(plan.b0_normalization) or None)
         before = client.observe()
         budget = BoundaryBudget(root, plan, report_path=run / "evaluation-resources.json")
         budget.check(before["version"], force=True)
@@ -694,9 +722,11 @@ def run_cold_attempt(root, plan, output, seed, repeat, trajectory):
         nonlocal cold_budget
         with live_session(root, cold_run.name, plan, seed, lifecycle=cold_lifecycle) as (replay_run, state, replay_client, replay_trace):
             _require_production_runtime(replay_client)
-            apply_recipe(replay_client, seed, expected.initial["initialization"]["clock_anchor"],
-                         app_update_count=target_from_recipe(expected.initial["initialization"]),
-                         mj_clock=mj_clock_target_from_recipe(expected.initial["initialization"]))
+            recorded = expected.initial["initialization"]
+            apply_recipe(replay_client, seed, recorded["clock_anchor"],
+                         b0_normalization=b0.requested_from_recipe(recorded),
+                         app_update_count=target_from_recipe(recorded),
+                         mj_clock=mj_clock_target_from_recipe(recorded))
             # apply_recipe rewrites observations/initial.json with the B0-bound
             # observation, so the scenario gate has to record it afterwards.
             add("scenario", state.get("scenario_verified") is True, {"repeat": repeat}, replay_run / "observations/initial.json")
@@ -826,7 +856,7 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                     with live_session(root, source_run.name, plan, seed, lifecycle=source_lifecycle) as (run, launcher, client, trace):
                         _require_production_runtime(client)
                         case["run"] = str(run)
-                        recipe = apply_recipe(client, seed, app_update_count=plan.app_update_count, mj_clock=plan.mj_clock)
+                        recipe = apply_recipe(client, seed, b0_normalization=list(plan.b0_normalization) or None)
                         # apply_recipe rewrites observations/initial.json with the
                         # B0-bound observation; the scenario gate follows it so the
                         # recorded hash cannot go stale.
@@ -980,10 +1010,13 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("--tier", choices=("smoke", "strict"), default="smoke")
     sample.add_argument("--strategy")
     sample.add_argument("--audio-mode", choices=("original", sound_effects.MODE), default="original")
+    sample.add_argument("--b0-normalize", action="append", default=None, metavar="JSON",
+                        help="Declared B(0) normalization entry as a JSON object {field, target, reason}; "
+                             "repeatable, applied in command-line order")
     sample.add_argument("--app-update-count", type=int, default=None,
-                        help="Declared fixed B(0) target for LawnApp+0x484; required by a runtime that declares the initial App update anchor")
+                        help="Transitional alias for --b0-normalize with field /sound_effects/app_update_count")
     sample.add_argument("--mj-clock", type=int, default=None,
-                        help="Declared fixed B(0) target for LawnApp+0x838; required by a runtime that declares the fixed MJ clock anchor")
+                        help="Transitional alias for --b0-normalize with field /app/mj_clock")
     sample.add_argument("--seeds", default="0,1,42", help="ordered comma-separated uint32 seeds")
     sample.add_argument("--tick-budget", type=int)
     sample.add_argument("--cold-starts", type=int)
@@ -1007,6 +1040,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.output.exists():
                 raise FileExistsError(args.output)
             strict = args.tier == "strict"
+            table = [b0.entry(json.loads(item)) for item in (args.b0_normalize or [])]
+            if table and (args.app_update_count is not None or args.mj_clock is not None):
+                raise ValueError("--b0-normalize cannot be mixed with the transitional "
+                                 "--app-update-count/--mj-clock aliases")
+            if not table:
+                table = b0.alias_entries(app_update_count=args.app_update_count, mj_clock=args.mj_clock,
+                                         source="flag")
             plan = Plan(tier=args.tier, seeds=tuple(int(seed) for seed in args.seeds.split(',')),
                         cold_starts=args.cold_starts if args.cold_starts is not None else 10 if strict else 1,
                         cold_workers=args.cold_workers,
@@ -1017,10 +1057,11 @@ def main(argv: list[str] | None = None) -> int:
                         min_free_bytes=args.min_free_bytes, packaging_reserve_bytes=args.packaging_reserve_bytes,
                         disk_check_ticks=args.disk_check_ticks, pause_points=args.pause_points,
                         strategy=str(Path(args.strategy).resolve()) if args.strategy else None,
-                        audio_mode=args.audio_mode, app_update_count=args.app_update_count,
-                        mj_clock=args.mj_clock).validate()
+                        audio_mode=args.audio_mode, b0_normalization=tuple(table)).validate()
             write_json(args.output, asdict(plan))
             print(args.output)
+            if plan.b0_normalization:
+                print(json.dumps(list(plan.b0_normalization), ensure_ascii=False, indent=2))
             return 0
         report = run_suite(args.root, Plan.load(args.plan), args.output, run_builds=not args.skip_build)
         print(json.dumps(report["readiness"], ensure_ascii=False, indent=2))

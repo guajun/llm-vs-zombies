@@ -1,0 +1,44 @@
+{
+  "scope": "Alternative reading of docs/b0-归一化提案.md §4.2: the whole Board component is classed as recorded because the reference save round-trips it as one block. The built-in default stays stricter and reports every Board address that has no per-field mechanism of its own; passing this file with --claims shows the other reading.",
+  "declared": [
+    {"pattern": "/schema", "source": "audit_compare.py SCHEMA constant lvz.audit.v1"},
+    {"pattern": "/rng/schema", "source": "native RNG capture schema (determinism/audit.cpp)"},
+    {"pattern": "/rng/target", "source": "game target declared by the runtime identity"},
+    {"pattern": "/rng/complete_game_rng", "source": "manifest rng_scope declaration"},
+    {"pattern": "/rng/instances", "source": "rng_seed declares the actual seeded instances (initialization.verify_seeded_rng)"},
+    {"pattern": "/fp_environment/x87_control", "source": "fixed_owner_fp_v1 constant 0x027f (fp_environment.py:13)"},
+    {"pattern": "/fp_environment/mxcsr_control", "source": "fixed_owner_fp_v1 constant 0x1f80 (fp_environment.py:13)"},
+    {"pattern": "/draw_schedule/mode", "source": "deterministic_draw_schedule_v1 declaration (initialization.py:241)"},
+    {"pattern": "/draw_schedule/warm_frames", "source": "declared warm/step counters (initialization.py:262)"},
+    {"pattern": "/draw_schedule/step_frames", "source": "declared warm/step counters (initialization.py:262)"},
+    {"pattern": "/app/game_mode", "source": "scenario configuration (launcher.py:202)"},
+    {"pattern": "/app/ui", "source": "paused ready fight requirement (launcher.py:277-279)"},
+    {"pattern": "/particle_shake/mode", "source": "declared controlled particle-shake mode (audit_compare.particle_semantics)"}
+  ],
+  "recorded": [
+    {"pattern": "/board/*", "source": "proposal §4.2: Board is the recorded class; SyncBoard round-trips the block from +0x164 (docs/机制读取点表.json D2-4) and clock_restore rewrites the two clocks (determinism/audit.cpp:415)"},
+    {"pattern": "/challenge/completed_rounds", "source": "recorded round counter (determinism/audit.cpp:458)", "required": false},
+    {"pattern": "/seeds/conveyor_counter", "source": "reference save layout (cli.py:29-33; records.py:59-78)", "required": false},
+    {"pattern": "/seeds/count", "source": "card order mapping (launcher.py:277-289)"},
+    {"pattern": "/seeds/slots/*", "source": "card order mapping (launcher.py:277-289)", "required": false},
+    {"pattern": "/zombies/*", "source": "reference save pool layout; manifest coverage.pool_slot_and_free_list"},
+    {"pattern": "/plants/*", "source": "reference save pool layout; manifest coverage.pool_slot_and_free_list"},
+    {"pattern": "/projectiles/*", "source": "reference save pool layout; manifest coverage.pool_slot_and_free_list"},
+    {"pattern": "/coins/*", "source": "reference save pool layout; manifest coverage.pool_slot_and_free_list"},
+    {"pattern": "/mowers/*", "source": "reference save pool layout; manifest coverage.pool_slot_and_free_list"},
+    {"pattern": "/grid_items/*", "source": "reference save pool layout; manifest coverage.pool_slot_and_free_list"},
+    {"pattern": "/sound_effects/*", "source": "recipe binds the whole component as sound_effects.b0_state_sha256 (initialization.py:345)", "required": false}
+  ],
+  "derived": [
+    {"pattern": "/sound_effects/calls", "source": "counter origin rebase (docs/engine-replay.md:281,287-289)", "implementation": "sound_counter.py + sound_effects.state(counter_scope)"},
+    {"pattern": "/sound_effects/counter_scope", "source": "counter origin rebase (docs/engine-replay.md:281,287-289)", "implementation": "sound_counter.receipt", "required": false},
+    {"pattern": "/particle_shake/controlled_calls", "source": "controlled digest recomputed from verified seeds", "implementation": "audit_compare._ParticleEvidence/_particle_digest", "required": false},
+    {"pattern": "/particle_shake/controlled_digest", "source": "controlled digest recomputed from verified seeds", "implementation": "audit_compare._ParticleEvidence/_particle_digest", "required": false},
+    {"pattern": "/reanimations/schema", "source": "semantic animation identity mapping (docs/engine-replay.md:209-213)", "implementation": "audit_compare._AnimationDecoder", "required": false},
+    {"pattern": "/reanimations/nodes/*", "source": "semantic animation identity mapping (docs/engine-replay.md:209-213)", "implementation": "audit_compare._AnimationDecoder + normalized_reference lookup rules", "required": false},
+    {"pattern": "/reanimations/valid", "source": "semantic animation identity mapping (docs/engine-replay.md:209-213)", "implementation": "audit_compare._AnimationDecoder", "required": false},
+    {"pattern": "/reanimations/issues", "source": "semantic animation identity mapping (docs/engine-replay.md:209-213)", "implementation": "audit_compare._AnimationDecoder", "required": false}
+  ],
+  "normalization": [],
+  "uncovered": []
+}

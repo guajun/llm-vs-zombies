@@ -23,6 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 from . import sound_effects
+from . import b0_normalization
 from . import app_update_anchor
 from . import mj_clock_anchor
 from . import sound_counter
@@ -1403,6 +1404,7 @@ class _AuditStreamDecoder:
         self.fp = fp_environment.Evidence(manifest)
         self.app_anchor = app_update_anchor.Evidence(manifest)
         self.mj_anchor = mj_clock_anchor.Evidence(manifest)
+        self.b0 = b0_normalization.Evidence(manifest)
         self.calls = _EngineCallEvidence() if engine_call_mode(manifest) else None
         self.frames = _FrameDecoder(reuse_state=reuse_state, engine_calls=self.calls is not None)
         self.animation = _AnimationDecoder(manifest) if RAW_ANIMATIONS in files else None
@@ -1425,6 +1427,7 @@ class _AuditStreamDecoder:
         self.fp.event(event)
         self.app_anchor.event(event)
         self.mj_anchor.event(event)
+        self.b0.event(event)
         if self.calls:
             self.calls.event(event, raw)
         elif event["kind"] == "engine_call_closed" or "engine_call" in event["payload"] or "engine_call_id" in event["payload"]:
@@ -1476,6 +1479,7 @@ class _AuditStreamDecoder:
         self.fp.frame(frame, records[fp_raw_index] if self.fp.enabled else None)
         self.app_anchor.frame(frame)
         self.mj_anchor.frame(frame)
+        self.b0.frame(frame)
         if self.calls:
             self.calls.frame(frame, records[engine_raw_index])
             frame = replace(frame, raw_engine_call=records[engine_raw_index])
@@ -1667,6 +1671,7 @@ class AuditLog:
         self._audio = decoder.audio
         self._app_anchor = decoder.app_anchor
         self._mj_anchor = decoder.mj_anchor
+        self._b0 = decoder.b0
         self._sound_counter = decoder.sound_counter
         self._fp = decoder.fp
         self.peak_pending_particle_calls = decoder.peak_pending
@@ -1711,6 +1716,13 @@ class AuditLog:
     @property
     def mj_clock_receipt(self):
         return copy.deepcopy(self._mj_anchor.anchor)
+
+    def validate_b0_normalization_initial(self, initial):
+        self._b0.initial(initial)
+
+    @property
+    def b0_normalization_receipt(self):
+        return copy.deepcopy(self._b0.anchor)
 
     def validate_fp_initial(self, initial):
         self._fp.initial(initial)
@@ -1758,7 +1770,7 @@ class AuditLog:
             raise EvidenceError("invalid native audit schema/sequence")
         if not isinstance(record.get("payload"), dict) or not isinstance(record.get("kind"), str):
             raise EvidenceError("invalid native audit envelope")
-        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed", "mj_clock_anchor_failed", "sound_counter_origin_failed", "fp_environment_fault"}:
+        if record["kind"] in {"spawn_hook_fault", "particle_shake_fault", "reanimation_link_fault", "render_failed", "draw_schedule_fault", "engine_call_fault", "app_update_anchor_failed", "mj_clock_anchor_failed", "b0_normalization_failed", "sound_counter_origin_failed", "fp_environment_fault"}:
             raise EvidenceError("native hook fault invalidates strict evidence")
         if record["kind"] == "particle_shake_seed":
             if record.get("native_phase") != "before_srand" or record.get("phase") not in {"controlled_boundary", "initialization"}:
@@ -1855,6 +1867,7 @@ class AuditTail:
         self._audio = self._stream.audio
         self._app_anchor = self._stream.app_anchor
         self._mj_anchor = self._stream.mj_anchor
+        self._b0 = self._stream.b0
         self._sound_counter = self._stream.sound_counter
         self._fp = self._stream.fp
         self._identities = {}
@@ -1890,6 +1903,13 @@ class AuditTail:
     @property
     def mj_clock_receipt(self):
         return copy.deepcopy(self._mj_anchor.anchor)
+
+    def validate_b0_normalization_initial(self, initial):
+        self._b0.initial(initial)
+
+    @property
+    def b0_normalization_receipt(self):
+        return copy.deepcopy(self._b0.anchor)
 
     def validate_fp_initial(self, initial):
         self._fp.initial(initial)

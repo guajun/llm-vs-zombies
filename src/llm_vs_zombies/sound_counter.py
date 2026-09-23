@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 
 from . import sound_effects, app_update_anchor
+from . import b0_normalization
 
 MODE = "sound_effects_counter_origin_v1"
 METHOD = "sound_counter_origin"
@@ -23,8 +24,13 @@ def fail(message):
 def mode(game):
     if "sound_counter" not in game:
         return None
-    if not sound_effects.same(game["sound_counter"], SPEC) or app_update_anchor.mode(game) != app_update_anchor.MODE:
+    legacy = app_update_anchor.mode(game) == app_update_anchor.MODE
+    unified = b0_normalization.mode(game) == b0_normalization.MODE
+    if not sound_effects.same(game["sound_counter"], SPEC) or not (legacy or unified):
         fail("unsupported declaration or missing explicit App anchor capability")
+    if unified and not legacy and b0_normalization.APP_UPDATE_FIELD not in b0_normalization.declared_fields(game):
+        # The origin is the real boundary the App update count is written from.
+        fail("unified declaration lacks the App update count field the origin binds")
     return MODE
 
 
@@ -161,13 +167,15 @@ class Evidence:
                 fail("initialization mutation after counter origin")
             if kind == "rng_restored":
                 self.seed_event = None
-        elif self.enabled and kind == app_update_anchor.EVENT:
+        elif self.enabled and kind in {app_update_anchor.EVENT, b0_normalization.EVENT}:
             if self.origin is None or self.anchor is not None:
-                fail("App anchor lacks unique preceding counter origin")
-            value = payload.get("anchor", {})
+                fail("App boundary lacks unique preceding counter origin")
+            # The legacy per-field anchor and the unified table carry the same
+            # before_version/before_state contract for this boundary.
+            value = payload.get("anchor") or payload.get("normalization", {})
             if (not sound_effects.same(value.get("before_version"), self.origin["after_version"])
                     or not sound_effects.same(value.get("before_state"), self.origin["after_state"])):
-                fail("App anchor does not start from the full actual origin after-state")
+                fail("App boundary does not start from the full actual origin after-state")
             self.anchor = copy.deepcopy(value)
         elif self.enabled and kind in {"render_preparing", "request_started", "action"}:
             if self.origin is None or self.anchor is None:

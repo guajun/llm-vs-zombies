@@ -5,6 +5,7 @@ that every original-engine source of nondeterminism has been controlled.
 """
 from __future__ import annotations
 from . import sound_effects
+from . import b0_normalization as b0
 from . import app_update_anchor
 from . import mj_clock_anchor
 from . import sound_counter
@@ -60,6 +61,7 @@ def identity_from_launcher(hello: dict, launcher: dict) -> dict:
     if not isinstance(hello.get("build"), dict) or not isinstance(hello.get("game"), dict):
         raise EvidenceError("hello lacks build/game identity")
     sound_effects.negotiate(hello)
+    b0.negotiate(hello)
     app_update_anchor.negotiate(hello)
     mj_clock_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
@@ -77,6 +79,7 @@ def capture_initial(client: Client, *, identity: dict, initialization: dict) -> 
     """
     hello = client.hello()
     sound_effects.negotiate(hello)
+    b0.negotiate(hello)
     app_update_anchor.negotiate(hello)
     mj_clock_anchor.negotiate(hello)
     sound_counter.negotiate(hello)
@@ -120,6 +123,7 @@ def _validate_identity(identity: dict) -> None:
     draw_mode(game)
     engine_call_mode(game)
     sound_effects.artifacts(game, identity["artifacts"])
+    b0.mode(game)
     app_update_anchor.mode(game)
     mj_clock_anchor.mode(game)
     sound_counter.mode(game)
@@ -164,6 +168,7 @@ def _validate_initial(initial: dict) -> None:
     elif "engine_call_origin" in initial:
         raise EvidenceError("engine call origin lacks an explicit engine identity")
     sound_effects.initial(initial)
+    b0.initial(initial)
     app_update_anchor.initial(initial)
     mj_clock_anchor.initial(initial)
     sound_counter.initial(initial)
@@ -698,6 +703,9 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     audio_mode = sound_effects.mode(trajectory.audit.manifest)
     anchor_mode = app_update_anchor.mode(trajectory.audit.manifest)
     mj_clock_mode = mj_clock_anchor.mode(trajectory.audit.manifest)
+    b0_mode = b0.mode(trajectory.audit.manifest)
+    if b0_mode and (anchor_mode or mj_clock_mode):
+        raise EvidenceError("one archive cannot mix the unified B(0) normalization with a legacy per-field anchor")
     counter_mode = sound_counter.mode(trajectory.audit.manifest)
     fp_mode = fp_environment.mode(trajectory.audit.manifest)
     report["fixed_fp"] = {"mode": fp_mode or "not_declared", "activation_compared": False,
@@ -714,6 +722,13 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
         "original_engine_bitwise_unmodified": False if mj_clock_mode else None,
         "receipt_compared": False, "before_values_compared": False, "subsequent_state_normalized": False,
         "target_policy": mj_clock_anchor.SPEC["target_policy"] if mj_clock_mode else None}
+    report["b0_normalization"] = {"mode": b0_mode or "not_declared",
+        "original_engine_bitwise_unmodified": False if b0_mode else None,
+        "ordering": b0.ORDERING if b0_mode else None,
+        "declared_field_set": list(b0.FIELD_NAMES) if b0_mode else [],
+        "entries": copy.deepcopy(b0.recipe_entries(trajectory.initial["initialization"])) if b0_mode else [],
+        "receipt_compared": False, "before_values_compared": False, "subsequent_state_normalized": False,
+        "source_actual_value_reused_as_target": False}
     report["sound_effects"] = {"mode": audio_mode or "original", "state_compared": False,
         "original_engine_bitwise_unmodified": False if audio_mode else None,
         "activation_evidence_verified": False, "final_health_verified": False,
@@ -768,6 +783,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
             require_equal(trajectory.initial["identity"], session.identity, "identity")
             hello = client.hello()
             sound_effects.negotiate(hello)
+            b0.negotiate(hello)
             app_update_anchor.negotiate(hello)
             mj_clock_anchor.negotiate(hello)
             sound_counter.negotiate(hello)
@@ -811,6 +827,8 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 required.update({app_update_anchor.MODE, app_update_anchor.METHOD})
             if mj_clock_mode:
                 required.update({mj_clock_anchor.MODE, mj_clock_anchor.METHOD})
+            if b0_mode:
+                required.update({b0.MODE, b0.METHOD})
             if counter_mode:
                 required.update({sound_counter.MODE, sound_counter.METHOD})
             if fp_mode:
@@ -893,6 +911,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                 report["draw_schedule"]["warm_receipts_compared"] = 1
             actual_audit.validate_app_anchor_initial(actual_marker)
             actual_audit.validate_mj_clock_initial(actual_marker)
+            actual_audit.validate_b0_normalization_initial(actual_marker)
             actual_audit.validate_sound_counter_initial(actual_marker)
             actual_audit.validate_fp_initial(actual_marker)
             if fp_mode:
@@ -925,6 +944,16 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                     actual_before=actual_mj["before"], requested=expected_mj["requested"],
                     common_target=expected_mj["requested"], source_after=expected_mj["after"],
                     actual_after=actual_mj["after"])
+            if b0_mode:
+                expected_b0, actual_b0 = trajectory.audit.b0_normalization_receipt, actual_audit.b0_normalization_receipt
+                require_equal(b0.semantics(expected_b0, map_version=mapped_version),
+                              b0.semantics(actual_b0), "initial_b0_normalization")
+                report["b0_normalization"].update(receipt_compared=True, before_values_recorded=True,
+                    source_before=[item["value"] for item in expected_b0["before"]],
+                    actual_before=[item["value"] for item in actual_b0["before"]],
+                    common_targets=[item["target"] for item in expected_b0["requested"]],
+                    source_after=[item["value"] for item in expected_b0["after"]],
+                    actual_after=[item["value"] for item in actual_b0["after"]])
             for ordinal, step in enumerate(trajectory.steps):
                 if target_tick is not None and client.version["tick"] >= target_tick:
                     break

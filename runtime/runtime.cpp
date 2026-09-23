@@ -1,4 +1,5 @@
 #include "determinism/app_update_anchor.hpp"
+#include "determinism/b0_normalization.hpp"
 #include "determinism/mj_clock_anchor.hpp"
 #include "determinism/memory.hpp"
 #include "determinism/silent_audio_audit.hpp"
@@ -91,6 +92,7 @@ class GameBackend final : public Backend {
     bool renderPrepared_=false,seededAtBoundary_=false;
     lvz::determinism::InitialAppUpdateAnchor appAnchor_;
     lvz::determinism::InitialMjClockAnchor mjClockAnchor_;
+    lvz::determinism::InitialB0Normalization b0Normalization_;
     uint32_t boundarySeed_=0;
 public:
     bool Ready() const override {
@@ -203,6 +205,7 @@ public:
                 {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false},
                 {"app_update_anchor",lvz::determinism::silentaudio::Enabled()},{"initial_app_update_anchor_v1",lvz::determinism::silentaudio::Enabled()},
                 {"mj_clock_anchor",lvz::determinism::silentaudio::Enabled()},{"initial_mj_clock_anchor_v1",lvz::determinism::silentaudio::Enabled()},
+                {"b0_normalization",lvz::determinism::silentaudio::Enabled()},{"initial_b0_normalization_v1",lvz::determinism::silentaudio::Enabled()},
                 {"sound_counter_origin",lvz::determinism::silentaudio::Enabled()},{"sound_effects_counter_origin_v1",lvz::determinism::silentaudio::Enabled()},
                 {"fixed_owner_fp_v1",true},
                 {"spawn_action",true},
@@ -214,11 +217,14 @@ public:
     bool AppUpdateAnchored()const override{return appAnchor_.Applied();}
     bool SupportsMjClockAnchor()const override{return lvz::determinism::silentaudio::Enabled();}
     bool MjClockAnchored()const override{return mjClockAnchor_.Applied();}
+    bool SupportsB0Normalization()const override{return lvz::determinism::silentaudio::Enabled();}
+    bool B0Normalized()const override{return b0Normalization_.Applied();}
     bool SupportsSoundCounterOrigin()const override{return lvz::determinism::silentaudio::Enabled();}
     bool SoundCounterBound()const override{return lvz::determinism::silentaudio::CounterBound();}
     Json BindSoundCounterOrigin()override{
         if(!Ready()||GetCurrentThreadId()!=ownerThread)return {{"ok",false},{"error","Sound origin requires ready owner game thread"}};
-        return lvz::determinism::silentaudio::BindCounterOrigin(boundarySeed_,seededAtBoundary_,renderPrepared_,appAnchor_.Applied(),
+        return lvz::determinism::silentaudio::BindCounterOrigin(boundarySeed_,seededAtBoundary_,renderPrepared_,
+            appAnchor_.Applied()||b0Normalization_.Applied(),
             []{return lvz::determinism::CaptureState();});
     }
     Json AnchorAppUpdate(uint32_t requested)override {
@@ -240,8 +246,21 @@ public:
         return mjClockAnchor_.Apply(app+0x838,requested,boundarySeed_,SupportsMjClockAnchor(),appAnchor_.Applied(),
             seededAtBoundary_,renderPrepared_,[]{return lvz::determinism::CaptureState();});
     }
+    Json NormalizeB0(const Json& entries)override {
+        if(!Ready()||GetCurrentThreadId()!=ownerThread)return {{"ok",false},{"error","B(0) normalization requires the ready owner game thread"}};
+        if(SupportsSoundCounterOrigin()&&!SoundCounterBound())
+            return {{"ok",false},{"error","Explicit sound counter origin must precede the B(0) table"}};
+        const auto app=lvz::determinism::Read<uint32_t>(0x6a9ec0);
+        if(!app)return {{"ok",false},{"error","B(0) normalization target unavailable"}};
+        return b0Normalization_.Apply(app,entries,boundarySeed_,SupportsB0Normalization(),SoundCounterBound(),
+            seededAtBoundary_,renderPrepared_,[]{return lvz::determinism::CaptureState();},[app]{
+                using lvz::determinism::Read;
+                return Json{{"00000510",Read<uint8_t>(app+0x510)},{"00000511",Read<uint8_t>(app+0x511)},
+                    {"00000578",Read<uint32_t>(app+0x578)},{"0000049c",Read<uint32_t>(app+0x49c)},{"000004a0",Read<uint8_t>(app+0x4a0)}};});
+    }
     void InvalidateFrame(const std::string& reason)override {frameCache_.Invalidate(reason);}
-    void ResetRenderPreparation()override {appAnchor_.Reset();mjClockAnchor_.Reset();renderPrepared_=seededAtBoundary_=false;frameCache_.Invalidate("epoch_changed");}
+    void ResetRenderPreparation()override {appAnchor_.Reset();mjClockAnchor_.Reset();b0Normalization_.Reset();
+        renderPrepared_=seededAtBoundary_=false;frameCache_.Invalidate("epoch_changed");}
     Json RenderFrame(const Json& version,bool warm)override {
         lvz::determinism::CheckFloatingPoint(warm?lvz::determinism::fpenv::Phase::BeforeWarm:lvz::determinism::fpenv::Phase::BeforeDraw,true);
         lvz::recording::CheckDrawGate();
@@ -249,8 +268,12 @@ public:
         const auto beforeRng=lvz::determinism::CaptureRng();
         if(warm) {
             if(SupportsSoundCounterOrigin()&&!SoundCounterBound())throw std::runtime_error("Sound counter origin must precede warm drawing");
-            if(SupportsAppUpdateAnchor()&&!appAnchor_.Applied())throw std::runtime_error("App anchor must precede warm drawing");
-            if(SupportsMjClockAnchor()&&!mjClockAnchor_.Applied())throw std::runtime_error("Fixed MJ clock anchor must precede warm drawing");
+            if(SupportsB0Normalization()) {
+                if(!b0Normalization_.Applied())throw std::runtime_error("The declared B(0) normalization table must precede warm drawing");
+            } else {
+                if(SupportsAppUpdateAnchor()&&!appAnchor_.Applied())throw std::runtime_error("App anchor must precede warm drawing");
+                if(SupportsMjClockAnchor()&&!mjClockAnchor_.Applied())throw std::runtime_error("Fixed MJ clock anchor must precede warm drawing");
+            }
             if(!seededAtBoundary_)throw std::runtime_error("rng_seed at the paused fight boundary must precede warm drawing");
             const auto& instances=beforeRng.at("instances");
             const auto& mt=instances.at("global_mt");

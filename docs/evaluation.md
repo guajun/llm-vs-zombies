@@ -33,9 +33,17 @@ python -m llm_vs_zombies.evaluation run work/strict-plan.json --output experimen
 
 strict 默认每个种子要求 10 次冷启动：一次录制策略轨迹，九次冷启动后重算同一轨迹，**不是让 LLM 再回答九次**。另有恢复测试专用进程，不能拿它凑十次完整重放。默认上限 200000 tick，达到上限仍未完成两旗即不满足通关门槛。源未完成两旗时封存真实结果并跳过九次重放；smoke 的正常来源仍运行一次真实 cold 和恢复探针。首个 cold 失败后停止派发该种子尚未开始的重放，已运行的 cold 完成正常关闭和证据保留。这里的 baseline 是公开候选策略，命令可执行并不证明它已能赢完整两旗。
 
-`plan` 支持 `--seeds 0,1,42`、`--tick-budget`、`--cold-starts`、`--cold-workers 1|2`、`--timeout-seconds`、`--wall-budget-seconds`、`--cold-wall-budget-seconds`、`--min-free-bytes`、`--packaging-reserve-bytes`、`--disk-check-ticks`、`--app-update-count`、`--mj-clock` 和 `--pause-points '[[1000,1],[2500,5]]'`。strict 生成默认单请求超时600秒、源墙钟预算86400秒、每次cold墙钟预算86400秒；smoke 单请求/源默认仍为90/3600秒。已有计划保持其显式值，不自动延长。strict 不能降低十次冷启动要求。策略相对路径相对于计划文件所在目录；生成命令会保存当时解析的绝对路径。
+`plan` 支持 `--seeds 0,1,42`、`--tick-budget`、`--cold-starts`、`--cold-workers 1|2`、`--timeout-seconds`、`--wall-budget-seconds`、`--cold-wall-budget-seconds`、`--min-free-bytes`、`--packaging-reserve-bytes`、`--disk-check-ticks`、`--b0-normalize`、过渡别名 `--app-update-count`/`--mj-clock` 和 `--pause-points '[[1000,1],[2500,5]]'`。strict 生成默认单请求超时600秒、源墙钟预算86400秒、每次cold墙钟预算86400秒；smoke 单请求/源默认仍为90/3600秒。已有计划保持其显式值，不自动延长。strict 不能降低十次冷启动要求。策略相对路径相对于计划文件所在目录；生成命令会保存当时解析的绝对路径。
 
-`--app-update-count` 与 `--mj-clock` 声明的是**固定的 B(0) 归一化目标**（范围 `0..2147483647`），分别对应 `/sound_effects/app_update_count`（`LawnApp+0x484`）与 `/app/mj_clock`（`LawnApp+0x838`）。运行时声明了对应能力却没有声明目标时，初始化在任何请求之前拒绝启动；目标值不回退到本 run 的观测计数，因为那只保证世界内一致，跨世界必然不同。并行世界必须在各自的计划里声明**同一个值**；缺省仍是 `null`，旧计划不会被自动填值，也不会被自动升级。
+计划 schema 是 `lvz.evaluation-plan.v2`：B(0) 归一化目标是一张**有序表** `b0_normalization: [{field, target, reason}]`，`field` 是 B(0) 状态的 JSON Pointer，必须落在 runtime 声明的封闭字段集合内（当前为 `/sound_effects/app_update_count`（`LawnApp+0x484`）与 `/app/mj_clock`（`LawnApp+0x838`）），`target` 范围 `0..2147483647`，`reason` 是审阅文本：
+
+```powershell
+python -m llm_vs_zombies.evaluation plan work/silent-plan.json --audio-mode sound_effects_allocation_none_v1 `
+  --b0-normalize '{"field":"/sound_effects/app_update_count","target":2048,"reason":"B(0) 前 App 循环圈数"}' `
+  --b0-normalize '{"field":"/app/mj_clock","target":2048,"reason":"舞者相位绝对计数"}'
+```
+
+运行时声明了归一化能力却没有声明目标（未声明 / 空表 / `null` / 越界 / 集合外字段）时，初始化在任何请求之前拒绝启动，并列出未声明的字段；目标值不回退到本 run 的观测计数，因为那只保证世界内一致，跨世界必然不同。并行世界必须在各自的计划里声明**同一张表**（`reason` 不参与根身份与合并判定）。v1 计划仍按旧形状读：`mj_clock: N` 映射为一条 `/app/mj_clock` 表项（`reason` 记 `legacy Plan.mj_clock`），`mj_clock: null` 读作"未声明"；v1 与 v2 键混用直接拒绝。形状、回执与读取规则见 [B(0) 归一化统一实现](b0-normalization-native.md)。
 
 `cold_workers` 默认 `1`，仅接受整数 `1` 或 `2`；旧计划缺失此字段时仍串行。`2` 在 Windows 上最多同时运行两个独立冷重放宿主，source、不同种子和 recovery 仍顺序执行。默认 smoke 只有一次 cold；若要两次 cold，可同时设置 `--cold-starts 3`。每个 worker 都独立对源轨迹执行完整核验并保留原请求预算；其窗口、关闭、宿主、资源及归档门槛各自进入总报告。并发不会降低 strict 条件。配置、资源边界和回执见[并行冷重放](parallel-cold.md)。
 
@@ -66,6 +74,8 @@ launcher 在进入游戏前应用 seed，源实验在真实两仪初态暂停后
 当前显式静音 runtime 还声明两项独立初始化能力：[App 更新计数锚定](app-update-anchor-native.md)与[诊断音效计数起点](sound-counter-origin-native.md)。顺序为种子/三时钟读回、绑定本进程诊断计数起点、写入记录的真实 App 计数、warm 绘制、B0。原始 App 写入保留完整前后回执；bootstrap 的绝对计数不重置，每个更新边界另存原始累计旁证，实验内计数包含 warm。完整游戏状态直接比较，允许不同的启动诊断累计值不等于允许游戏字段分叉。旧档没有这些声明时仍按原合同读取，不能自动升级为新模式。
 
 同一 runtime 还声明第三项能力：[固定 MJ 时钟锚定](mj-clock-anchor-native.md)。计划的 `mj_clock` 字段声明 B(0) 的固定目标，顺序变为种子/三时钟读回、绑定诊断计数起点、写入记录的真实 App 计数、把 `LawnApp+0x838` 真实写入该固定目标、warm 绘制、B0。运行声明能力而没有声明目标时 `apply_recipe` 在发出任何初始化请求前拒绝启动；每个平行世界必须在自己的计划里声明同一个值，跨运行的真实 before 照实保留，after 必须等于共同目标。该字段只统一初始化输入，不改变任何状态比较字段，也不改动既有 C/D 结论。
+
+新形状把上面两条能力合并成第四项能力 [B(0) 归一化统一实现](b0-normalization-native.md)：一次 `b0_normalization` 按声明序真实写入整张表，只消耗**一个 revision**、只产生**一个回执**（表内 `after == target`、表外字段逐叶子不变、warm 是紧邻下一 revision），旧的两条 RPC 与旧读取器保留但不再与新表混用。计划/CLI/配方的统一形状、缺省 fail-closed 与配方完整性检查（`python -m llm_vs_zombies.b0_coverage`）见该文档。
 
 在 `capture_initial` 前执行暂停扰动：保存 audit snapshot 与观察，等待指定墙钟时间，再确认**已捕获模拟状态与version逐字段不变**。暂停证明的冻结对象是模拟状态与版本，不是整份 snapshot 字节：声明固定 owner 浮点模式时，每次读取 snapshot 都会新增一次 monitor 检查，两次读取必然不同；探针改为显式核验该模式的激活回执未变，且 after 侧 monitor 仍健康、控制位仍在目标值，并把实际比较的字段写入probe记录，不静默丢弃这段证据。随后记录单帧推进，再执行策略：**公开runner首个策略决策在B1**，与私有045在B0决策不同；当前公开源自行记录真实初始锚点，不继承私有041的B0。每个cold使用自己的实际进程及源recipe，从完整B0重新执行包括这次advance1在内的相同请求。
 
