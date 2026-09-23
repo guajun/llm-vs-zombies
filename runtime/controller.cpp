@@ -682,9 +682,16 @@ void Controller::Request(const Json& req,Reply reply) {
             if(!params.empty()) {Complete(id,Error(id,"invalid_params","prepare_render takes no parameters"));return;}
             if(!ready_||terminalFrozen_||inStep_||tick_!=0) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing requires a paused ready fight at tick zero"));return;}
             if(!backend_.RequiresRenderPreparation()||backend_.RenderPrepared()) {Complete(id,Error(id,"render_prepare_rejected","Warm drawing is unavailable or has already completed"));return;}
-            if(backend_.SupportsAppUpdateAnchor()&&!backend_.AppUpdateAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Explicit App update anchor must precede warm drawing"));return;}
-            if(backend_.SupportsMjClockAnchor()&&!backend_.MjClockAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Fixed MJ clock anchor must precede warm drawing"));return;}
-            if(backend_.SupportsB0Normalization()&&!backend_.B0Normalized()) {Complete(id,Error(id,"render_prepare_rejected","The declared B(0) normalization table must precede warm drawing"));return;}
+            // One shape per run: when the runtime offers the unified table it is the
+            // authority for these fields, and the legacy per-field anchors are not
+            // expected to have been applied. Mirror the backend's own gate in
+            // runtime.cpp so both layers agree instead of demanding both shapes.
+            if(backend_.SupportsB0Normalization()) {
+                if(!backend_.B0Normalized()) {Complete(id,Error(id,"render_prepare_rejected","The declared B(0) normalization table must precede warm drawing"));return;}
+            } else {
+                if(backend_.SupportsAppUpdateAnchor()&&!backend_.AppUpdateAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Explicit App update anchor must precede warm drawing"));return;}
+                if(backend_.SupportsMjClockAnchor()&&!backend_.MjClockAnchored()) {Complete(id,Error(id,"render_prepare_rejected","Fixed MJ clock anchor must precede warm drawing"));return;}
+            }
             ++revision_;
             Audit("render_preparing",{{"request_id",id}});
             Json receipt;
