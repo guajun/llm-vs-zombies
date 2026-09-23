@@ -20,6 +20,8 @@
 // nothing declares the mode. tests/avz_hosted_fire_tests.cpp is built both ways
 // and asserts both behaviours.
 #include <cstdint>
+#include <cstddef>
+#include <functional>
 #include <nlohmann/json.hpp>
 
 namespace lvz::determinism {
@@ -40,13 +42,27 @@ bool HostedFireEnabled();
 void RecordHostedFire(int plantIndex, int plantId, int plantRow, int plantCol,
                       int targetRow, float targetCol, const nlohmann::json& version);
 
-// One complete audit envelope per queued shot, in the order they happened,
-// with `seq` starting at `firstSequence`. The writer owns the sequence counter.
-nlohmann::json DrainHostedFireEvents(uint64_t firstSequence);
+// Hands one complete audit envelope per queued shot, in the order they
+// happened, to `sink`, with `seq` starting at `firstSequence`; returns how many
+// records were drained. The sink is the audit writer's `Write(events, ...)`, so
+// the offline test runs this very drain against a file and counts the lines it
+// would have produced (the live 12-cannon run wrote the records but the digest
+// they were reconciled against disagreed - see HostedFireState below).
+size_t DrainHostedFireRecords(const std::function<void(const nlohmann::json&)>& sink,
+                              uint64_t firstSequence);
 
-// Comparable per-boundary state: {"mode", "count", "digest"}. The digest is the
-// audit's diagnostic FNV-1a over the payload's integer fields, little-endian
-// 64-bit words, so the Python reader recomputes it from the records alone.
+// Comparable per-boundary state: {"mode", "count", "digest"}.
+//
+// The digest is the audit's diagnostic FNV-1a over the payload's integer fields
+// in this fixed order - plant_index, plant_id, plant_row, plant_col,
+// target_row, target_col_bits, tick - each encoded as one little-endian 64-bit
+// word. The word comes from the value *the record stores*, not from the C++
+// parameter that carried it: a uint32 field (plant_id) zero-extends and a
+// negative JSON integer sign-extends, exactly like the Python reader's
+// `value & 0xffffffffffffffff`. That rule is the whole contract between writer
+// and reader; computing it from a differently typed copy of the same number
+// (e.g. the signed `int` parameter while the record holds a uint32 plant id)
+// silently breaks the reconciliation for every id >= 2^31.
 nlohmann::json HostedFireState();
 
 // Manifest declaration of the mode (proves which semantics produced the records).

@@ -1,20 +1,24 @@
-// Offline proof that a hosted AvZ cannon shot leaves exactly one audit record
-// and that the audit-only overlay changes no engine call.
+// Offline proof that a hosted AvZ cannon shot leaves exactly one audit record,
+// that the audit drain hands those records to the writer which appends them to
+// events.jsonl, and that the per-boundary state count/digest reconciles with
+// them.
 //
 // Built twice from this one source (see CMakeLists.txt), with the same fake PvZ
 // image as tests/avz_hosted_script_tests.cpp:
 //   * avz_hosted_fire_tests         - the generated overlay of the pinned AvZ
 //     cob manager (build/cmake/avz_cob_manager_overlay.cpp) plus the real
-//     record path (runtime/hosted_fire.cpp, determinism/hosted_fire.cpp), i.e.
-//     the way a hosted recorder.dll is built.
+//     record/drain path (runtime/hosted_fire.cpp, determinism/hosted_fire.cpp),
+//     i.e. the way a hosted recorder.dll is built.
 //   * avz_hosted_fire_default_tests - the pristine upstream cob manager and the
 //     same record module without LVZ_AVZ_HOSTED_FIRE_AUDIT, i.e. the way the
 //     default recorder.dll is built (which links the module not at all, and the
 //     default target of tests/test_avz_hosted_script.py asserts that wiring).
 //
 // Really linked and run here: AvZ's own ACobManager::_BasicFire (pristine or
-// overlaid), AGridToCoordinate, AAsm::Fire/ReleaseMouse/GridToOrdinate call
-// sites, the logger and the runtime's real hosted-fire record path.
+// overlaid), AGridToCoordinate, the AAsm::Fire/ReleaseMouse/GridToOrdinate call
+// sites, the logger, and the runtime's real hosted-fire record path plus the
+// real drain (determinism::DrainHostedFireRecords, the function audit.cpp calls
+// with `Write(events, ...)` as its sink).
 //
 // Test doubles, and why they sit on the boundary:
 //   * AAsm::Fire, AAsm::ReleaseMouse and AAsm::GridToOrdinate are redirected by
@@ -22,25 +26,28 @@
 //     RVAs, which only exist inside the game process. Each double counts the
 //     call and its arguments, so the engine call sequence is byte-comparable
 //     between the two builds.
-//   * lvz::runtime::CurrentVersion() stands in for the resident runtime's
-//     controller version, exactly like the frame gate in the hosted-script test.
+//   * lvz::runtime::CurrentVersion()/ReportAuditFault() stand in for the
+//     resident runtime's controller, exactly like the frame gate in the
+//     hosted-script test.
+//   * the drain's sink is a file here; in recorder.dll it is the audit writer's
+//     `Write(events, ...)`, which appends the same JSON line.
 //
-// Proven here: with the audit-only hook compiled in, three accepted shots
-// produce exactly three audit records (and nothing else), the records carry the
-// tick/row/column/plant identity the hook read, the per-boundary state
-// count/digest match an independent encoding of those records, the queue drains
-// once, and the engine call sequence is byte-identical to the default build's.
-// Not proven here: the real engine (a real cannon firing), the audit writer's
-// file layout (determinism/audit.cpp needs the real image) and the live
-// acceptance run.
+// Why the first live run's failure is covered here: the live 12-cannon run
+// recorded 20 shots whose plant ids were all >= 2^31 (0xDC740013 and up). The
+// writer mixed each id from the signed `int` parameter (sign-extending it)
+// while the record stores it as a uint32 (zero-extending it), so the boundary
+// state digest disagreed with the records the reader recomputed from - the
+// reader reported "hosted fire state count/digest differs from the verified
+// records" even though both events were present. The 20 shots below use the
+// same id range and the same "two shots per granted frame, drained at the next
+// boundary" shape. The documented encoding (payload values, two's complement)
+// is pinned twice: here for the first live shot's payload, and in
+// tests/test_hosted_fire_audit.py, which recomputes the whole chain from the
+// artifacts this test writes.
 //
-// Harness note: this test drives shots _BasicFire refuses (wrong plant type,
-// still reloading), so AvZ logs them at ERROR level - the production level the
-// overlay sets. AAbstractLogger::_CreateHeader reads
-// AMainObject::CompletedRounds(), which dereferences the challenge pointer at
-// board+0x160, so the fake board points that field at a zeroed block. Without
-// it the fake image faults in the logger, exactly like the INFO-level header
-// fault tests/avz_hosted_script_tests.cpp records.
+// Not proven here: the real engine (a real cannon firing) and the audit
+// writer's own file layout (determinism/audit.cpp needs the real image to
+// Initialize); the live acceptance run covers those.
 
 #include <avz.h>
 
@@ -74,8 +81,8 @@ constexpr std::size_t kBoardPlantArray = 0xac;
 constexpr std::size_t kBoardItemArray = 0xe4;
 constexpr std::size_t kBoardMouseAttribution = 0x138;
 constexpr std::size_t kBoardSeedArray = 0x144;
-constexpr std::size_t kBoardChallenge = 0x160;
 constexpr std::size_t kBoardZombieArray = 0x90;
+constexpr std::size_t kBoardChallenge = 0x160;
 constexpr std::size_t kBoardTotalWave = 0x5564;
 constexpr std::size_t kBoardGameClock = 0x5568;
 constexpr std::size_t kBoardGlobalClock = 0x556c;
@@ -86,12 +93,24 @@ constexpr std::size_t kBoardLevelEndCountdown = 0x5604;
 
 // APlant (avz/framework/inc/avz_pvz_struct.h).
 constexpr std::size_t kPlantStride = 0x14c;
+constexpr std::size_t kPlantSlots = 64;
 constexpr std::size_t kPlantRow = 0x1c;
 constexpr std::size_t kPlantType = 0x24;
 constexpr std::size_t kPlantCol = 0x28;
 constexpr std::size_t kPlantState = 0x3c;
 constexpr std::size_t kPlantId = 0x148;
 constexpr int kCannonReadyState = 37; // APlant state "ready to fire"
+
+// The first cannon of the live 12-cannon run, verbatim from its first
+// hosted_fire record: plant_index 19, this id, 1-based row/column 1/5, target
+// row 2, target column 9.0, tick 567.
+constexpr uint32_t kLivePlantId = 0xDC740013u;
+constexpr int kLiveTick = 567;
+constexpr int kShotCount = 20; // ten P6 rounds, two cannons each
+// FNV-1a of that shot's payload under the documented encoding (payload values,
+// two's complement 64-bit words). It differs from the sign-extended value the
+// pre-fix writer produced, which is exactly what failed the live run.
+constexpr uint64_t kLiveShotDigest = 6388981459987454381ULL;
 
 uint8_t* app = nullptr;
 uint8_t* board = nullptr;
@@ -180,15 +199,16 @@ void InstallFakeImage() noexcept {
     try {
         app = Allocate(kPageSize);
         board = Allocate(0x8000);
-        plants = Allocate(8 * kPlantStride);
+        plants = Allocate(kPlantSlots * kPlantStride);
         Put<uint32_t>(app, kAppMouseWindow, reinterpret_cast<uint32_t>(Allocate(kPageSize)));
         Put<uint32_t>(board, kBoardPlantArray, reinterpret_cast<uint32_t>(plants));
         Put<uint32_t>(board, kBoardItemArray, reinterpret_cast<uint32_t>(Allocate(kPageSize)));
         Put<uint32_t>(board, kBoardMouseAttribution, reinterpret_cast<uint32_t>(Allocate(kPageSize)));
         Put<uint32_t>(board, kBoardSeedArray, reinterpret_cast<uint32_t>(Allocate(kPageSize)));
         Put<uint32_t>(board, kBoardZombieArray, reinterpret_cast<uint32_t>(Allocate(kPageSize)));
-        // AMainObject::CompletedRounds() (the logger header reads it) walks this
-        // pointer; a zeroed block reports zero completed rounds.
+        // AMainObject::CompletedRounds() (the logger header reads it when a
+        // refused shot is logged at ERROR level) walks this pointer; a zeroed
+        // block reports zero completed rounds.
         Put<uint32_t>(board, kBoardChallenge, reinterpret_cast<uint32_t>(Allocate(kPageSize)));
     } catch (const std::exception& error) {
         imageError = error.what();
@@ -202,20 +222,22 @@ void InstallFakeImage() noexcept {
     Put<uint32_t>(app, kAppD3d, 0);  // no 3D acceleration: painter stays idle
 
     Put<int>(board, kBoardTotalWave, 20);
-    Put<int>(board, kBoardGameClock, 40);
-    Put<int>(board, kBoardGlobalClock, 40);
+    Put<int>(board, kBoardGameClock, kLiveTick);
+    Put<int>(board, kBoardGlobalClock, kLiveTick);
     Put<int>(board, kBoardWave, 1);
     Put<int>(board, kBoardRefreshCountdown, 0);
     Put<int>(board, kBoardInitialCountdown, 0);
     Put<int>(board, kBoardLevelEndCountdown, 0);
 
-    // Slot 3 and slot 7 are ready cannons, the two the test fires. Slot 0 is not
-    // a cannon and slot 1 is a cannon that is still reloading: _BasicFire must
-    // refuse both, and a refused shot must leave no record behind.
-    PlantSlot(3, ACOB_CANNON, kCannonReadyState, 0, 2, 0x00010003u);
-    PlantSlot(7, ACOB_CANNON, kCannonReadyState, 3, 5, 0x00020007u);
+    // Slot 0 is not a cannon and slot 1 is a cannon that is still reloading:
+    // _BasicFire must refuse both, and a refused shot must leave no record.
     PlantSlot(0, 0, kCannonReadyState, 0, 0, 0x00010000u);
     PlantSlot(1, ACOB_CANNON, 35, 0, 1, 0x00010001u);
+    // The fired cannons carry the live run's id range: 0xDC740013 and up, i.e.
+    // every id is >= 2^31.
+    for (int index = 0; index < kShotCount; ++index)
+        PlantSlot(19 + index, ACOB_CANNON, kCannonReadyState, index % 5, 4 + (index % 4),
+            kLivePlantId + static_cast<uint32_t>(index) * 0x1234u);
 }
 
 struct FakeImageInstaller {
@@ -255,7 +277,9 @@ std::vector<std::string> ReadLines(const std::filesystem::path& file) {
 
 // The audit's diagnostic FNV-1a over the payload's integer fields, in the order
 // determinism/hosted_fire.cpp documents and src/llm_vs_zombies/audit_compare.py
-// re-implements; the test recomputes it independently of the module.
+// re-implements. This test computes it independently of the module, from the
+// payload the record carries, and takes each value as its two's-complement
+// 64-bit pattern (a uint32 plant id zero-extends, a negative int sign-extends).
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
 uint64_t Mix(uint64_t digest, uint64_t value) {
     for (unsigned byte = 0; byte < 8; ++byte) {
@@ -266,13 +290,17 @@ uint64_t Mix(uint64_t digest, uint64_t value) {
     return digest;
 }
 
-uint64_t ExpectedDigest(const std::vector<nlohmann::json>& payloads) {
+uint64_t Word(const nlohmann::json& value) {
+    return value.is_number_unsigned() ? value.get<uint64_t>()
+                                      : static_cast<uint64_t>(value.get<int64_t>());
+}
+
+uint64_t ExpectedDigest(const std::vector<nlohmann::json>& payloads, std::size_t limit) {
     uint64_t digest = 14695981039346656037ULL;
-    for (const auto& payload : payloads) {
+    for (std::size_t index = 0; index < limit; ++index)
         for (const char* field : {"plant_index", "plant_id", "plant_row", "plant_col",
                                   "target_row", "target_col_bits", "tick"})
-            digest = Mix(digest, static_cast<uint64_t>(payload.at(field).get<int64_t>()));
-    }
+            digest = Mix(digest, Word(payloads[index].at(field)));
     return digest;
 }
 #endif
@@ -338,19 +366,30 @@ int main() {
             int targetRow;
             float targetCol;
             nlohmann::json version;
-            bool accepted;
         };
-        const std::vector<Shot> shots = {
-            {3, 2, 9.0f, {{"epoch", 1}, {"tick", 40}, {"revision", 0}}, true},
-            {7, 5, 9.0f, {{"epoch", 1}, {"tick", 40}, {"revision", 0}}, true},
-            {0, 1, 1.0f, {{"epoch", 1}, {"tick", 40}, {"revision", 0}}, false},
-            {1, 1, 1.0f, {{"epoch", 1}, {"tick", 40}, {"revision", 0}}, false},
-            // Same boundary, unsigned tick: the record must accept both JSON
-            // integer spellings of the version the runtime reports.
-            {3, 4, 7.625f, {{"epoch", 1u}, {"tick", 41u}, {"revision", 0u}}, true},
-        };
+        // Ten P6 rounds of two cannons: two shots per granted frame, exactly the
+        // shape the live run recorded (ticks 567, 577, ... for the same wave).
+        std::vector<Shot> shots;
+        for (int index = 0; index < kShotCount; ++index)
+            shots.push_back({19 + index, index % 2 ? 5 : 2, index % 3 == 2 ? 7.625f : 9.0f,
+                {{"epoch", 3}, {"tick", kLiveTick + (index / 2) * 10}, {"revision", 0}}});
 
-        std::vector<nlohmann::json> expectedPayloads, expectedVersions;
+        // Two refused shots first: neither may leave a record, and both must
+        // still produce the pristine engine call sequence (one mouse release).
+        const std::pair<int, float> refused[] = {{0, 1.0f}, {1, 1.0f}};
+        for (const auto& [plantIndex, targetCol] : refused) {
+            lvz::runtime::reportedVersion = shots[0].version;
+            const auto before = engineCalls.size();
+            FireHarness::_BasicFire(plantIndex, 1, targetCol);
+            Check(engineCalls.size() - before == 1,
+                "a refused shot changed the engine call sequence");
+        }
+
+        std::vector<nlohmann::json> expectedPayloads, expectedVersions, envelopes, states;
+        uint64_t sequence = 0;
+        const auto sink = [&envelopes](const nlohmann::json& envelope) {
+            envelopes.push_back(envelope);
+        };
         for (const auto& shot : shots) {
             lvz::runtime::reportedVersion = shot.version;
             const auto before = engineCalls.size();
@@ -358,17 +397,8 @@ int main() {
             // or the overlay generated from it), driven exactly as the hosted
             // script's aCobManager.Fire(...) drives it.
             FireHarness::_BasicFire(shot.plantIndex, shot.targetRow, shot.targetCol);
-            const auto after = engineCalls.size();
-            // _BasicFire always releases the mouse first; an accepted shot then
-            // converts the grid position and fires exactly once before releasing
-            // the mouse again. The audit-only insertion must add no call in
-            // either case.
-            const std::size_t expectedCalls = shot.accepted ? 4 : 1;
-            Check(after - before == expectedCalls,
-                "the engine call sequence of shot plant_index=" + std::to_string(shot.plantIndex)
-                + " changed: expected " + std::to_string(expectedCalls) + " calls, got "
-                + std::to_string(after - before));
-            if (!shot.accepted) continue;
+            Check(engineCalls.size() - before == 4,
+                "the engine call sequence of an accepted shot changed");
             auto* plant = plants + std::size_t(shot.plantIndex) * kPlantStride;
             uint32_t bits = 0;
             const float column = shot.targetCol;
@@ -384,9 +414,16 @@ int main() {
                 {"target_col_text", ColumnText(shot.targetCol)},
                 {"tick", static_cast<uint64_t>(shot.version["tick"].get<int64_t>())}});
             expectedVersions.push_back(shot.version);
+            states.push_back(lvz::determinism::HostedFireState());
+            // Two shots per granted frame: the next audited boundary drains both,
+            // with the running sequence counter the audit writer owns.
+            if (expectedPayloads.size() % 2 == 0)
+                sequence += lvz::determinism::DrainHostedFireRecords(sink, sequence);
         }
-        Check(expectedPayloads.size() == 3, "the accepted-shot count changed");
-        const auto expectedCalls = 4 + 4 + 1 + 1 + 4;
+        Check(expectedPayloads.size() == kShotCount, "the accepted-shot count changed");
+        Check(lvz::determinism::DrainHostedFireRecords(sink, sequence) == 0,
+            "the drain left queued records behind after the last boundary");
+        const auto expectedCalls = kShotCount * 4 + 2;
         Check(engineCalls.size() == expectedCalls, "the engine call total changed");
         Check(lvz::runtime::auditFaults == 0,
             "the audit-only hook reported a fault: " + lvz::runtime::lastAuditFault);
@@ -396,10 +433,12 @@ int main() {
         for (const auto& call : engineCalls) trace.push_back(call.line);
         WriteLines(VariantDir(kVariant) / "engine-trace.jsonl", trace);
 
-        // Audit-facing records: exactly one per accepted shot, in shot order.
-        const auto records = lvz::determinism::DrainHostedFireEvents(0);
+        // The audit-facing records: one envelope per accepted shot, in shot
+        // order, with the sequence the writer would have given them. In
+        // recorder.dll the sink is `Write(events, record)`, which appends
+        // exactly this line to audit/events.jsonl.
         std::vector<std::string> recordLines;
-        for (const auto& record : records) recordLines.push_back(record.dump());
+        for (const auto& envelope : envelopes) recordLines.push_back(envelope.dump());
         WriteLines(VariantDir(kVariant) / "records.jsonl", recordLines);
 
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
@@ -409,45 +448,58 @@ int main() {
             && manifest.value("installed", false) && manifest.value("kind", std::string()) == "hosted_fire",
             "the hosted-fire manifest declaration changed");
 
-        Check(records.is_array() && records.size() == expectedPayloads.size(),
+        Check(envelopes.size() == expectedPayloads.size(),
             "one hosted shot did not produce exactly one audit record");
-        Check(lvz::determinism::DrainHostedFireEvents(0).empty(),
-            "draining the hosted-fire queue twice produced records twice");
-        for (std::size_t index = 0; index < records.size(); ++index) {
-            const auto& record = records[index];
-            Check(record.at("schema") == "lvz.audit.v1" && record.at("kind") == "hosted_fire",
+        Check(sequence == kShotCount, "the drain did not advance the writer's sequence counter");
+        for (std::size_t index = 0; index < envelopes.size(); ++index) {
+            const auto& envelope = envelopes[index];
+            Check(envelope.at("schema") == "lvz.audit.v1" && envelope.at("kind") == "hosted_fire",
                 "the hosted-fire record's schema/kind changed");
-            Check(record.at("phase") == "controlled_boundary"
-                && record.at("native_phase") == "avz_basic_fire",
+            Check(envelope.at("phase") == "controlled_boundary"
+                && envelope.at("native_phase") == "avz_basic_fire",
                 "the hosted-fire record's phase changed");
-            Check(record.at("seq") == static_cast<int>(index),
+            Check(envelope.at("seq") == static_cast<int>(index),
                 "the hosted-fire record's sequence did not start at zero");
-            Check(record.at("version") == expectedVersions[index],
+            Check(envelope.at("version") == expectedVersions[index],
                 "the hosted-fire record was not bound to the shot's boundary version");
-            Check(record.at("payload") == expectedPayloads[index],
-                "the hosted-fire record payload changed: " + record.at("payload").dump());
+            Check(envelope.at("payload") == expectedPayloads[index],
+                "the hosted-fire record payload changed: " + envelope.at("payload").dump());
         }
-        const auto state = lvz::determinism::HostedFireState();
-        Check(state.is_object() && state.value("mode", std::string()) == "hosted_fire_audit_v1",
-            "the hosted-fire state component is missing its mode");
-        Check(state.value("count", 0ull) == expectedPayloads.size(),
-            "the hosted-fire state count does not match the records");
-        Check(static_cast<uint64_t>(state.value("digest", 0ull)) == ExpectedDigest(expectedPayloads),
-            "the hosted-fire state digest does not match the records");
+        // The per-boundary state must account for every record seen so far.
+        for (std::size_t index = 0; index < states.size(); ++index) {
+            const auto& state = states[index];
+            Check(state.is_object() && state.value("mode", std::string()) == "hosted_fire_audit_v1"
+                && state.value("count", 0ULL) == index + 1,
+                "the hosted-fire state count does not match the records");
+            Check(static_cast<uint64_t>(state.value("digest", 0ULL))
+                    == ExpectedDigest(expectedPayloads, index + 1),
+                "the hosted-fire state digest does not match the records");
+        }
+        // The encoding is pinned cross-language for the first live shot: this
+        // value is what the Python reader computes from the recorded payload.
+        Check(ExpectedDigest(expectedPayloads, 1) == kLiveShotDigest,
+            "the pinned live-shot digest changed");
+        Check(static_cast<uint64_t>(states.front().value("digest", 0ULL)) == kLiveShotDigest,
+            "the module's digest for the live shot differs from the pinned value");
+        // The artifacts tests/test_hosted_fire_audit.py reconciles against.
+        std::vector<std::string> stateLines;
+        for (std::size_t index = 0; index < states.size(); ++index)
+            stateLines.push_back(nlohmann::json{{"records", index + 1}, {"state", states[index]}}.dump());
+        WriteLines(VariantDir(kVariant) / "state.jsonl", stateLines);
+
         lvz::determinism::ResetHostedFire();
-        Check(lvz::determinism::HostedFireState().value("count", 1ull) == 0,
+        Check(lvz::determinism::HostedFireState().value("count", 1ULL) == 0,
             "ResetHostedFire left a count behind");
         std::printf("hosted fire audit: %zu records, one per accepted shot, %zu engine calls (unchanged)\n",
-            records.size(), engineCalls.size());
+            envelopes.size(), engineCalls.size());
 #else
         Check(!lvz::determinism::HostedFireEnabled(), "a default build reported the audit as enabled");
-        Check(records.is_array() && records.empty(),
-            "a default build recorded a hosted shot");
-        Check(lvz::determinism::HostedFireState().empty(),
-            "a default build declared a hosted-fire state component");
+        Check(envelopes.empty() && recordLines.empty(),
+            "a default build wrote a hosted-fire audit record");
+        for (const auto& state : states)
+            Check(state.empty(), "a default build declared a hosted-fire state component");
         Check(lvz::determinism::HostedFireManifest().empty(),
             "a default build declared a hosted-fire manifest mode");
-        Check(recordLines.empty(), "a default build wrote an audit record line");
         std::printf("default build: %zu engine calls, no hosted-fire audit evidence\n", engineCalls.size());
         return 0;
 #endif
@@ -461,8 +513,7 @@ int main() {
         Check(ReadLines(reference) == trace,
             "the hosted build's engine call sequence differs from the default build's");
         const auto referenceRecords = VariantDir("default") / "records.jsonl";
-        Check(std::filesystem::exists(referenceRecords)
-            && ReadLines(referenceRecords).empty(),
+        Check(std::filesystem::exists(referenceRecords) && ReadLines(referenceRecords).empty(),
             "the default build wrote hosted-fire audit records");
         std::printf("hosted fire audit: engine trace identical to the default build\n");
         return 0;

@@ -241,10 +241,19 @@ class HostedFireAuditWiringTests(unittest.TestCase):
 
     def test_writer_reader_and_documentation_agree_on_the_declared_mode(self):
         audit = read("determinism/audit.cpp")
-        for marker in ("DrainHostedFires();", 'state["hosted_fire"]=HostedFireState();',
+        for marker in ("DrainHostedFires();",
+                       "DrainHostedFireRecords([](const Json& record) { Write(events, record); }, sequence)",
+                       'state["hosted_fire"]=HostedFireState();',
                        'result["hosted_fire"]=HostedFireManifest();'):
             self.assertIn(marker, audit)
             self.assert_guarded(audit, marker)
+        # The drain hands every envelope to the writer through a sink, so the
+        # offline test runs the same function with a file sink and counts the
+        # lines recorder.dll would append (issue #84: the live drain wrote the
+        # records, the digest they were reconciled against disagreed).
+        self.assertIn("size_t DrainHostedFireRecords(const std::function<void(const nlohmann::json&)>& sink,",
+                      read("determinism/hosted_fire.hpp"))
+        self.assertIn("DrainHostedFireRecords(sink, sequence)", read("tests/avz_hosted_fire_tests.cpp"))
         # A recording fault invalidates the run through the runtime instead of
         # throwing into the coroutine that fired; both halves sit in the switch.
         runtime = read("runtime/runtime.cpp")
