@@ -490,6 +490,7 @@ try {
             $head = (& git -C $avzDirectory rev-parse HEAD).Trim()
         }
         $action = 'none'
+        $mirror = $null
         if ($head -ne $pinnedAvzCommit) {
             if ($VerifyOnly) {
                 $state = 'not initialised'
@@ -511,6 +512,25 @@ try {
             Invoke-NativeChecked -Label 'git submodule update' -FilePath 'git' -Arguments $arguments
             $head = (& git -C $avzDirectory rev-parse HEAD).Trim()
         }
+        # Without an entry in the superproject config, `git submodule status`
+        # prints '-' for a perfectly good checkout and a later
+        # `git submodule update --init` stops with "A git directory for
+        # 'avz/framework' is found locally". Record how this checkout fetches
+        # the submodule: the mirror that was actually used, or .gitmodules.
+        $configured = & git -C $projectRoot config --get "submodule.$avzSubmodulePath.url"
+        if (!$configured) {
+            if ($VerifyOnly) {
+                $warnings.Add("$avzSubmodulePath is not registered in $projectRoot/.git/config; git submodule status prints '-' and a later 'git submodule update --init' can stop with 'A git directory for ... is found locally'. Re-run without -VerifyOnly to record the fetch URL.")
+            } elseif ($mirror) {
+                Invoke-NativeChecked -Label 'git config submodule url' -FilePath 'git' `
+                    -Arguments @('-C', $projectRoot, 'config', "submodule.$avzSubmodulePath.url", $mirror)
+                $configured = $mirror
+            } else {
+                Invoke-NativeChecked -Label 'git submodule sync' -FilePath 'git' `
+                    -Arguments @('-C', $projectRoot, 'submodule', 'sync', '--', $avzSubmodulePath)
+                $configured = (& git -C $projectRoot config --get "submodule.$avzSubmodulePath.url")
+            }
+        }
         if ($head -ne $pinnedAvzCommit) {
             throw "$avzSubmodulePath is at $head, dependencies.lock.json pins $pinnedAvzCommit"
         }
@@ -520,7 +540,7 @@ try {
                 "Review them, then discard with: git -C `"$avzDirectory`" checkout -- .")
         }
         Write-Host "   $avzSubmodulePath at $head (pristine), action: $action"
-        [pscustomobject]@{ path = $avzSubmodulePath; head = $head; pristine = $true; action = $action }
+        [pscustomobject]@{ path = $avzSubmodulePath; head = $head; pristine = $true; action = $action; fetch_url = $configured }
     }
 
     Invoke-Step 'avz runtime injector' {
