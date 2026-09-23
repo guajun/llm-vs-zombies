@@ -84,11 +84,17 @@ cmake --build build/hosted --target recorder
 
 * `LVZ_AVZ_HOSTED_SCRIPT` is empty by default: the shipped `recorder.dll` is
   unchanged (`build/cmake` build) and contains no hosted-script symbols.
-* The named file must define `ACoroutine lvz::hosted::Script()`. Two are shipped:
+* The same build is wrapped by `tools/build-hosted.ps1`, which also records the
+  DLL's SHA256 for the launcher (section 7).
+* The named file must define `ACoroutine lvz::hosted::Script()`; define
+  `void lvz::hosted::Observe(std::string&)` in it as well if the live run
+  should report the script's state (section 7; a weak default publishes
+  nothing). Two are shipped:
   * `logger/avz/hosted/atime_probe.cpp` - three `co_await ATime(1, ...)` waits and
-    a counter, used by the offline test.
+    a counter, used by the offline test and the live observability probe.
   * `logger/avz/hosted/jing_dian_12.cpp` - the P2 script, body verbatim from the
-    tutorial file with only the entry renamed.
+    tutorial file with only the entry renamed. It has no state of its own, so it
+    publishes nothing; its run file holds the activation line alone.
 * Verified: building with `jing_dian_12.cpp` produces a `recorder.dll` whose
   symbol table contains `lvz::hosted::Script()` plus its coroutine
   `.resume`/`.destroy` frames; the default build contains none of them.
@@ -172,6 +178,97 @@ same formatting path runs against a real App in production.
 
 1. Live confirmation that a hosted coroutine advances with granted frames inside
    the real process (the offline test covers the mechanism, not the process).
+   The hosted build now writes what the script publishes into the run directory
+   (section 7), so that confirmation can be read out of a live run instead of
+   only asserted offline; running the game itself is still the acceptance step.
 2. Audit policy for hosted `Fire` (see section 4).
 3. The `INFO`-logger fault above, which blocks using AvZ logs as evidence in the
    offline harness.
+
+## 7. 真机运行 / live run
+
+托管构建把脚本编进 `recorder.dll`，真机流程与默认录制相同，只差一处：这个 DLL 的
+SHA256 与默认构建不同，而 run 的 `manifest.json` 绑定的是建 run 时
+`build/recorder.dll` 的哈希（`tools/inject-recorder.ps1`、`launcher` 都会复核），所以
+**先构建托管 DLL，再建 run**；DLL 换过一次就换新 run。
+
+### 7.1 构建
+
+```powershell
+.\tools\build-hosted.ps1 -Script logger\avz\hosted\atime_probe.cpp
+```
+
+* 默认产出 `build\recorder.dll`；`-OutputDirectory build\hosted` 写到别处，脚本会打印
+  需要补的 `Copy-Item ... build\recorder.dll`。
+* `-BuildDirectory` 默认 `build\hosted-<脚本名>`，不碰默认构建树 `build\cmake`；`-Jobs`
+  控制并行度。
+* 脚本打印并落盘 DLL 的 SHA256：`<输出目录>\recorder.sha256`（sha256sum 格式）和
+  `<输出目录>\hosted-build.json`（脚本源码路径及其 SHA256、DLL SHA256、构建树、CMake
+  参数）。launcher 校验的就是 `manifest.implementation.recorder_sha256` 的那一个哈希。
+
+### 7.2 启动
+
+```powershell
+.\launcher\build.ps1                                   # 需要时先构建 launcher 助手
+.\tools\launch-experiment.ps1 -Name hosted-atime-01    # 建 run：复制私有环境、注入、初始化
+```
+
+每次换新 `-Name`；`-NoInitialize` 只启动不初始化。结束实验照常按 7 停止录制。
+
+### 7.3 观测文件
+
+`<run>\decisions\hosted-script.jsonl`：每行一个事件信封（与 `events.jsonl` 同一形状），
+`phase` 为 `hosted_script`。放在 `decisions/` 而不是运行根目录，是因为封存策略
+（`src/llm_vs_zombies/records.py` 的 `archive_policy`）只收白名单目录和运行根 `*.json`：
+运行根下的 `*.jsonl` 会静默落在封存包外，`decisions/` 下的文件则随封存包一起被哈希。
+
+```json
+{"schema_version":1,"run_id":"hosted-atime-01","seq":0,"segment":0,"tick":0,"phase":"hosted_script","kind":"hosted_script_active","payload":{"script":"atime_probe.cpp"}}
+{"schema_version":1,"run_id":"hosted-atime-01","seq":1,"segment":0,"tick":1,"phase":"hosted_script","kind":"hosted_script_state","payload":{"script":"atime_probe.cpp","started":1,"resumes":0,"resume_wave":0,"resume_time":0,"finished":0,"clock_at_finish":0}}
+```
+
+* `seq` 只数本文件的行；`script` 是编译进 DLL 的源文件名（`kind:hosted_script_active`
+  行证明跑的是哪个托管源）。
+* `tick` 是**产生该状态的那一帧**：采样发生在 AvZ `RunTotal()` 的 AfterTick，也就是
+  `RunScript()` 处理完这一帧之后，所以 `co_await ATime(...)` 在某一帧恢复，其 tick 就是
+  那一帧的 tick，不是下一帧。
+* 只在脚本发布的文本发生变化时写行；相同的帧不重复写。被 controller 停住（暂停、未授予
+  帧）时 `RunTotal()` 根本不会运行，因此不会有行——文件不长就说明没有被推动。
+* 写入走与 `events.jsonl` 同一个 `BufferedWriter`（game 线程、64 KiB 批量、段边界 flush），
+  不新增线程、不引入新的同步或时序依赖。
+* 默认构建（没有 `LVZ_AVZ_HOSTED_SCRIPT`）里这条路径整条不存在：`hosted_observation.cpp`
+  不参与编译，AfterTick 采样钩子也不注册。
+
+### 7.4 atime_probe 怎么读
+
+`logger/avz/hosted/atime_probe.cpp` 的三次等待固定为 `ATime(1, -599)`、`-549`、`-499`：
+
+* `resume_time` 就是每次完成的等待偏移，`resumes` 依次变成 1、2、3（同一行里的 `tick`
+  就是那次恢复所在的帧），`resume_wave` 恒为 1。
+* 脚本跑完时 `finished=1`，`clock_at_finish` 是那一刻的 `GameClock()`。
+* 离线测试看到的绝对 tick（2/52/102）来自假图里 wave-1 刷新时间 601；真机上第一波刷新
+  时间由实际游戏决定，因此要看的是顺序、`resume_time` 序列和 `finished/clock_at_finish`，
+  不是那三个具体数字。
+
+```powershell
+Get-Content <run>\decisions\hosted-script.jsonl | Select-String 'hosted_script_state'
+```
+
+### 7.5 验证默认构建不受影响
+
+```powershell
+.\tools\build-avz.ps1
+Test-Path <run>\decisions\hosted-script.jsonl     # 默认构建录制后必须为 False
+& third_party\llvm-mingw-20260908-ucrt-x86_64\bin\llvm-nm.exe build\recorder.dll |
+    Select-String hosted                           # 默认构建必须没有 hosted 符号
+```
+
+离线证据（不需要游戏）：
+
+* `ctest -R hosted_observation_default` —— 与托管构建同一份 `hosted_observation.cpp`，按
+  默认构建方式编译：`Open/Sample/Flush/Close` 全是空操作，run 目录连 `decisions/` 都不会多。
+* `ctest -R hosted_observation` —— 托管模式下的信封、`kind`、`tick`/`seq`、只写变化。
+* `ctest -R avz_hosted_script` —— 帧归属与 `Observe` 发布内容（同时证明脚本里的强定义
+  覆盖 `observe_default.cpp` 的弱定义）。
+* `python -m unittest discover -s tests -p test_avz_hosted_script.py` —— `recorder.cpp` 里对
+  观测文件的调用、CMake 里新增的源文件与测试目标都必须落在 `LVZ_AVZ_HOSTED_SCRIPT` 开关内。

@@ -13,7 +13,11 @@ target_include_directories(recorder PRIVATE ${CMAKE_SOURCE_DIR} avz/framework/in
 target_compile_options(recorder PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
 target_link_options(recorder PRIVATE -static)
 target_link_libraries(recorder PRIVATE gdi32 dbghelp crypt32 bcrypt)
-set_target_properties(recorder PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build" LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+# Where recorder.dll lands. The default is the historical build/ path every
+# tool expects; tools/build-hosted.ps1 points it elsewhere so a hosted DLL can
+# be produced without touching the default one.
+set(LVZ_RECORDER_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build" CACHE PATH "Directory recorder.dll is written to")
+set_target_properties(recorder PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${LVZ_RECORDER_OUTPUT_DIR}" LIBRARY_OUTPUT_DIRECTORY "${LVZ_RECORDER_OUTPUT_DIR}")
 # Optional AvZ script hosted by the resident runtime. The named source must
 # define `ACoroutine lvz::hosted::Script()` (logger/avz/hosted_script.hpp); the
 # recorder launches it from inside AScript(), so frame ownership, pause and the
@@ -28,8 +32,14 @@ if(LVZ_AVZ_HOSTED_SCRIPT)
   if(NOT EXISTS "${LVZ_AVZ_HOSTED_SCRIPT}")
     message(FATAL_ERROR "LVZ_AVZ_HOSTED_SCRIPT does not exist: ${LVZ_AVZ_HOSTED_SCRIPT}")
   endif()
+  get_filename_component(LVZ_AVZ_HOSTED_SCRIPT_NAME "${LVZ_AVZ_HOSTED_SCRIPT}" NAME)
   target_sources(recorder PRIVATE "${LVZ_AVZ_HOSTED_SCRIPT}")
+  # The observation writer and the weak default publisher exist only in a
+  # hosted build; the name below is what the activation line in
+  # <run>/decisions/hosted-script.jsonl reports.
+  target_sources(recorder PRIVATE logger/avz/hosted_observation.cpp logger/avz/hosted/observe_default.cpp)
   target_compile_definitions(recorder PRIVATE LVZ_AVZ_HOSTED_SCRIPT=1)
+  target_compile_definitions(recorder PRIVATE "LVZ_AVZ_HOSTED_SCRIPT_NAME=\"${LVZ_AVZ_HOSTED_SCRIPT_NAME}\"")
   message(STATUS "Hosting AvZ script: ${LVZ_AVZ_HOSTED_SCRIPT}")
 endif()
 # Explicitly requested lifecycle probe; never built by the default all target
@@ -175,14 +185,37 @@ add_test(NAME fixed_owner_fp COMMAND fp_environment_tests)
 add_executable(avz_hosted_script_tests
   tests/avz_hosted_script_tests.cpp
   logger/avz/hosted/atime_probe.cpp
+  logger/avz/hosted/observe_default.cpp
   ${AVZ_SOURCES})
 target_compile_definitions(avz_hosted_script_tests PRIVATE LVZ_AVZ_HOSTED_SCRIPT=1)
 target_include_directories(avz_hosted_script_tests PRIVATE ${CMAKE_SOURCE_DIR} avz/framework/inc logger/avz runtime/vendor)
 target_compile_options(avz_hosted_script_tests PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
-# AvZ reads the App pointer at the fixed address 0x6a9ec0. The test binary is
-# loaded at its natural base without ASLR so that this address stays inside the
-# image's own reservation and the heap can never be placed over it.
+# AvZ reads the App pointer at the fixed address 0x6a9ec0 and saves original
+# game bytes at a fixed RVA above the image base. The test binary therefore
+# keeps its natural image base (no ASLR) and pads its image past the App cell
+# (kAppCellImagePadding in the test), so that cell is this module's own page
+# whatever the optimized link happens to be.
 target_link_options(avz_hosted_script_tests PRIVATE -static -Wl,--disable-dynamicbase)
 target_link_libraries(avz_hosted_script_tests PRIVATE gdi32 dbghelp)
 set_target_properties(avz_hosted_script_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
 add_test(NAME avz_hosted_script COMMAND avz_hosted_script_tests)
+
+# Hosted-script observability (<run>/decisions/hosted-script.jsonl). The same
+# source is built twice: with the build switch (the translation unit a hosted
+# recorder.dll links) and without it (a default build), so one test asserts the
+# file's line format and change-only rule and the other asserts that a default
+# build creates no file at all.
+add_executable(hosted_observation_tests tests/hosted_observation_tests.cpp logger/avz/hosted_observation.cpp)
+target_compile_definitions(hosted_observation_tests PRIVATE LVZ_AVZ_HOSTED_SCRIPT=1)
+target_include_directories(hosted_observation_tests PRIVATE logger/avz)
+target_compile_options(hosted_observation_tests PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+target_link_options(hosted_observation_tests PRIVATE -static)
+set_target_properties(hosted_observation_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+add_test(NAME hosted_observation COMMAND hosted_observation_tests)
+
+add_executable(hosted_observation_default_tests tests/hosted_observation_tests.cpp logger/avz/hosted_observation.cpp)
+target_include_directories(hosted_observation_default_tests PRIVATE logger/avz)
+target_compile_options(hosted_observation_default_tests PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+target_link_options(hosted_observation_default_tests PRIVATE -static)
+set_target_properties(hosted_observation_default_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+add_test(NAME hosted_observation_default COMMAND hosted_observation_default_tests)
