@@ -278,6 +278,8 @@ demo 明确使用 synthetic counter，创建两个独立计数器实例并经过
 
 `test_mj_clock_anchor.py` 用模拟器覆盖「不同真实计数、同一固定目标」的完整回放与 seek、越界/篡改/重复/晚到/篡改链、warm 顺序、缺目标拒启动及旧能力兼容；`tests/mj_clock_anchor.cpp` 用原生夹具覆盖真实四字节写入、跨运行目标、前置拒绝不写内存、故障保留与旧音效兼容。这些离线检查不代替新构建的真实冷启动验证，也不改写既有 C/D 结论或历史失败档。
 
+统一 B(0) 表的归档另见 [b0-normalization-native.md](b0-normalization-native.md)：manifest 声明了统一模式时，上面两个旧锚读取器对它整体跳过（不要求能力、不比较回执），重放报告把已声明的旧锚记为 `superseded_by_initial_b0_normalization_v1`；只有未声明统一表的归档才走旧锚的读取与检查。runtime/hello 同时声明三种形状本身不是混用，混用只由配方块与事件流判定。
+
 `sound_effects_counter_origin_v1` 进一步声明独立的计数范围；只有 game 的 `sound_counter` 配置和对应 mode/RPC capability 一致时生效，原有 sound-effects 与 App-anchor 规格不变。原生 `sound_counter_origin` 在 seed/clock readback 后、App anchor 和 warm 前执行一次。它不写游戏字段，也不重置 bootstrap 的累计计数：原生 state 在绑定前增加 `counter_scope:bootstrap_lifetime`，绑定后改为 `counter_scope:experiment`，此时 `calls` 是原生实际累计调用数减去固定原点。旧档没有新能力时仍使用原来的绝对 `calls`，不添加 scope，也不自动升级。
 
 成功事件 `sound_counter_origin_bound` 保留完整原始 activation 形状的 `raw_before/raw_after`、原点绝对值、完整游戏 before/after 状态和实际相邻 revision。读取器要求两个 raw status 完全相同并与 recorder attach 的真实属主/线程/补丁相符，绝对数不小于 attach；状态前后只允许 `calls` 和 `counter_scope` 两处表示变化，原始 RNG、游戏字段、历史、参数均须相同。配方只保存稳定配置，动态回执完整保留在初始化证据与原生事件中。

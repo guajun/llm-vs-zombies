@@ -11,6 +11,7 @@ common target.
 from __future__ import annotations
 import copy
 
+from . import b0_normalization
 from . import sound_effects
 
 MODE = "initial_app_update_anchor_v1"
@@ -133,11 +134,18 @@ def receipt(value, game, *, requested=None, before_version=None, after_version=N
 
 
 def initial(marker):
-    declared = mode(marker["identity"]["game"])
+    game = marker["identity"]["game"]
+    declared = mode(game)
     wanted = target_from_recipe(marker["initialization"])
     if not declared:
         if wanted is not None:
             fail("recipe cannot upgrade an older execution mode")
+        return
+    if b0_normalization.unified_owns_fields(game):
+        # The declared unified table owns this field, so this reader stays out of
+        # the way -- but a run must not carry both shapes for the same field.
+        if wanted is not None:
+            fail("one run cannot mix the unified B(0) normalization table with a legacy App update anchor")
         return
     if wanted is None:
         fail("new mode requires an explicitly declared fixed initial target")
@@ -169,7 +177,11 @@ def semantics(value, *, map_version=lambda value: value, pending_mj_clock=False)
 
 class Evidence:
     def __init__(self, game):
-        self.game, self.enabled = game, bool(mode(game))
+        self.game = game
+        # A declared unified table owns the field, so this legacy reader is then
+        # disabled exactly as it is for a runtime that never declared it: the
+        # unified reader validates the single table and refuses a legacy event.
+        self.enabled = bool(mode(game)) and not b0_normalization.unified_owns_fields(game)
         self.anchor = self.anchor_event = self.seed_event = None
         self.warm_started = self.seen_frame = False
         # At most one declared fixed MJ clock anchor may occupy the single

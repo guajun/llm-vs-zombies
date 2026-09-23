@@ -14,6 +14,9 @@ struct Fake:Backend {
     std::vector<uint8_t> app=std::vector<uint8_t>(0x900,0);
     InitialB0Normalization table;
     bool enabled=true,seeded=false,warm=false,fight=true,closed=false,counterBound=false,occupied=false,channel=false,badRng=false;
+    // The production DLL advertises the legacy per-field anchors and the unified
+    // table together; `legacyCaps` reproduces that real capability combination.
+    bool legacyCaps=false;
     bool mutateOutsider=false,throwAfter=false,faultEnabled=false;int captures=0,clock=3000,draws=0,seedCalls=0;uintptr_t board=1;
     uint32_t seed=42;
     std::vector<Json> events;
@@ -38,8 +41,8 @@ struct Fake:Backend {
     }
     bool SupportsB0Normalization()const override{return enabled;}
     bool B0Normalized()const override{return table.Applied();}
-    bool SupportsAppUpdateAnchor()const override{return false;}
-    bool SupportsMjClockAnchor()const override{return false;}
+    bool SupportsAppUpdateAnchor()const override{return legacyCaps&&enabled;}
+    bool SupportsMjClockAnchor()const override{return legacyCaps&&enabled;}
     void ResetRenderPreparation()override{table.Reset();warm=seeded=counterBound=false;}
     Json SeedRng(uint32_t value)override{seed=value;seeded=true;++seedCalls;return {{"ok",true}};}
     Json RestoreClocks(const Json&)override{return {{"ok",true}};}
@@ -168,6 +171,25 @@ int main(){try{
         Fake single;Controller v(single);v.Boundary();Seed(v);Origin(v);
         Check(Table(v,"single",Json::parse("["+items+"]"))["ok"],"a single declared field is not an admissible table");
     }
+    // Real capability combination: one DLL advertises the unified table *and*
+    // both legacy anchors. The table alone is then authoritative, so the retired
+    // legacy RPCs stay rejected and the warm draw must accept a run that applied
+    // no legacy anchor at all -- the shape the production path used to reject.
+    {Fake real;real.legacyCaps=true;Controller d(real);d.Boundary();Seed(d);Origin(d);
+        Check(Now(d,Req(d,"real-warm-before","prepare_render"))["error"]["code"]=="render_prepare_rejected",
+            "warm drawing preceded the declared table");
+        Check(Now(d,Req(d,"real-legacy-app","app_update_anchor",{{"app_update_count",2048}}))["error"]["code"]=="legacy_anchor_retired"
+            &&Now(d,Req(d,"real-legacy-mj","mj_clock_anchor",{{"mj_clock",2048}}))["error"]["code"]=="legacy_anchor_retired",
+            "an advertised legacy anchor was accepted beside the declared table");
+        Check(Now(d,Req(d,"real-table","b0_normalization",{{"entries",Both(2048,2048)}}))["ok"]
+            &&Now(d,Req(d,"real-warm","prepare_render"))["ok"]&&real.draws==1,
+            "warm drawing demanded a legacy anchor the unified run never applied");
+        size_t warm=real.events.size();
+        for(size_t index=0;index<real.events.size();++index)if(real.events[index]["kind"]=="render_preparing")warm=index;
+        Check(warm>0&&warm<real.events.size()&&real.events[warm-1]["kind"]=="b0_normalized",
+            "the warm boundary is not the one-shot table");
+        for(const auto& event:real.events)Check(event["kind"]!="app_update_anchored"&&event["kind"]!="mj_clock_anchored",
+            "a retired legacy anchor was recorded beside the table");}
     std::cout<<"Unified B(0) table, one revision, one receipt, declared order, fail-closed shape checks, "
-               "cross-run targets, lifecycle/idempotence and failure fixtures passed\n";return 0;
+               "cross-run targets, the real capability combination, lifecycle/idempotence and failure fixtures passed\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

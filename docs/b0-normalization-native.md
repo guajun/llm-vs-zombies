@@ -83,3 +83,24 @@ python -m llm_vs_zombies.b0_coverage experiments/runs/<world> --compare experime
 - 旧的 `app_update_anchor`/`mj_clock_anchor` 读取器与旧归档原样保留；一个归档里混用新旧形状即严格失败，不存在"合并解读"。
 - native 旧 RPC 仍在代码里，但声明统一能力的 runtime 会拒绝它们（`legacy_anchor_retired`），一次运行只走一条路径。
 - 本实现不跑真实游戏，`live_verified:false` 不变；两个世界的复跑由主 agent 另做。
+
+## 6. 形状归属：一次运行只有一条读取路径
+
+接线收口（#76–#79）把"谁读哪一形状"收敛成一条判据 `b0_normalization.unified_owns_fields`，四处读取点不再各自解释：
+
+- manifest/hello 声明了统一模式（`b0_normalization.mode(game)` 为真）⇒ `/sound_effects/app_update_count` 与 `/app/mj_clock` 由统一表负责，
+  `app_update_anchor`/`mj_clock_anchor` 的读取、校验与回执比较**整体跳过**（对这两个读取器而言等同于未声明模式）；
+  engine-replay 也不再要求它们的能力或比较它们的回执，报告把它们记为 `superseded_by_initial_b0_normalization_v1`。
+- 未声明统一模式的归档仍走旧锚校验，旧归档的每一条检查原样保留（缺固定目标、缺 `app_update_anchored`/`mj_clock_anchored` 观察、暖机顺序等照旧失败）。
+
+**一个 DLL 同时声明三种形状不是混用**：静音音频开启时 `ProbeTarget` 同时给出 `sound_effects`、`app_update_anchor`、`mj_clock_anchor`、
+`b0_normalization` 与 `sound_counter`，它的归档因此声明全部三形状；旧计划靠同一份 hello 继续可读。混用由**本 run 自己的声明**判定
+（`b0_normalization.mixed_shapes`）：
+
+- 配方里出现旧锚块（无论是否与统一表块并存）⇒ 严格失败；
+- 事件流里在 `b0_normalized` 之外再出现 `app_update_anchored`/`mj_clock_anchored` ⇒ 严格失败；
+- 能力清单本身永远不是混用证据（因此老计划、老归档、新 DLL 可以共用一份 manifest 结构）。
+
+native 层同构：旧 RPC 对声明统一能力的 runtime 返回 `legacy_anchor_retired`，`prepare_render` 只要求本运行实际使用的那一形状
+（`runtime/controller.cpp` 与 `runtime/runtime.cpp` 同一分支结构）。回归夹具见 `tests/test_b0_normalization.py` 的三能力组合用例与
+`tests/b0_normalization.cpp` 的 `legacyCaps` 夹具。

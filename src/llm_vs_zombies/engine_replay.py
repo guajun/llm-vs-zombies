@@ -701,11 +701,18 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
     controlled_draw = draw_mode(trajectory.audit.manifest)
     controlled_calls = engine_call_mode(trajectory.audit.manifest)
     audio_mode = sound_effects.mode(trajectory.audit.manifest)
-    anchor_mode = app_update_anchor.mode(trajectory.audit.manifest)
-    mj_clock_mode = mj_clock_anchor.mode(trajectory.audit.manifest)
-    b0_mode = b0.mode(trajectory.audit.manifest)
-    if b0_mode and (anchor_mode or mj_clock_mode):
+    declared_anchor_mode = app_update_anchor.mode(trajectory.audit.manifest)
+    declared_mj_clock_mode = mj_clock_anchor.mode(trajectory.audit.manifest)
+    unified_owner = b0.unified_owns_fields(trajectory.audit.manifest)
+    b0_mode = b0.MODE if unified_owner else None
+    if b0.mixed_shapes(trajectory.audit.manifest, trajectory.initial["initialization"]):
         raise EvidenceError("one archive cannot mix the unified B(0) normalization with a legacy per-field anchor")
+    # The declared unified table owns the two fields, so this archive must be
+    # replayed with the table alone: the legacy declarations stay validated as
+    # identity (one DLL advertises all three shapes), but nothing here may demand
+    # or compare a legacy receipt the unified run never wrote.
+    anchor_mode = None if unified_owner else declared_anchor_mode
+    mj_clock_mode = None if unified_owner else declared_mj_clock_mode
     counter_mode = sound_counter.mode(trajectory.audit.manifest)
     fp_mode = fp_environment.mode(trajectory.audit.manifest)
     report["fixed_fp"] = {"mode": fp_mode or "not_declared", "activation_compared": False,
@@ -714,11 +721,13 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
         "raw_status_thread_and_initial_input_compared": False}
     report["sound_counter"] = {"mode": counter_mode or "bootstrap_lifetime", "receipt_compared": False,
         "native_state_compared": False, "raw_origins_compared": False, "state_normalized_by_comparator": False}
-    report["app_update_anchor"] = {"mode": anchor_mode or "not_declared", "receipt_compared": False,
+    report["app_update_anchor"] = {"mode": anchor_mode or (
+        f"superseded_by_{b0.MODE}" if declared_anchor_mode else "not_declared"), "receipt_compared": False,
         "original_engine_bitwise_unmodified": False if anchor_mode else None,
         "target_policy": app_update_anchor.TARGET_POLICY if anchor_mode else None,
         "before_values_compared": False, "subsequent_state_normalized": False}
-    report["mj_clock_anchor"] = {"mode": mj_clock_mode or "not_declared",
+    report["mj_clock_anchor"] = {"mode": mj_clock_mode or (
+        f"superseded_by_{b0.MODE}" if declared_mj_clock_mode else "not_declared"),
         "original_engine_bitwise_unmodified": False if mj_clock_mode else None,
         "receipt_compared": False, "before_values_compared": False, "subsequent_state_normalized": False,
         "target_policy": mj_clock_anchor.SPEC["target_policy"] if mj_clock_mode else None}

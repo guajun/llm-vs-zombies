@@ -7,8 +7,10 @@ import tempfile
 import unittest
 
 from llm_vs_zombies import b0_normalization as b0
+from llm_vs_zombies import app_update_anchor
+from llm_vs_zombies import mj_clock_anchor
 from llm_vs_zombies import evaluation as ev
-from llm_vs_zombies.audit_compare import EvidenceError, read_json
+from llm_vs_zombies.audit_compare import AuditLog, EvidenceError, read_json
 from llm_vs_zombies.client import Client
 from llm_vs_zombies.engine_replay import (ReplayDivergence, ReplaySession, build_trajectory,
                                         capture_initial, identity_from_launcher, replay, _validate_initial)
@@ -101,6 +103,29 @@ class NormalizationTransport(CounterTransport):
         return json.dumps(result).encode()
 
 
+class UnifiedWithLegacyCapabilitiesTransport(NormalizationTransport):
+    """The real DLL: it advertises the table and both legacy anchors at once.
+
+    Nothing here is synthetic convenience: ``ProbeTarget`` gains
+    ``sound_effects``, ``app_update_anchor``, ``mj_clock_anchor``,
+    ``b0_normalization`` and ``sound_counter`` together whenever silent audio is
+    enabled, so a unified archive really declares all three shapes. The legacy
+    methods stay implemented and answer, but a unified run never calls them.
+    """
+
+    def __init__(self, directory, **kwargs):
+        kwargs["anchored_mode"] = True
+        super().__init__(directory, **kwargs)
+        self.game[mj_clock_anchor.METHOD] = copy.deepcopy(mj_clock_anchor.SPEC)
+        (directory / "manifest.json").write_text(json.dumps(self.game), encoding="utf-8")
+
+    def exchange(self, payload, timeout):
+        result = json.loads(super().exchange(payload, timeout))
+        if json.loads(payload)["method"] == "hello":
+            result["result"]["capabilities"].update({mj_clock_anchor.MODE: True, mj_clock_anchor.METHOD: True})
+        return json.dumps(result).encode()
+
+
 class B0NormalizationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -109,9 +134,9 @@ class B0NormalizationTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def source(self, name="source", *, table=TABLE, legacy=False, **kwargs):
+    def source(self, name="source", *, table=TABLE, legacy=False, transport=NormalizationTransport, **kwargs):
         directory = self.root / name
-        model = NormalizationTransport(directory / "audit", zero_tick=None, **kwargs)
+        model = transport(directory / "audit", zero_tick=None, **kwargs)
         with SessionTrace(directory / "trace.jsonl") as trace, Client(model, trace=trace) as client:
             identity = identity_from_launcher(client.hello(), ASSETS)
             recipe = (apply_recipe(client, 42, app_update_count=model.app_count) if legacy
@@ -121,11 +146,11 @@ class B0NormalizationTests(unittest.TestCase):
             client.request("stop_recording", expect=client.version)
         return directory, model, initial
 
-    def initializer(self, *, app_count=1400, mj=1200, **kwargs):
+    def initializer(self, *, app_count=1400, mj=1200, transport=NormalizationTransport, **kwargs):
         @contextmanager
         def initialize(trajectory, output):
-            self.actual = NormalizationTransport(output / "audit", zero_tick=None, epoch=99, revision=2,
-                                                app_count=app_count, mj=mj, **kwargs)
+            self.actual = transport(output / "audit", zero_tick=None, epoch=99, revision=2,
+                                    app_count=app_count, mj=mj, **kwargs)
             with SessionTrace(output / "trace.jsonl") as trace, Client(self.actual, trace=trace) as client:
                 identity = identity_from_launcher(client.hello(), ASSETS)
                 apply_recipe(client, 42, trajectory.initial["initialization"]["clock_anchor"],
@@ -331,6 +356,95 @@ class B0NormalizationTests(unittest.TestCase):
         # Both shapes at once are rejected, never merged.
         mixed = dict(recipe, **{b0.METHOD: {"configuration": copy.deepcopy(b0.SPEC), "entries": TABLE}})
         self.assertTrue(b0.mixed_shapes(read_json(Path(source) / "audit" / "manifest.json"), mixed))
+
+    def test_real_capability_combination_initializes_and_replays_the_table_alone(self):
+        """The failing production path: one DLL declares all three B(0) shapes."""
+        source, model, initial = self.source("capability", transport=UnifiedWithLegacyCapabilitiesTransport,
+                                             app_count=1295, mj=1307)
+        manifest = read_json(Path(source) / "audit" / "manifest.json")
+        for key in (app_update_anchor.METHOD, mj_clock_anchor.METHOD, b0.METHOD):
+            self.assertIn(key, manifest)
+        # Initialization accepts the request and sends the table, not the anchors.
+        legacy_calls = [row["method"] for row in model.requests
+                        if row["method"] in {app_update_anchor.METHOD, mj_clock_anchor.METHOD}]
+        self.assertEqual(legacy_calls, [])
+        self.assertEqual([row["method"] for row in model.requests if row["method"] == b0.METHOD], [b0.METHOD])
+        self.assertEqual(initial["initialization"][b0.METHOD]["entries"], TABLE)
+        self.assertTrue(initial["observation"]["b0_normalized"])
+        # Archive reading: the legacy readers stay out of the unified archive.
+        log = AuditLog(Path(source) / "audit")
+        self.assertIsNone(log.app_anchor_receipt)
+        self.assertIsNone(log.mj_clock_receipt)
+        self.assertEqual([{"field": item["field"], "value": item["value"]}
+                          for item in log.b0_normalization_receipt["after"]],
+                         [{"field": item["field"], "value": item["target"]} for item in TABLE])
+        # Replay compares the table and reports the declared anchors as superseded.
+        trajectory = build_trajectory(Path(source) / "trace.jsonl", Path(source) / "audit", Path(source) / "bundle")
+        result = replay(trajectory, self.initializer(transport=UnifiedWithLegacyCapabilitiesTransport),
+                        self.root / "capability-replay")
+        self.assertTrue(result["equal"])
+        self.assertTrue(result["b0_normalization"]["receipt_compared"])
+        self.assertEqual(result["b0_normalization"]["common_targets"], [item["target"] for item in TABLE])
+        for name in ("app_update_anchor", "mj_clock_anchor"):
+            self.assertEqual(result[name]["mode"], f"superseded_by_{b0.MODE}")
+            self.assertFalse(result[name]["receipt_compared"])
+            self.assertFalse(result[name]["subsequent_state_normalized"])
+            self.assertIsNone(result[name]["target_policy"])
+        self.assertEqual([row["method"] for row in self.actual.requests
+                          if row["method"] in {app_update_anchor.METHOD, mj_clock_anchor.METHOD}], [])
+
+    def test_archive_reading_keeps_the_legacy_rules_only_without_the_table(self):
+        unified_source, _, unified_initial = self.source("read-unified", transport=UnifiedWithLegacyCapabilitiesTransport)
+        legacy_source, _, legacy_initial = self.source("read-legacy", legacy=True, table=None, b0_mode=False,
+                                                       anchored_mode=True, app_count=1362)
+        unified = read_json(Path(unified_source) / "audit" / "manifest.json")
+        legacy = read_json(Path(legacy_source) / "audit" / "manifest.json")
+        # The one criterion: the declared unified mode owns the two fields.
+        self.assertTrue(b0.unified_owns_fields(unified))
+        self.assertFalse(b0.unified_owns_fields(legacy))
+        self.assertEqual(app_update_anchor.mode(unified), app_update_anchor.MODE)
+        self.assertEqual(mj_clock_anchor.mode(unified), mj_clock_anchor.MODE)
+        self.assertFalse(app_update_anchor.Evidence(unified).enabled)
+        self.assertFalse(mj_clock_anchor.Evidence(unified).enabled)
+        self.assertTrue(app_update_anchor.Evidence(legacy).enabled)
+        _validate_initial(copy.deepcopy(unified_initial))
+        _validate_initial(copy.deepcopy(legacy_initial))
+        # The table is still required where it is declared ...
+        without_table = copy.deepcopy(unified_initial)
+        without_table["initialization"].pop(b0.METHOD)
+        with self.assertRaisesRegex(EvidenceError, "explicitly declared nonempty B\\(0\\) normalization"):
+            _validate_initial(without_table)
+        # ... and the legacy rules still fail closed without it.
+        for edit, message in (("target", "fixed initial target"), ("observation", "does not confirm")):
+            broken = copy.deepcopy(legacy_initial)
+            if edit == "target":
+                broken["initialization"].pop(app_update_anchor.METHOD)
+            else:
+                broken["observation"]["app_update_anchored"] = False
+            with self.subTest(edit=edit), self.assertRaisesRegex(EvidenceError, message):
+                _validate_initial(broken)
+        # A recipe that really carries both shapes stays a mix, never a merge.
+        for method, block in ((app_update_anchor.METHOD, {"configuration": copy.deepcopy(app_update_anchor.SPEC),
+                                                          "app_update_count": 2048}),
+                              (mj_clock_anchor.METHOD, {"configuration": copy.deepcopy(mj_clock_anchor.SPEC),
+                                                        "mj_clock": 2048})):
+            mixed = copy.deepcopy(unified_initial)
+            mixed["initialization"][method] = block
+            self.assertTrue(b0.mixed_shapes(unified, mixed["initialization"]))
+            with self.subTest(method=method), self.assertRaisesRegex(EvidenceError, "cannot mix"):
+                _validate_initial(mixed)
+        # A capability list alone never proves a mix.
+        self.assertFalse(b0.mixed_shapes(unified, unified_initial["initialization"]))
+        self.assertFalse(b0.mixed_shapes(legacy, legacy_initial["initialization"]))
+
+    def test_a_legacy_anchor_event_beside_the_table_is_still_rejected(self):
+        unified = UnifiedWithLegacyCapabilitiesTransport(self.root / "event-unified" / "audit", zero_tick=None)
+        legacy = NormalizationTransport(self.root / "event-legacy" / "audit", zero_tick=None, b0_mode=False,
+                                        anchored_mode=True)
+        for kind in (app_update_anchor.EVENT, mj_clock_anchor.EVENT):
+            with self.subTest(kind=kind), self.assertRaisesRegex(EvidenceError, "cannot mix"):
+                b0.Evidence(unified.game).event({"kind": kind, "payload": {}, "version": {}})
+            b0.Evidence(legacy.game).event({"kind": kind, "payload": {}, "version": {}})
 
     def test_reason_text_never_enters_the_root_identity(self):
         _, _, initial = self.source()
