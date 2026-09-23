@@ -34,7 +34,7 @@ def code_only(branch):
     """The module source with the fork constant normalised away."""
     tree = ast.parse(PATHS[branch].read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(getattr(target, "id", None) == "FORK_EXTRA_PUFF_COL"
+        if isinstance(node, ast.Assign) and any(getattr(target, "id", None) == "PUFF_COL"
                                                for target in node.targets):
             node.value = ast.Constant(value="<fork>")
     return ast.dump(tree)
@@ -91,26 +91,27 @@ class GargantuarScenarioTests(unittest.TestCase):
                     self.assertEqual(len(decision["actions"]), 1)
 
     def test_the_only_code_difference_is_the_fork_constant(self):
-        self.assertIsNone(load("a").FORK_EXTRA_PUFF_COL)
-        self.assertIsNotNone(load("b").FORK_EXTRA_PUFF_COL)
+        self.assertEqual(load("a").PUFF_COL, 7)
+        self.assertEqual(load("b").PUFF_COL, 6)
         self.assertEqual(code_only("a"), code_only("b"))
 
-    def test_b_is_a_with_exactly_one_extra_puff_request(self):
+    def test_b_differs_from_a_only_in_the_bait_column(self):
         run_a, _ = run(load("a").GargantuarScenario().decide)
         run_b, _ = run(load("b").GargantuarScenario().decide)
-        self.assertEqual(len(run_b), len(run_a) + 1)
+        # The fork is one parameter of one request, not an extra request: the two
+        # branches issue the same number of requests with the same advance budgets,
+        # and only the bait column differs. A second puff-shroom in the same tick is
+        # rejected by the engine (card cooldown), which is why the column carries it.
+        self.assertEqual(len(run_b), len(run_a))
         first = next(index for index, pair in enumerate(zip(run_a, run_b)) if pair[0] != pair[1])
         self.assertEqual(run_b[:first], run_a[:first])
-        self.assertEqual(run_b[first + 1:], run_a[first:])
-        # The shared bait is the last request of the common prefix; the fork is a new
-        # request that borrows no tick, so every later request keeps its counterpart.
-        self.assertEqual(run_a[first - 1], {"actions": [client_plant(8, 6, 7)], "advance_ticks": 0})
+        self.assertEqual(run_a[first], {"actions": [client_plant(8, 6, 7)], "advance_ticks": 0})
         self.assertEqual(run_b[first], {"actions": [client_plant(8, 6, 6)], "advance_ticks": 0})
-        self.assertEqual(run_a[first], {"actions": [], "advance_ticks": 40})
+        self.assertEqual(run_b[first + 1:], run_a[first + 1:])
         ticks_a, end_a = ticks_of(run_a)
         ticks_b, end_b = ticks_of(run_b)
         self.assertEqual((end_a, end_b), (BUDGET, BUDGET))
-        self.assertEqual(ticks_a, ticks_b[:first] + ticks_b[first + 1:])
+        self.assertEqual(ticks_a, ticks_b)
 
     def test_actions_match_the_client_helpers(self):
         run_a, _ = run(load("a").GargantuarScenario().decide)
