@@ -156,6 +156,21 @@ def negotiate(hello):
     return declared
 
 
+def unified_owns_fields(game) -> bool:
+    """True when the declared unified table, not a legacy anchor, owns the fields.
+
+    One DLL advertises the unified table and the two legacy per-field anchors at
+    the same time so that older plans keep working, so a legacy key in an
+    archive manifest is not by itself a claim that the legacy anchor was used.
+    The declared unified mode alone decides ownership: whenever it is present,
+    the table is the authority for ``/sound_effects/app_update_count`` and
+    ``/app/mj_clock`` and the legacy readers must neither read nor validate
+    them. Whether one run really carried both shapes is a different question,
+    answered by :func:`mixed_shapes` from the recipe.
+    """
+    return mode(game) == MODE
+
+
 def declared_fields(game):
     return tuple(spec["field"] for spec in game["b0_normalization"]["fields"]) if mode(game) else ()
 
@@ -203,12 +218,18 @@ def recipe_entries(recipe):
 
 
 def mixed_shapes(game, recipe=None):
-    """True when one run declares both the unified capability and a legacy anchor."""
-    legacy = ("app_update_anchor" in game) or ("mj_clock_anchor" in game)
-    unified = "b0_normalization" in game
-    if recipe is not None:
-        legacy = legacy or ("app_update_anchor" in recipe) or ("mj_clock_anchor" in recipe)
-        unified = unified or (METHOD in recipe)
+    """True when this one run really carries both shapes for the same fields.
+
+    A capability list is never evidence of a mix: one runtime advertises the
+    unified table and the legacy anchors together, so its archives declare both
+    while only the table was applied. A mix is a property of the run's own
+    declaration -- a recipe that carries a legacy anchor block while the unified
+    table is declared (or next to the unified block) -- and of the event stream,
+    where the readers refuse a legacy anchor event beside ``b0_normalized``.
+    """
+    declaration = recipe if isinstance(recipe, dict) else {}
+    legacy = ("app_update_anchor" in declaration) or ("mj_clock_anchor" in declaration)
+    unified = mode(game) == MODE or METHOD in declaration
     return legacy and unified
 
 
