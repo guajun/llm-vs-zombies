@@ -394,9 +394,25 @@ journal，也不会产生 `action` 事件。托管跑 12 炮时，炮击因此�
 
 `count`/`digest` 在**发炮那一刻**增加，所以炮击会改变紧跟着的那次边界的组件 digest 与
 `all` digest：`tools/giant_fork_diff.py` 的逐帧 digest 对比能看到"两个世界第一次发炮
-不同"的那一帧，而不是等炮弹落地才看到差异。digest 是审计的 FNV-1a，按 §8.3 的整数字段
-顺序（`plant_index, plant_id, plant_row, plant_col, target_row, target_col_bits, tick`）
-逐 8 字节小端混合；Python 读取端独立重算（`test_hosted_fire_audit.py` 还钉了一个常量）。
+不同"的那一帧，而不是等炮弹落地才看到差异。
+
+digest 规则（写入侧与读取侧的唯一约定）：把 §8.3 的七个整数字段按固定顺序
+（`plant_index, plant_id, plant_row, plant_col, target_row, target_col_bits, tick`）各写成
+一个 8 字节小端 word，FNV-1a 逐字节混合；word 取自**记录里实际写的那个值**——`plant_id`
+在记录里是 uint32，所以零扩展；负的 JSON 整数按补码 64 位符号扩展（等价于 Python 的
+`value & 0xffffffffffffffff`）。不能用同一个数字的另一种副本去混（例如用签名的 `int`
+形参去混 uint32 的 id）：那样两边各自自洽，却互相不等。
+
+> 2026-09-24 真机（托管 `jing_dian_12`，`jd12-smoke-01-s42-c0`）就踩了这个坑：20 条
+> `hosted_fire` 记录其实都写进了 `audit/events.jsonl.gz`（用 `Select-String` 直接搜 gzip
+> 会误判为 0 条），但 `Mix(plantId)` 混的是签名 `int` 形参，id ≥ 2^31（那局长局里 20/20
+> 都是，`0xDC740013` 起）被符号扩展，逐边界 state 的 digest 与读取端从记录重算的值不等，
+> 封存阶段直接 `EvidenceError: hosted fire state count/digest differs from the verified
+> records`。修法是让写入侧只混 payload 里的值（单一真源），并把这条约定在两个语言里各钉
+> 一个常量交叉校验（§8.7）。
+>
+> 修复前写下的 v1 证据（只要有一发炮的 id ≥ 2^31）会**故意**被读取端拒绝——那份证据本身
+> 就不一致；请用修复后的 DLL 重新录制。
 
 ### 8.5 manifest 声明与严格读取
 
@@ -439,7 +455,10 @@ journal，也不会产生 `action` 事件。托管跑 12 炮时，炮击因此�
 * `ctest -R avz_hosted_fire_default` —— 默认构建那半边：同一串炮，记录为 0 条，状态组件与
   manifest 声明都不存在。
 * `python -m unittest discover -s tests -p test_hosted_fire_audit.py` —— 严格读取端：
-  声明、绑定、计数、digest、可读列、顺序、无声明证据各有反例。
+  声明、绑定、计数、digest、可读列、顺序、无声明证据各有反例；其中
+  `HostedFireArtifactTests` 直接读 `avz_hosted_fire_tests` 写下的
+  `records.jsonl`/`state.jsonl`（20 发，id ≥ 2^31），用读取端的实现重算整条 digest 链并与
+  写入侧逐条对账。这是单语言测试抓不到的跨语言回归——真机那次失败正是它。
 * `python -m unittest discover -s tests -p test_avz_hosted_script.py` —— 接线检查：overlay
   锚点、两个 TU 与 `LVZ_AVZ_HOSTED_FIRE_AUDIT` 都必须落在 `LVZ_AVZ_HOSTED_SCRIPT` 开关
   内，默认构建的 `RECORDER_SOURCES` 里不得出现它们。

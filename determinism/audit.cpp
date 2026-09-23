@@ -106,11 +106,10 @@ void DrainAndCheckSpawns() {
 // following audited pre_step stays visible to the strict reader instead of
 // being dropped or back-dated.
 void DrainHostedFires() {
-    auto records = DrainHostedFireEvents(sequence);
-    if (records.empty()) return;
-    sequence += records.size();
-    for (auto& record : records)
-        Write(events, record);
+    // The module builds each envelope and hands it to the writer here, so
+    // tests/avz_hosted_fire_tests.cpp runs the same drain with a file sink and
+    // counts exactly the lines this call would append to events.jsonl.
+    sequence += DrainHostedFireRecords([](const Json& record) { Write(events, record); }, sequence);
 }
 #endif
 void SetObservedSpawnBoundary(const Json& version,uint64_t engineCallId) {

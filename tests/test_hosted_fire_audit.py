@@ -11,6 +11,7 @@ tests/avz_hosted_fire_tests.cpp.
 from __future__ import annotations
 
 import json
+import os
 import struct
 from pathlib import Path
 import tempfile
@@ -31,6 +32,19 @@ MODE = {"mode": HOSTED_FIRE_MODE, "installed": True, "kind": HOSTED_FIRE_KIND,
 # the same three shots tests/avz_hosted_fire_tests.cpp drives through the real
 # overlay of the pinned cob manager.
 SHOTS = ((3, 65539, 1, 3, 2, 9.0, 40), (7, 131079, 4, 6, 5, 9.0, 40), (3, 65539, 1, 3, 4, 7.625, 41))
+
+# The first shot of the live 12-cannon run
+# (work/hosted-live/experiments/runs/jd12-smoke-01-s42-c0), whose plant id is
+# >= 2^31 - the value class that broke the reconciliation when the writer mixed
+# the signed `int` parameter (sign-extending) instead of the uint32 the record
+# stores (zero-extending).
+LIVE_PLANT_ID = 3698589715  # 0xDC740013
+LIVE_SHOT = (19, LIVE_PLANT_ID, 1, 5, 2, 9.0, 567)
+LIVE_SHOT_DIGEST = 6388981459987454381
+# Ten P6 rounds of two cannons: two shots per granted frame, ids >= 2^31.
+LIVE_SHOTS = tuple((19 + index, LIVE_PLANT_ID + index * 0x1234, index % 5 + 1, index % 4 + 5,
+                   5 if index % 2 else 2, 9.0, 567 + (index // 2) * 10)
+                   for index in range(20))
 
 
 def fire_event(seq, shot):
@@ -243,6 +257,33 @@ class HostedFireAuditTests(unittest.TestCase):
         self.assertEqual(_hosted_fire_digest(14695981039346656037, payload), value)
         self.assertEqual(value, 0x325e047e1d57a4d7)
 
+    def test_live_shot_digest_is_pinned_for_ids_above_2_to_the_31(self):
+        # The live failure: every live plant id was >= 2^31, so the writer's
+        # signed-int reading of the id and the uint32 in the record encoded
+        # different words. The payload value is the contract.
+        payload = fire_event(0, LIVE_SHOT)["payload"]
+        self.assertEqual(payload["plant_id"], 0xDC740013)
+        self.assertEqual(_hosted_fire_digest(14695981039346656037, payload), LIVE_SHOT_DIGEST)
+
+    def test_twenty_records_reconcile_with_their_boundary_states(self):
+        # "20 records -> 20 record lines, every boundary state accounted for":
+        # the shape the live run produced (ten rounds, two cannons each).
+        directory = self.fixture()
+        hosted_fire_audit(directory, shots=LIVE_SHOTS, stated=LIVE_SHOTS)
+        log = AuditLog(directory)
+        fires = self.events(log)
+        self.assertEqual(len(fires), 20)
+        self.assertTrue(all(event["payload"]["plant_id"] >= 0x80000000 for event in fires))
+        states = [frame.state["hosted_fire"] for frame in log.frames]
+        cumulative = [count for count in range(2, 21, 2) for _ in (0, 1)]
+        self.assertEqual([state["count"] for state in states], cumulative)
+        self.assertEqual([state["digest"] for state in states],
+                         [rolling(LIVE_SHOTS[:count]) for count in cumulative])
+        # The per-shot chain: record i is bound to the first boundary at or after
+        # it, and the final state accounts for all twenty.
+        self.assertEqual(states[-1]["count"], 20)
+        self.assertEqual(states[-1]["digest"], rolling(LIVE_SHOTS))
+
     def test_streams_without_the_mode_keep_their_evidence_set(self):
         directory = self.fixture()
         hosted_fire_audit(directory, shots=(), stated=(), declared=False, ticks=(40,))
@@ -250,6 +291,93 @@ class HostedFireAuditTests(unittest.TestCase):
         self.assertEqual(audit_files(directory, log.manifest), AUDIT_FILES)
         self.assertEqual([event["kind"] for event in log.control_events], ["recording_closed"])
         self.assertEqual([frame.state.get("hosted_fire") for frame in log.frames], [None, None])
+
+
+ARTIFACT_DIRECTORIES = ("avz-hosted-fire/hosted", "build/cmake/avz-hosted-fire/hosted")
+
+
+def artifact_directory():
+    """Where tests/avz_hosted_fire_tests.cpp left the native writer's output.
+
+    ctest runs with the build tree as its working directory, so the first
+    candidate is the one in play; the second one also lets a plain
+    `python -m unittest discover -s tests` from the checkout root reconcile
+    against a default build. Without a build the caller skips.
+    """
+    override = os.environ.get("LVZ_FIRE_ARTIFACT_DIR")
+    candidates = (override,) if override else ARTIFACT_DIRECTORIES
+    for candidate in candidates:
+        directory = Path(candidate)
+        if (directory / "records.jsonl").is_file() and (directory / "state.jsonl").is_file():
+            return directory
+    return None
+
+
+class HostedFireArtifactTests(unittest.TestCase):
+    """Reconciles the native writer's own output with the reader's encoding.
+
+    tests/avz_hosted_fire_tests.cpp drives twenty shots (plant ids >= 2^31, two
+    per granted frame) through the real overlay and the real drain, and writes
+    the envelopes the audit writer appends to events.jsonl plus the per-boundary
+    state. This side recomputes the digest chain with the reader's
+    implementation: the live failure - writer and reader each self-consistent
+    but encoding the id differently - fails here, which no single-language test
+    can catch.
+    """
+
+    def setUp(self):
+        directory = artifact_directory()
+        if directory is None:
+            self.skipTest("no hosted-fire artifacts; run ctest -R avz_hosted_fire first")
+        self.records = [json.loads(line) for line in
+                        (directory / "records.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.states = [json.loads(line) for line in
+                       (directory / "state.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    def test_every_shot_wrote_one_record_and_one_state_entry(self):
+        self.assertEqual(len(self.records), 20)
+        self.assertEqual(len(self.states), len(self.records))
+        for index, record in enumerate(self.records):
+            self.assertEqual(record["schema"], SCHEMA)
+            self.assertEqual(record["kind"], HOSTED_FIRE_KIND)
+            self.assertEqual(record["seq"], index)
+            self.assertEqual(record["payload"]["tick"], record["version"]["tick"])
+        for index, entry in enumerate(self.states):
+            self.assertEqual(entry["records"], index + 1)
+            self.assertEqual(entry["state"]["count"], index + 1)
+            self.assertEqual(entry["state"]["mode"], HOSTED_FIRE_MODE)
+
+    def test_reader_encoding_reproduces_the_writer_digest_chain(self):
+        rolling = 14695981039346656037
+        for index, (record, entry) in enumerate(zip(self.records, self.states)):
+            rolling = _hosted_fire_digest(rolling, record["payload"])
+            self.assertEqual(entry["state"]["digest"], rolling,
+                             f"writer/reader digest disagreement at record {index}")
+        # The first record is the live shot: ids >= 2^31 are the case that broke.
+        self.assertEqual(self.records[0]["payload"]["plant_id"], LIVE_PLANT_ID)
+        self.assertTrue(all(record["payload"]["plant_id"] >= 0x80000000 for record in self.records))
+        self.assertEqual(_hosted_fire_digest(14695981039346656037, self.records[0]["payload"]),
+                         LIVE_SHOT_DIGEST)
+
+    def test_the_recorded_stream_reconciles_end_to_end(self):
+        directory = self.fixture()
+        shots = tuple((record["payload"]["plant_index"], record["payload"]["plant_id"],
+                       record["payload"]["plant_row"], record["payload"]["plant_col"],
+                       record["payload"]["target_row"],
+                       struct.unpack("<f", struct.pack("<I", record["payload"]["target_col_bits"]))[0],
+                       record["payload"]["tick"]) for record in self.records)
+        hosted_fire_audit(directory, shots=shots, stated=shots, declared=True)
+        log = AuditLog(directory)
+        self.assertEqual(len(self.events(log)), 20)
+        self.assertEqual(len(list(log.frames)), 20)
+
+    def fixture(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return Path(temporary.name) / "audit"
+
+    def events(self, log):
+        return [event for event in log.control_events if event["kind"] == HOSTED_FIRE_KIND]
 
 
 if __name__ == "__main__":
