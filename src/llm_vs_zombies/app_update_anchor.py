@@ -1,4 +1,13 @@
-"""Explicit prewarm App update-count initialization; never normalizes state."""
+"""Explicit prewarm App update-count initialization; never normalizes state.
+
+``initial_app_update_anchor_v1`` anchors ``LawnApp+0x484`` (``mUpdateCount``,
+the counter behind ``/sound_effects/app_update_count``) to a target the
+experiment declares. The run's own observed counter is never accepted as that
+target: anchoring each world to its own value keeps every world internally
+consistent and still leaves the cross-world counter different. Cross-run
+``before`` values may differ; the ``after`` readback must equal the declared
+common target.
+"""
 from __future__ import annotations
 import copy
 
@@ -7,6 +16,13 @@ from . import sound_effects
 MODE = "initial_app_update_anchor_v1"
 METHOD = "app_update_anchor"
 EVENT = "app_update_anchored"
+# The declared fixed target lives in the plan/recipe (``Plan.app_update_count``
+# and ``app_update_anchor: {configuration, app_update_count}``). The capability
+# manifest cannot gain a policy key without invalidating already sealed
+# archives, so the declaration contract is stated here and enforced by the
+# reader plus ``initialization.apply_recipe``, which refuses to fall back to the
+# run's own observed counter.
+TARGET_POLICY = "explicit_fixed_common_target"
 # The optional fixed MJ clock anchor is inserted between this App anchor and
 # the warm draw. The literal avoids importing the newer module here.
 MJ_CLOCK_EVENT = "mj_clock_anchored"
@@ -53,6 +69,7 @@ def negotiate(hello):
 
 
 def target_from_recipe(recipe):
+    """Return the declared fixed target; the recipe never records a spot value."""
     if METHOD not in recipe:
         return None
     block = recipe[METHOD]
@@ -123,7 +140,7 @@ def initial(marker):
             fail("recipe cannot upgrade an older execution mode")
         return
     if wanted is None:
-        fail("new mode requires an explicit initial anchor recipe")
+        fail("new mode requires an explicitly declared fixed initial target")
     if marker["observation"].get("app_update_anchored") is not True:
         fail("B0 observation does not confirm the actual one-shot anchor")
     sound = sound_effects.state(marker["state"], marker["identity"]["game"])

@@ -79,7 +79,10 @@ class AnchorTransport(AudioTransport):
             return json.dumps({"protocol": 1, "request_id": rid, "ok": True, "result": result}).encode()
         result = json.loads(super().exchange(payload, timeout))
         if method == "hello":
-            result["result"]["capabilities"].update({anchor.MODE: self.anchored_mode, anchor.METHOD: self.anchored_mode})
+            # The fixture really implements these two historical methods; the
+            # declared anchor keys stay tied to the declared mode.
+            result["result"]["capabilities"].update({anchor.MODE: self.anchored_mode, anchor.METHOD: self.anchored_mode,
+                                                     "rng_seed": True, "clock_restore": True})
         return json.dumps(result).encode()
 
 
@@ -112,10 +115,11 @@ class AppUpdateAnchorTests(unittest.TestCase):
         return identity, recipe
 
     def source(self, name="source", **kwargs):
+        target = kwargs.pop("target", None)
         directory = self.root / name
         model = AnchorTransport(directory / "audit", zero_tick=None, **kwargs)
         with SessionTrace(directory / "trace.jsonl") as trace, Client(model, trace=trace) as client:
-            identity, recipe = self.prepare(client, model)
+            identity, recipe = self.prepare(client, model, target)
             initial = capture_initial(client, identity=identity, initialization=recipe)
             client.advance(3)
             client.request("stop_recording", expect=client.version)
@@ -145,8 +149,52 @@ class AppUpdateAnchorTests(unittest.TestCase):
                 self.assertEqual(result["app_update_anchor"]["source_before"], 1295)
                 self.assertEqual(result["app_update_anchor"]["actual_before"], 1294)
                 self.assertEqual(result["app_update_anchor"]["actual_after"], 1295)
+                self.assertEqual(result["app_update_anchor"]["common_target"], 1295)
+                self.assertEqual(result["app_update_anchor"]["source_after"],
+                                 result["app_update_anchor"]["actual_after"])
                 self.assertTrue(result["app_update_anchor"]["receipt_compared"])
+                self.assertEqual(result["app_update_anchor"]["target_policy"], anchor.TARGET_POLICY)
                 self.assertFalse(result["app_update_anchor"]["subsequent_state_normalized"])
+
+    def test_two_worlds_declare_one_common_target_and_reach_identical_b0(self):
+        """Real before values differ; the declared target makes B(0) identical."""
+        target = 1500
+        e4, e4_model, e4_initial = self.source("world-e4", app_count=1395, target=target)
+        f4, f4_model, f4_initial = self.source("world-f4", app_count=1422, target=target)
+        self.assertEqual((e4_model.anchor_receipt["before"], e4_model.anchor_receipt["after"]), (1395, target))
+        self.assertEqual((f4_model.anchor_receipt["before"], f4_model.anchor_receipt["after"]), (1422, target))
+        self.assertNotEqual(e4_model.anchor_receipt["before_state"], f4_model.anchor_receipt["before_state"])
+        self.assertEqual(e4_initial["state"], f4_initial["state"])
+        self.assertEqual(e4_initial["state"]["sound_effects"]["app_update_count"], target)
+        self.assertEqual(anchor.target_from_recipe(e4_initial["initialization"]), target)
+        result = replay(self.bundle(e4), self.initializer(app_count=1422), self.root / "common-target")
+        self.assertTrue(result["equal"])
+        self.assertEqual(result["app_update_anchor"]["source_before"], 1395)
+        self.assertEqual(result["app_update_anchor"]["actual_before"], 1422)
+        self.assertEqual(result["app_update_anchor"]["common_target"], target)
+        self.assertEqual(result["app_update_anchor"]["source_after"], target)
+        self.assertEqual(result["app_update_anchor"]["actual_after"], target)
+        self.assertFalse(result["app_update_anchor"]["before_values_compared"])
+
+    def test_declared_capability_requires_an_explicit_declared_target(self):
+        directory = self.root / "missing"
+        model = AnchorTransport(directory / "audit", zero_tick=None, app_count=1295)
+        with SessionTrace(directory / "trace.jsonl") as trace, Client(model, trace=trace) as client:
+            from llm_vs_zombies.initialization import apply_recipe
+            with self.assertRaisesRegex(RuntimeError, r"declare the fixed B\(0\) app_update_count target"):
+                apply_recipe(client, 42)
+            self.assertFalse(any(row["method"] == anchor.METHOD for row in model.requests))
+        self.assertFalse(model.app_anchored)
+        self.assertEqual([row["method"] for row in model.requests], ["hello"])
+        self.assertEqual((model.tick, model.revision), (0, 0))
+
+    def test_legacy_recipe_that_recorded_its_own_value_still_validates(self):
+        """Archives recorded before the declarative change keep replaying."""
+        source, model, initial = self.source("legacy", app_count=1295)
+        self.assertEqual(initial["initialization"][anchor.METHOD]["app_update_count"], 1295)
+        self.assertEqual(model.anchor_receipt["before"], model.anchor_receipt["after"])
+        result = replay(self.bundle(source), self.initializer(), self.root / "legacy-replay")
+        self.assertTrue(result["equal"])
 
     def test_old_audio_spec_without_anchor_still_reads_and_replays(self):
         source, _, _ = self.source(anchored_mode=False)
@@ -220,12 +268,14 @@ class AppUpdateAnchorTests(unittest.TestCase):
 
     def test_missing_wrong_recipe_and_false_applied_observation(self):
         _, _, initial = self.source()
-        for fault in ("missing", "target", "flag"):
+        for fault in ("missing", "target", "flag", "configuration"):
             value = copy.deepcopy(initial)
             if fault == "missing":
                 value["initialization"].pop(anchor.METHOD)
             elif fault == "target":
                 value["initialization"][anchor.METHOD]["app_update_count"] += 1
+            elif fault == "configuration":
+                value["initialization"][anchor.METHOD]["configuration"]["target_policy"] = "use_observed_value"
             else:
                 value["observation"]["app_update_anchored"] = False
             with self.subTest(fault=fault), self.assertRaises(EvidenceError):

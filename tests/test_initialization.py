@@ -545,11 +545,13 @@ class AppAnchorPreparationTests(unittest.TestCase):
     def test_distinct_startup_counts_converge_by_actual_write_before_warm(self):
         from llm_vs_zombies import app_update_anchor as app
         source, cold = AppAnchorPreparationRuntime(1295), AppAnchorPreparationRuntime(1294)
-        for runtime, target in ((source, None), (cold, 1295)):
+        for runtime, expected_before in ((source, 1295), (cold, 1294)):
             trace = Mock()
             with Client(runtime, trace=trace) as client:
                 client.hello()
-                recipe = apply_recipe(client, 42, app_update_count=target)
+                # Both worlds declare the same fixed target; neither records its
+                # own observed counter as the target.
+                recipe = apply_recipe(client, 42, app_update_count=1295)
             runtime.recipe = recipe
             self.assertEqual(runtime.anchor_calls, 1)
             self.assertEqual(runtime.draws, 1)
@@ -559,12 +561,25 @@ class AppAnchorPreparationTests(unittest.TestCase):
             self.assertEqual(app.target_from_recipe(recipe), 1295)
             evidence = next(c.args[1]['evidence'] for c in trace.emit.call_args_list
                             if c.args[0] == 'initialization_prepared')['app_update_anchor']
-            self.assertEqual(evidence['before'], 1295 if target is None else 1294)
+            self.assertEqual(evidence['before'], expected_before)
             self.assertEqual(evidence['before_state']['sound_effects']['app_update_count'], evidence['before'])
             self.assertEqual(evidence['after_state']['sound_effects']['app_update_count'], 1295)
         self.assertEqual(source.state, cold.state)
         self.assertEqual(source.recipe, cold.recipe)
         self.assertEqual(cold.state['sound_effects']['app_update_count'], 1295)
+
+    def test_declared_runtime_requires_an_explicit_target_before_any_mutation(self):
+        runtime = AppAnchorPreparationRuntime(1295)
+        with Client(runtime, trace=Mock()) as client:
+            client.hello()
+            with self.assertRaisesRegex(RuntimeError, "app_update_count"):
+                apply_recipe(client, 42)
+        self.assertEqual(runtime.anchor_calls, 0)
+        self.assertEqual(runtime.draws, 0)
+        self.assertFalse(any(request['method'] in {'rng_seed', 'clock_restore', 'app_update_anchor', 'prepare_render'}
+                             for request in runtime.requests))
+        self.assertEqual(runtime.version['revision'], 0)
+        self.assertFalse(runtime.anchored)
 
     def test_invalid_receipt_or_actual_readback_cannot_reach_warm(self):
         for fault in ('other_field', 'readback', 'flag'):
@@ -591,11 +606,11 @@ class AppAnchorPreparationTests(unittest.TestCase):
 class CounterPreparationTests(unittest.TestCase):
     def test_distinct_lifetime_totals_preserved_while_full_post_initial_state_converges(self):
         source, cold = CounterPreparationRuntime(), CounterPreparationRuntime(1427, 16)
-        for runtime, target in ((source, None), (cold, 1362)):
+        for runtime in (source, cold):
             trace = Mock()
             with Client(runtime, trace=trace) as client:
                 client.hello()
-                runtime.recipe = apply_recipe(client, 42, app_update_count=target)
+                runtime.recipe = apply_recipe(client, 42, app_update_count=1362)
             origin = 14 if runtime is source else 16
             self.assertEqual(runtime.raw_calls, origin + 3)
             self.assertEqual(runtime.state['sound_effects']['calls'], 3)
@@ -621,7 +636,7 @@ class CounterPreparationTests(unittest.TestCase):
                 with Client(runtime, trace=Mock()) as client:
                     client.hello()
                     with self.assertRaises((ValueError, RuntimeError)):
-                        apply_recipe(client, 42)
+                        apply_recipe(client, 42, app_update_count=1362)
                 self.assertEqual(runtime.anchor_calls, 0)
                 self.assertEqual(runtime.draws, 0)
                 self.assertEqual(runtime.raw_calls, 14)

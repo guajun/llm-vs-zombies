@@ -96,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=15.0, help="Whole request deadline in seconds")
     parser.add_argument("--script", type=Path, help="Execute a file with game/plant/shovel in scope, then exit")
     parser.add_argument("--seed", type=int, default=0, help="Seed used only for an unprepared ready controlled-draw game")
+    parser.add_argument("--app-update-count", type=int, default=None,
+                        help="Declared fixed B(0) target for LawnApp+0x484; required by a runtime that declares the initial App update anchor")
+    parser.add_argument("--mj-clock", type=int, default=None,
+                        help="Declared fixed B(0) target for LawnApp+0x838; required by a runtime that declares the fixed MJ clock anchor")
     parser.add_argument("--defer-preparation", action="store_true",
                         help="Leave one-time render preparation to an explicit initialization recipe")
     args = parser.parse_args(argv)
@@ -106,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
                 with connect(pid=args.pid, endpoint=args.endpoint, trace=trace, timeout=args.timeout) as game:
                     if not args.defer_preparation:
                         from .initialization import ensure_render_prepared
-                        ensure_render_prepared(game, args.seed)
+                        ensure_render_prepared(game, args.seed, mj_clock=args.mj_clock,
+                                               app_update_count=args.app_update_count)
                     console = RecordedConsole(game, trace)
                     if args.script:
                         return 0 if console.execute_cell(args.script.read_text(encoding="utf-8"), str(args.script)) else 1

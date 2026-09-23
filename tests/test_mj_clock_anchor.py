@@ -168,9 +168,11 @@ class MjClockAnchorTests(unittest.TestCase):
         model = MjTransport(directory / "audit", zero_tick=None, mj=1307)
         with SessionTrace(directory / "trace.jsonl") as trace, Client(model, trace=trace) as client:
             from llm_vs_zombies.initialization import apply_recipe
-            with self.assertRaises(RuntimeError):
-                apply_recipe(client, 42)
-            self.assertFalse(any(row["method"] == anchor.METHOD for row in model.requests))
+            # The App update target is declared here so the refusal under test
+            # is the missing fixed MJ clock target, not the App one.
+            with self.assertRaisesRegex(RuntimeError, r"declare the fixed B\(0\) target"):
+                apply_recipe(client, 42, app_update_count=1307)
+            self.assertFalse(any(row["method"] in {anchor.METHOD, app_anchor.METHOD} for row in model.requests))
 
     def test_old_capability_archive_and_replay_are_preserved(self):
         source, _, initial = self.source(mj_mode=False)

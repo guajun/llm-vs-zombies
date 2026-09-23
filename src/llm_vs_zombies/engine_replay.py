@@ -708,6 +708,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
         "native_state_compared": False, "raw_origins_compared": False, "state_normalized_by_comparator": False}
     report["app_update_anchor"] = {"mode": anchor_mode or "not_declared", "receipt_compared": False,
         "original_engine_bitwise_unmodified": False if anchor_mode else None,
+        "target_policy": app_update_anchor.TARGET_POLICY if anchor_mode else None,
         "before_values_compared": False, "subsequent_state_normalized": False}
     report["mj_clock_anchor"] = {"mode": mj_clock_mode or "not_declared",
         "original_engine_bitwise_unmodified": False if mj_clock_mode else None,
@@ -914,6 +915,7 @@ def replay(trajectory: Trajectory | str | Path, initializer: Callable, output_di
                               "initial_app_update_anchor")
                 report["app_update_anchor"].update(receipt_compared=True, source_before=expected_anchor["before"],
                     actual_before=actual_anchor["before"], requested=expected_anchor["requested"],
+                    common_target=expected_anchor["requested"],
                     source_after=expected_anchor["after"], actual_after=actual_anchor["after"])
             if mj_clock_mode:
                 expected_mj, actual_mj = trajectory.audit.mj_clock_receipt, actual_audit.mj_clock_receipt

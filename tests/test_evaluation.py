@@ -130,6 +130,41 @@ class EvaluationTests(unittest.TestCase):
             path.write_text(json.dumps({"seeds": [42], "strategy": "policies/policy.py"}))
             self.assertEqual(Plan.load(path).strategy, str((directory / "policies/policy.py").resolve()))
 
+    def test_plan_declares_the_fixed_b0_targets_and_legacy_plans_stay_nullable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "plan.json"
+            path.write_text("{}")
+            legacy = Plan.load(path)
+            self.assertIsNone(legacy.app_update_count)
+            self.assertIsNone(legacy.mj_clock)
+            path.write_text(json.dumps({"app_update_count": 1500, "mj_clock": 2048}))
+            declared = Plan.load(path)
+            self.assertEqual((declared.app_update_count, declared.mj_clock), (1500, 2048))
+            for name in ("app_update_count", "mj_clock"):
+                for value in (-1, 0x80000000, True, 1.0, "1500", [1500]):
+                    path.write_text(json.dumps({name: value}))
+                    with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                        Plan.load(path)
+
+    def test_plan_command_carries_the_declared_b0_targets(self):
+        from llm_vs_zombies import evaluation
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "plan.json"
+            self.assertEqual(evaluation.main(["plan", str(path), "--audio-mode", MODE,
+                                              "--app-update-count", "1500", "--mj-clock", "2048"]), 0)
+            value = json.loads(path.read_text())
+            self.assertEqual((value["app_update_count"], value["mj_clock"], value["audio_mode"]), (1500, 2048, MODE))
+            self.assertEqual((Plan.load(path).app_update_count, Plan.load(path).mj_clock), (1500, 2048))
+            path.unlink()
+            for option in ("--app-update-count", "--mj-clock"):
+                stderr = io.StringIO()
+                with self.subTest(option=option), contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                    evaluation.main(["plan", str(path), option, "2147483648"])
+                self.assertIn("must be an integer in 0..2147483647", stderr.getvalue())
+                self.assertFalse(path.exists())
+
     def test_mock_evidence_cannot_make_strict_ready(self):
         with tempfile.TemporaryDirectory() as temp:
             artifact = Path(temp) / "mock-result.json"

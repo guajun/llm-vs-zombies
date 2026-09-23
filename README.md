@@ -41,7 +41,7 @@ python -m llm_vs_zombies.evaluation plan work/smoke-plan.json --seeds 42 --strat
 python -m llm_vs_zombies.evaluation run work/smoke-plan.json --output experiments/runs/eval-smoke
 ```
 
-当前重复性实验使用显式空音效模式：生成计划时加 `--audio-mode sound_effects_allocation_none_v1`；其初始化会记录诊断计数起点、锚定真实 App 计数并准备固定绘制边界。省略参数仍保留原始音频模式。具体合同与实际通过范围见[评测文档](docs/evaluation.md)和[实机记录](docs/headless-validation.md)。普通 REPL 的会话日志还需按[重放接口](docs/engine-replay.md)记录完整初态，才能封装严格轨迹；评测运行器已接入这些步骤。
+当前重复性实验使用显式空音效模式：生成计划时加 `--audio-mode sound_effects_allocation_none_v1`；其初始化会记录诊断计数起点、把真实 App 计数（`LawnApp+0x484`）与绝对 App 计数（`LawnApp+0x838`）锚定到计划里**声明的固定目标**（`--app-update-count`、`--mj-clock`，并行世界必须声明同一个值），再准备固定绘制边界。运行声明了能力却没有声明目标时初始化直接拒绝启动，不会回退到本 run 自己的观测值。省略参数仍保留原始音频模式。具体合同与实际通过范围见[评测文档](docs/evaluation.md)和[实机记录](docs/headless-validation.md)。普通 REPL 的会话日志还需按[重放接口](docs/engine-replay.md)记录完整初态，才能封装严格轨迹；评测运行器已接入这些步骤。
 
 客户端示例（PID 从本轮 `launcher.json` 读取）：
 
