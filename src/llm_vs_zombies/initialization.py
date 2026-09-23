@@ -117,9 +117,12 @@ def apply_recipe(client, seed: int, anchor: dict | None = None, *, run: Path | N
     mj_clock_mode = mj_clock_anchor.negotiate(hello)
     counter_mode = sound_counter.negotiate(hello)
     fp_mode = fp_environment.negotiate(hello)
-    if b0_mode and (app_anchor_mode or mj_clock_mode):
-        raise RuntimeError("runtime declares both the unified B(0) normalization and a legacy per-field anchor; "
-                           "one run cannot mix the two shapes")
+    # A runtime is allowed to declare the unified table *and* the legacy per-field
+    # anchors at the same time; that is how one DLL stays compatible with older
+    # plans. "Mixing shapes" is a property of what *this request* declares (guarded
+    # above) and of what an *archive* contains (engine_replay), never of the
+    # runtime's capability list -- reading it from the capabilities made every
+    # unified-table run fail before it sent anything.
     if not b0_mode and b0_normalization is not None:
         raise RuntimeError("runtime has no declared unified B(0) normalization capability")
     table = list(aliases)
