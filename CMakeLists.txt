@@ -14,6 +14,24 @@ target_compile_options(recorder PRIVATE -Wall -Wextra -Werror=return-type -Werro
 target_link_options(recorder PRIVATE -static)
 target_link_libraries(recorder PRIVATE gdi32 dbghelp crypt32 bcrypt)
 set_target_properties(recorder PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build" LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+# Optional AvZ script hosted by the resident runtime. The named source must
+# define `ACoroutine lvz::hosted::Script()` (logger/avz/hosted_script.hpp); the
+# recorder launches it from inside AScript(), so frame ownership, pause and the
+# engine-call boundary stay with the runtime. Empty by default: no script is
+# linked and the recorded behaviour is identical to the current build.
+# Example: -DLVZ_AVZ_HOSTED_SCRIPT=logger/avz/hosted/atime_probe.cpp
+set(LVZ_AVZ_HOSTED_SCRIPT "" CACHE FILEPATH "Optional AvZ script compiled into the resident runtime")
+if(LVZ_AVZ_HOSTED_SCRIPT)
+  if(NOT IS_ABSOLUTE "${LVZ_AVZ_HOSTED_SCRIPT}")
+    get_filename_component(LVZ_AVZ_HOSTED_SCRIPT "${CMAKE_SOURCE_DIR}/${LVZ_AVZ_HOSTED_SCRIPT}" ABSOLUTE)
+  endif()
+  if(NOT EXISTS "${LVZ_AVZ_HOSTED_SCRIPT}")
+    message(FATAL_ERROR "LVZ_AVZ_HOSTED_SCRIPT does not exist: ${LVZ_AVZ_HOSTED_SCRIPT}")
+  endif()
+  target_sources(recorder PRIVATE "${LVZ_AVZ_HOSTED_SCRIPT}")
+  target_compile_definitions(recorder PRIVATE LVZ_AVZ_HOSTED_SCRIPT=1)
+  message(STATUS "Hosting AvZ script: ${LVZ_AVZ_HOSTED_SCRIPT}")
+endif()
 # Explicitly requested lifecycle probe; never built by the default all target
 # and never contains/replaces the production recorder artifact.
 add_library(recorder_flag_fixture SHARED EXCLUDE_FROM_ALL ${RECORDER_SOURCES} tests/flag_drop_live.cpp)
@@ -149,3 +167,22 @@ target_include_directories(fp_environment_tests PRIVATE ${CMAKE_SOURCE_DIR} runt
 target_link_options(fp_environment_tests PRIVATE -static)
 set_target_properties(fp_environment_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
 add_test(NAME fixed_owner_fp COMMAND fp_environment_tests)
+
+# Frame ownership of a hosted AvZ script: the generated overlay of the pinned
+# avz_script.cpp, AvZ's coroutine/time-queue/tick-runner TUs and the hosted
+# probe script run against a fake PvZ image, with the runtime frame gate as the
+# only test double on the boundary. See tests/avz_hosted_script_tests.cpp.
+add_executable(avz_hosted_script_tests
+  tests/avz_hosted_script_tests.cpp
+  logger/avz/hosted/atime_probe.cpp
+  ${AVZ_SOURCES})
+target_compile_definitions(avz_hosted_script_tests PRIVATE LVZ_AVZ_HOSTED_SCRIPT=1)
+target_include_directories(avz_hosted_script_tests PRIVATE ${CMAKE_SOURCE_DIR} avz/framework/inc logger/avz runtime/vendor)
+target_compile_options(avz_hosted_script_tests PRIVATE -Wall -Wextra -Werror=return-type -Werror=unused-result $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+# AvZ reads the App pointer at the fixed address 0x6a9ec0. The test binary is
+# loaded at its natural base without ASLR so that this address stays inside the
+# image's own reservation and the heap can never be placed over it.
+target_link_options(avz_hosted_script_tests PRIVATE -static -Wl,--disable-dynamicbase)
+target_link_libraries(avz_hosted_script_tests PRIVATE gdi32 dbghelp)
+set_target_properties(avz_hosted_script_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+add_test(NAME avz_hosted_script COMMAND avz_hosted_script_tests)

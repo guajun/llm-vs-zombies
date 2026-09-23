@@ -1,5 +1,6 @@
 #include "recorder.hpp"
 #include "buffered_writer.hpp"
+#include "hosted_script.hpp"
 #include "runtime/runtime.hpp"
 #include "runtime/diagnostics.hpp"
 #include "runtime/spawn_action.hpp"
@@ -215,6 +216,13 @@ void AScript() {
     ASetReloadMode(AReloadMode::MAIN_UI_OR_FIGHT_UI);
     // Recording only: manual card choice, no SetZombies, no automatic policy or save writes.
     AConnect('7', [] { lvz::Close(); });
+#ifdef LVZ_AVZ_HOSTED_SCRIPT
+    // Optional hosted script (see logger/avz/hosted_script.hpp). It runs as one
+    // more AvZ coroutine under the runtime's frame ownership: ScriptHook()
+    // reaches RunScript(), whose operation queue resumes it at the ATime it
+    // asked for. The runtime keeps pause, IPC and the engine-call boundary.
+    lvz::hosted::Launch();
+#endif
 }
 AOnBeforeTick(lvz::Capture());
 AOnAfterInject(lvz::OpenRun(); lvz::runtime::Start(lvz::runDir));

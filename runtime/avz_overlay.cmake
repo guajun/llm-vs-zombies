@@ -2,6 +2,9 @@
 set(AVZ_SCRIPT "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_script.cpp")
 set(AVZ_HOOK "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_hook.cpp")
 set(AVZ_CARD "${CMAKE_SOURCE_DIR}/avz/framework/src/avz_card.cpp")
+# The transformed script source is the frame entry the resident runtime drives;
+# the hosted-script test links the very same generated file.
+set(AVZ_SCRIPT_OVERLAY "${CMAKE_CURRENT_BINARY_DIR}/avz_script_overlay.cpp")
 file(READ "${AVZ_SCRIPT}" script_source)
 file(READ "${AVZ_HOOK}" hook_source)
 file(READ "${AVZ_CARD}" card_source)
