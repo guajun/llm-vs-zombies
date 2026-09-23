@@ -1,12 +1,21 @@
 #include "recorder.hpp"
 #include "buffered_writer.hpp"
 #include "hosted_script.hpp"
+#include "hosted_observation.hpp"
 #include "runtime/runtime.hpp"
 #include "runtime/diagnostics.hpp"
 #include "runtime/spawn_action.hpp"
 #include <iomanip>
 #include <set>
 #include <sstream>
+
+#ifdef LVZ_AVZ_HOSTED_SCRIPT
+#ifndef LVZ_AVZ_HOSTED_SCRIPT_NAME
+// CMakeLists.txt derives this from LVZ_AVZ_HOSTED_SCRIPT; the fallback keeps a
+// manual compile of the hosted path working.
+#define LVZ_AVZ_HOSTED_SCRIPT_NAME "(unnamed hosted script)"
+#endif
+#endif
 
 namespace lvz {
 namespace {
@@ -21,6 +30,24 @@ std::map<uint32_t, std::string> knownZombies;
 std::set<uint32_t> knownPlants;
 
 int Clock() { return AGetMainObject() ? std::max(0, AGetMainObject()->GameClock()) : std::max(0, lastTick); }
+
+#ifdef LVZ_AVZ_HOSTED_SCRIPT
+// Hosted observability: sample the state the hosted script publishes and let
+// the writer decide whether it changed. Called from an AfterTick hook, i.e.
+// after AvZ's RunScript() processed this frame (RunTotal: BeforeTick ->
+// RunScript -> AfterTick), so the tick written with a resume of
+// co_await ATime(wave, time) is the tick of the frame that resumed it, not the
+// one after. Nothing here exists in a default build; frames the controller
+// withholds never reach this hook, so a paused stretch writes nothing.
+std::string hostedFields;
+void SampleHosted() {
+    if (!opened || stopped) return;
+    hostedFields.clear();
+    lvz::hosted::Observe(hostedFields);
+    hosted_observation::Sample(Clock(), std::max(0, segment), hostedFields);
+}
+#endif
+
 void Emit(const std::string& kind, const std::string& payload, int tick = -1, const std::string& phase = "avz_callback") {
     if (!opened || stopped) return;
     if (tick < 0) tick = Clock();
@@ -51,7 +78,16 @@ void OpenRun() {
     runId = runDir.filename().string();
     runLock = CreateFileW((runDir / "capture.lock").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (runLock == INVALID_HANDLE_VALUE) throw std::runtime_error("Run already locked; create a fresh run");
-    try { writer.Open(runDir / "events.jsonl"); }
+    try {
+        writer.Open(runDir / "events.jsonl");
+#ifdef LVZ_AVZ_HOSTED_SCRIPT
+        // A hosted build also owns the hosted script's observation file
+        // (logger/avz/hosted_observation.hpp). It is opened here, under the run
+        // lock and before any frame, and a run directory that still holds one
+        // fails the same way events.jsonl does: create a new run.
+        hosted_observation::Open(runDir, runId, LVZ_AVZ_HOSTED_SCRIPT_NAME, Clock());
+#endif
+    }
     catch (...) { CloseHandle(runLock); runLock = INVALID_HANDLE_VALUE; throw; }
     opened = true;
 }
@@ -138,6 +174,12 @@ void EndSegment() {
     if (!inSegment || stopped) return;
     Emit("segment_end", "{\"reason\":\"exit_fight\"}", std::max(Clock(),lastTick));
     writer.Flush();
+#ifdef LVZ_AVZ_HOSTED_SCRIPT
+    // The hosted observation file gets the same treatment as events.jsonl: one
+    // flush per segment boundary, so a fight that ends leaves readable
+    // evidence even if the process is later killed.
+    hosted_observation::Flush();
+#endif
     inSegment=false;
 }
 
@@ -146,6 +188,9 @@ void Close(bool stopRuntime=true) {
     if(stopRuntime) runtime::Shutdown();
     EndSegment();
     writer.Close(); stopped=true;
+#ifdef LVZ_AVZ_HOSTED_SCRIPT
+    hosted_observation::Close();
+#endif
     if (runLock != INVALID_HANDLE_VALUE) { CloseHandle(runLock); runLock=INVALID_HANDLE_VALUE; }
     std::filesystem::remove(runDir / "capture.lock");
     std::ofstream(runDir / "capture.closed") << "Native recorder closed normally.\n";
@@ -225,6 +270,11 @@ void AScript() {
 #endif
 }
 AOnBeforeTick(lvz::Capture());
+#ifdef LVZ_AVZ_HOSTED_SCRIPT
+// Hosted builds sample the published script state after the frame's script
+// work; see lvz::SampleHosted above.
+AOnAfterTick(lvz::SampleHosted());
+#endif
 AOnAfterInject(lvz::OpenRun(); lvz::runtime::Start(lvz::runDir));
 AOnExitFight(lvz::EndSegment());
 AOnBeforeExit(lvz::Close());

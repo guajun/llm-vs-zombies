@@ -7,7 +7,8 @@
 //     from, produced by runtime/avz_overlay.cmake),
 //   * AvZ's own ScriptHook / RunTotal / RunScript, coroutine, tick-runner,
 //     state-hook, time-queue, logger, painter and assembly translation units,
-//   * the hosted script logger/avz/hosted/atime_probe.cpp.
+//   * the hosted script logger/avz/hosted/atime_probe.cpp and the weak default
+//     publisher (logger/avz/hosted/observe_default.cpp) its Observe overrides.
 // AvZ reads the game through its normal accessors against a fake PvZ image: the
 // real App pointer cell (0x6a9ec0) plus a fake APvzBase/AMainObject filled with
 // the documented offsets from avz/framework/inc/avz_pvz_struct.h. No AvZ source
@@ -87,6 +88,16 @@ int grantedFrames = 0;
 int engineCalls = 0;
 std::string imageError;
 
+// AvZ's App pointer cell sits at the fixed address 0x6a9ec0, 2.7 MB above the
+// default image base, and it has to be this module's own image page: AvZ
+// dereferences it, so the fake image must not land in anyone else's memory.
+// Whether an optimized link happens to reach that address depends on the image
+// size, and the standard Release build does not (SizeOfImage 0x22f000 - the
+// test failed at startup before this padding existed). The zero-filled array
+// below pins the address range into the image; it costs no file bytes and is
+// never read.
+__attribute__((used)) unsigned char kAppCellImagePadding[0x100000];
+
 void Check(bool condition, const std::string& why) {
     if (!condition) throw std::runtime_error(why);
 }
@@ -144,9 +155,10 @@ T Get(uint8_t* base, std::size_t offset) {
 }
 
 // AvZ dereferences the App pointer at a fixed address. In this binary the link
-// layout (default image base, no ASLR) puts that cell inside the image itself,
-// so the page only has to be made writable - and it has to be this module's own
-// page, otherwise the test would be scribbling on someone else's memory.
+// layout (default image base, no ASLR, kAppCellImagePadding) puts that cell
+// inside the image itself, so the page only has to be made writable - and it
+// has to be this module's own page, otherwise the test would be scribbling on
+// someone else's memory.
 bool ClaimAppCell() {
     MEMORY_BASIC_INFORMATION region{};
     if (!VirtualQuery(reinterpret_cast<void*>(kAppPointerCell), &region, sizeof(region)))
@@ -359,10 +371,26 @@ int main() {
             "a finished script ran again");
         Check(engineCalls == grantedFrames, "engine calls did not match granted frames");
 
+        // Hosted observability (logger/avz/hosted_script.hpp): the same
+        // counters a live run reads out of <run>/decisions/hosted-script.jsonl
+        // come from this call. This binary links the weak default publisher
+        // (logger/avz/hosted/observe_default.cpp) as well, so the exact member
+        // list asserted here also proves the script's strong definition wins
+        // over the weak one.
+        std::string published;
+        lvz::hosted::Observe(published);
+        Check(published.find("\"started\":1") != std::string::npos
+            && published.find("\"resumes\":3") != std::string::npos
+            && published.find("\"resume_wave\":1") != std::string::npos
+            && published.find("\"resume_time\":-499") != std::string::npos
+            && published.find("\"finished\":1") != std::string::npos
+            && published.find("\"clock_at_finish\":102") != std::string::npos,
+            "the hosted probe's Observe did not publish its counters: " + published);
+
         char summary[200];
         std::snprintf(summary, sizeof(summary),
             "hosted script advanced on %d granted frames; waits -599/-549/-499 observed; "
-            "paused frames advanced nothing", grantedFrames);
+            "paused frames advanced nothing; Observe published the same counters", grantedFrames);
         Marker(summary);
         std::printf("%s\n", summary);
         return 0;
