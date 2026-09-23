@@ -63,3 +63,45 @@ A、B 是**同一个 root、同一个 Action** 的两个平行世界（不是两
 - `experiments/runs/world-e5-s42-c0` / `-c1`
 - `experiments/runs/world-f5` / `-s42-c0` / `-c1`
 - 计划：`work/m1-world5.json`
+
+## 统一形状（P1）后的复验（2026-09-23）
+
+同一结论在**声明式统一形状**下重做一遍：两条锚定不再各占一个标量参数，而是由一张表完成。
+
+| 项 | 值 |
+|---|---|
+| 计划 | `work/m1-world6.json`（schema `lvz.evaluation-plan.v2`） |
+| 声明表 | `b0_normalization`：`/sound_effects/app_update_count=1500` 先、`/app/mj_clock=1340` 后（顺序被强制，对应 counter origin → App anchor → MJ clock → warm 的链） |
+| 命令 | `--b0-normalize '<JSON 对象>'`（可重复；`--mj-clock` / `--app-update-count` 是过渡别名） |
+| 两个世界 | `world-e10` / `world-f10` |
+| 四个关键门槛 | `build_and_tests` / `private_launch` / `archive_integrity` / `scenario` / `engine_replay` **全 pass** |
+| `S(A) == S(B)` | **4000/4000 边界 digests 全同，首分歧无** |
+| 各自冷重放 vs 自己 source | 两份都相同 |
+| 两世界 B(0) | `mj_clock = 1340`、`app_update_count = 1500`（都等于**声明的共同目标**） |
+
+与旧标量形状（`world-e5` / `world-f5`）结论一致；差别在于现在由**一张声明表 + 单一回执**完成，且配方完整性检查可运行：
+
+```
+holes U\C = 1565, dangling C\U = 0, conflicts = 0
+```
+
+1565 条全部是 `/board/<原始地址>`（除 GameClock / EffectCounter / 波表阈值那几个已知的）——即这些 Board 字段目前没有逐字段契约，只被整体状态摘要与共享参考存档兜底。这份清单是给 AvZ 上游提"RNG/时钟原语"时的输入（见 issue #72 的 L1↔L2）。
+
+### 过程中的接线缺陷（已修）
+
+统一形状落地时暴露了 4 处同类缺陷——同一条"两种形状选哪种"的判据在 4 个层次各写了一遍且彼此不一致：
+
+| # | 层 | 修复 |
+|---|---|---|
+| 1 | Python 初始化（用 runtime 能力判断形状排他） | PR #76 |
+| 2 | Python 初始化（统一表已发、legacy 路径仍执行） | PR #77 |
+| 3 | 原生 `prepare_render` warm 门（无条件要求 legacy 锚） | PR #78 |
+| 4 | 归档读取器/校验器（统一归档仍走 legacy 校验） | PR #80 |
+
+根因是**离线测试从未用过真实的能力组合**（runtime 同时声明统一表 + 两个 legacy 能力）。PR #80 已补"三能力同时声明"的夹具用例，并在原生侧加了 `prepare_render` 的形状用例。
+
+### 本次证据位置
+
+- `experiments/runs/world-e10` / `-s42-c0` / `-c1`
+- `experiments/runs/world-f10` / `-s42-c0` / `-c1`
+- 计划：`work/m1-world6.json`
