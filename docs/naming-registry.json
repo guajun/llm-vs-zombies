@@ -1,0 +1,4584 @@
+{
+ "schema": "lvz.naming-registry.v1",
+ "issue": 65,
+ "title": "[CONV] 命名登记表",
+ "generated": "2026-09-23",
+ "baseline": {
+  "repository": "guajun/llm-vs-zombies",
+  "branch": "main",
+  "commit": "dd06f16fc5da34d99204d4a28a913b0b08a7f741",
+  "scanned_files": 232,
+  "excluded": [
+   "third_party/",
+   "build/",
+   ".git/",
+   "binary extensions"
+  ]
+ },
+ "style_classes": {
+  "capability-mode": "能力模式名（snake_case + _vN）",
+  "schema": "schema 名（lvz.<kebab>[.<segment>].vN）",
+  "error-code": "错误码（snake_case，无版本后缀）"
+ },
+ "counts": {
+  "capability-mode": 13,
+  "schema": 53,
+  "error-code": 52
+ },
+ "upgrade_rules": {
+  "must_bump": [
+   "语义变化：同一模式名/字段名下的含义改变（例：把 calls 从绝对累计改为实验相对计数时必须新声明，而不是改写旧字段）。",
+   "比较范围变化：可比字段集合、比较对象或采样范围改变（先例 lvz.launch-windows.v2 → .v3：宿主内采样改为子进程隔离采样，新增 observer/isolation 语义并重定义 sampling.scope）。",
+   "必需字段增删：新增会让旧读取器误判的必需字段，或删除/重命名已发布的必需字段。",
+   "判定规则变化：旧记录在新规则下被判通过/失败的程度改变（尤其把“未验证”提升为“通过”）。",
+   "同一名字承载不同可比对象：无法用可选附加字段表达，只能换名加版本。"
+  ],
+  "rename_only": [
+   "拼写/风格统一（initial_mj_clock_anchor_v1 → mj_clock_anchor_v1、sound_counter_origin → sound_effects_counter_origin）。",
+   "同一概念在能力名与 schema 名之间建立 1:1 映射（branch_scope_v1 ↔ lvz.branch-scope.v1）。",
+   "注释、文档、内部变量/函数名变化。",
+   "新增别名键（同一能力同时给出 x_v1 与 x）而不改变任何已发布字符串的含义。"
+  ],
+  "constraints": [
+   "本仓库硬规则：旧档不重写、旧失败不升级为通过（docs/implementation-board.md、docs/engine-replay.md）。已封存证据里的字符串改名等于证据字节变化，因此改名必须同时提供“旧名 → 新名”显式映射，并保留旧名可读。",
+   "改名不得跨命名空间偷换风格：能力/模式名 snake_case + _vN，schema 名 lvz.<kebab>.vN，错误码 snake_case 且不带版本号。",
+   "错误码新增是兼容变更（客户端把 code 当不透明字符串）；改变已有码的含义必须换新码名。"
+  ]
+ },
+ "unknown_version_behavior": {
+  "current": [
+   "能力/模式未知：runtime 只在 capabilities 里公布自己实现的能力，客户端按能力键判定是否使用某模式（sound_effects.py:67、fp_environment.py:54、initialization.py:26）。未公布即视为不支持。",
+   "schema 版本未知：全部严格拒绝。declared_branch_scope() 对 schema != lvz.branch-scope.v1 抛 ProtocolError（tests/test_client.py:215-222 用 lvz.other.v1 做负例）；virtual_audio.py:435-436 对未知事件 schema 抛错；root_integrity/engine_replay/evidence_codec/evidence_tree 对 schema 不符抛 EvidenceError。",
+   "同族旧版本：允许只读，但只承认该版本明确保证的结论。evaluation.py:643 只对 lvz.launch-windows.v3 取 foreground_check_status，v2 证据一律视为“未验证”而不是猜测通过。",
+   "错误码未知：客户端把 error.code 当不透明字符串向上抛（client.py:85、engine_replay.py:203-206），不做错误映射，也不猜测重试。"
+  ],
+  "proposed": [
+   "能力/模式未知名：fail-closed——不发送该模式的请求，不把旧档追认为该模式。",
+   "schema 未知版本：拒绝解析并保持源文件只读；不得降级归一化、不得删字段、不得就地改写。",
+   "schema 已知旧版本：允许只读并明确标注结论上限（可输出 unverified，不可输出 pass）。",
+   "错误码未知：按不透明字符串传播，禁止转成成功或静默重试。"
+  ]
+ },
+ "near_groups": [
+  {
+   "group": "同值别名（能力键）",
+   "members": "app_update_anchor / initial_app_update_anchor_v1",
+   "relation": "runtime/runtime.cpp:204 两键取值表达式相同",
+   "advice": "登记为“模式名 + 方法名”，后续 issue 决定是否删除非版本键"
+  },
+  {
+   "group": "同值别名（能力键）",
+   "members": "mj_clock_anchor / initial_mj_clock_anchor_v1",
+   "relation": "runtime/runtime.cpp:205 同值",
+   "advice": "同上；模式名建议 mj_clock_anchor_v1"
+  },
+  {
+   "group": "同值别名（能力键）",
+   "members": "sound_counter_origin / sound_effects_counter_origin_v1",
+   "relation": "runtime/runtime.cpp:206 同值；issue #65 点名",
+   "advice": "模式名保留 sound_effects_counter_origin_v1，sound_counter_origin 明确为方法名/能力键"
+  },
+  {
+   "group": "跨命名空间同一概念",
+   "members": "branch_scope_v1 / lvz.branch-scope.v1",
+   "relation": "同一份 hello.branch 块的能力键与 schema 名",
+   "advice": "保持两种风格，登记 1:1 映射"
+  },
+  {
+   "group": "字面近撞",
+   "members": "virtual_audio_tick_v1 / virtual_clock_tick_v1",
+   "relation": "词序几乎相同，语义分别是音频设备与游戏时间源",
+   "advice": "实现虚拟时钟前先定名并登记"
+  },
+  {
+   "group": "同字段的旧值",
+   "members": "deterministic_draw_schedule_v1 / legacy_autonomous_draw_schedule",
+   "relation": "recipe.execution_mode 的两个取值（initialization.py:18-19）",
+   "advice": "保持；旧值只用于读旧档"
+  },
+  {
+   "group": "模式名 vs 内部设备名",
+   "members": "sound_effects_allocation_none_v1 / allocation_none",
+   "relation": "对外模式名 vs 虚拟音频设备内部名（virtual_audio.py:838）",
+   "advice": "内部名不对外，保持但登记"
+  },
+  {
+   "group": "模式名 vs 夹具 schema",
+   "members": "test_flag_drop_v1 / lvz.flag-drop-fixture.v1",
+   "relation": "同一测试夹具的模式名与 sidecar schema",
+   "advice": "保持，登记表标注 test-only"
+  },
+  {
+   "group": "音频事件双流",
+   "members": "lvz.audio-event.v1 / lvz.foley-event.v1",
+   "relation": "虚拟音频设备事件流 vs 原版 Foley 诊断事件流",
+   "advice": "改名时需给出对照，避免读者串用"
+  },
+  {
+   "group": "健康块家族",
+   "members": "lvz.fp-health.v1 / lvz.foley-health.v1 / 内嵌 health 块（draw、sound_effects、close）",
+   "relation": "独立 health schema vs 只有字段名没有 schema 的 health 块",
+   "advice": "后续 issue 统一为 *.health 字段或 lvz.<域>-health.v1 二选一"
+  },
+  {
+   "group": "计划 / 报告不成对",
+   "members": "lvz.evaluation-plan.v1 / lvz.evaluation.v1",
+   "relation": "计划带 -plan，报告不带 -report",
+   "advice": "可选改名 lvz.evaluation-report.v1"
+  },
+  {
+   "group": "版本并存",
+   "members": "lvz.launch-windows.v2 / lvz.launch-windows.v3",
+   "relation": "同一证据的两个版本同时存在于代码中（v2 为 helper 默认、v3 为观察器输出）",
+   "advice": "登记为升版先例；v2 保留给旧档读取"
+  },
+  {
+   "group": "错误码双语义位",
+   "members": "no_game_tick / step_count_mismatch",
+   "relation": "同一字符串既作 error.code 又作 stop_reason",
+   "advice": "拆名：错误码用 advance_no_progress/advance_over_step，停止原因保留现名"
+  },
+  {
+   "group": "同一名字的第三个语义位",
+   "members": "dedup_storage_failed",
+   "relation": "error.code + stop_reason + status.state 共用同一字符串",
+   "advice": "保留（兼容），在读侧登记为三个语义位"
+  },
+  {
+   "group": "错误码 vs 审计事件名",
+   "members": "recording_closed / render_failed / app_update_anchor_failed / mj_clock_anchor_failed / sound_counter_origin_failed",
+   "relation": "5 个字符串同时是 error.code 与 audit 事件 kind",
+   "advice": "保留（兼容）；读侧按上下文区分，新增码不复用事件名"
+  },
+  {
+   "group": "泛化参数码 vs 动作专码",
+   "members": "invalid_params / invalid_action / invalid_position / invalid_spawn_position",
+   "relation": "同一类校验既有泛化码也有动作专码",
+   "advice": "新增校验优先用 invalid_params + details 字段；存量不改"
+  },
+  {
+   "group": "容量/繁忙族",
+   "members": "busy / queue_full / dedup_capacity / capture_dedup_capacity",
+   "relation": "四种“暂时不能受理”，前缀与粒度不一致",
+   "advice": "保留语义；新增码统一为 <对象>_capacity / <对象>_busy"
+  },
+  {
+   "group": "兜底失败族",
+   "members": "audit_failed / render_failed / dedup_storage_failed / recording_close_incomplete",
+   "relation": "粒度不一的兜底码",
+   "advice": "保持；新增兜底码要求附 details"
+  }
+ ],
+ "adjacent_namespaces": {
+  "stop_reason": [
+   {
+    "name": "budget_exhausted",
+    "definition": "runtime/controller.cpp:239",
+    "semantics": "请求的 max_ticks 已用完。"
+   },
+   {
+    "name": "action_failed",
+    "definition": "runtime/controller.cpp:720",
+    "semantics": "某个动作失败，停止推进（executed_ticks 保留实际值）。"
+   },
+   {
+    "name": "wave_changed",
+    "definition": "runtime/controller.cpp:238",
+    "semantics": "until.event=wave_changed 命中。"
+   },
+   {
+    "name": "scene_changed",
+    "definition": "runtime/controller.cpp:178",
+    "semantics": "场景转场（终局/离开 ready fight），进入新 epoch。"
+   },
+   {
+    "name": "no_game_tick",
+    "definition": "runtime/controller.cpp:237",
+    "semantics": "原生更新 0 tick：也作为 error.code 返回（双语义）。"
+   },
+   {
+    "name": "step_count_mismatch",
+    "definition": "runtime/controller.cpp:237",
+    "semantics": "原生更新多于 1 tick：也作为 error.code 返回（双语义）。"
+   },
+   {
+    "name": "client_disconnected",
+    "definition": "runtime/controller.cpp:288",
+    "semantics": "发起推进的连接断开，请求按实际执行结果收尾。"
+   },
+   {
+    "name": "dedup_storage_failed",
+    "definition": "runtime/controller.cpp:81",
+    "semantics": "请求日志写盘失败导致推进中止（与 error.code/status.state 同名）。"
+   },
+   {
+    "name": "runtime_shutdown",
+    "definition": "runtime/runtime.cpp:414",
+    "semantics": "宿主关闭 runtime 时收尾 pending 请求。"
+   },
+   {
+    "name": "tick_budget_exhausted",
+    "definition": "src/llm_vs_zombies/evaluation.py:489",
+    "semantics": "Python 评测器侧的同名概念（策略预算用尽），与 runtime 的 budget_exhausted 不同名同义。"
+   },
+   {
+    "name": "wall_budget_exhausted",
+    "definition": "src/llm_vs_zombies/evaluation_support.py:73",
+    "semantics": "宿主墙钟预算用尽（评测器侧停止原因）。"
+   }
+  ],
+  "session_trace_kind": [
+   "request",
+   "response",
+   "observation",
+   "exception",
+   "invalid_response",
+   "cell",
+   "cell_output",
+   "cell_exception",
+   "cell_complete",
+   "session_start",
+   "session_end"
+  ],
+  "worker_error_stage": [
+   "start",
+   "lease",
+   "collect",
+   "deadline",
+   "scheduler_cleanup"
+  ],
+  "env_and_switches": [
+   "LVZ_BRANCH_ID",
+   "LVZ_BRANCH_PARENT_ID",
+   "LVZ_JOURNAL_ADOPT",
+   "LVZ_JOURNAL_EPOCH",
+   "LVZ_FOLEY_TRACE",
+   "LVZ_FOLEY_TRACE_BEGIN",
+   "LVZ_FOLEY_TRACE_END"
+  ]
+ },
+ "notes": [
+  "本表只登记，不改名；任何改名另开 issue 分批执行。",
+  "name 是逐字精确字符串；references 为全仓引用位置（file:line）。",
+  "来源为引入该字符串的提交（git log -S，main 分支）；PR 号取提交信息里的 (#NN)，issue 号取提交信息/仓库文档显式引用。",
+  "能力模式名目前只有 _v1 一代（全仓无 _v2+ 能力名）；唯一的版本递增先例是 schema lvz.launch-windows.v2 → .v3。"
+ ],
+ "entries": [
+  {
+   "class": "capability-mode",
+   "name": "deterministic_draw_schedule_v1",
+   "definition": "recording/draw_gate.hpp:7",
+   "semantics": "runtime 在验证过的模拟边界接管原版绘制入队：warm/step 帧只由 prepare_render 后的受控绘制产生。",
+   "suggested": null,
+   "duplicates": "`legacy_autonomous_draw_schedule`（同一 `recipe.execution_mode` 的 legacy 取值，src/llm_vs_zombies/initialization.py:19）",
+   "references": {
+    "total": 29,
+    "by_kind": {
+     "docs": [
+      "docs/controlled-initialization.md:25",
+      "docs/controlled-initialization.md:3",
+      "docs/engine-replay.md:99",
+      "docs/libTAS与AvZ方案调研.md:124",
+      "docs/runtime-protocol.md:167",
+      "docs/runtime-protocol.md:173",
+      "docs/runtime-protocol.md:183",
+      "docs/runtime-protocol.md:188",
+      "docs/runtime-protocol.md:219",
+      "docs/runtime-protocol.md:29",
+      "docs/video.md:79",
+      "docs/video.md:92",
+      "docs/机制读取点表.json:119",
+      "docs/机制读取点表.md:305",
+      "docs/跨界耦合清单.json:136",
+      "docs/跨界耦合清单.md:134",
+      "docs/跨界耦合清单.md:327"
+     ],
+     "code": [
+      "recording/draw_gate.hpp:7",
+      "runtime/README.md:72",
+      "runtime/controller.cpp:213",
+      "runtime/runtime.cpp:209",
+      "src/llm_vs_zombies/app_update_anchor.py:99",
+      "src/llm_vs_zombies/audit_compare.py:36",
+      "src/llm_vs_zombies/fp_environment.py:47",
+      "src/llm_vs_zombies/initialization.py:18",
+      "src/llm_vs_zombies/mj_clock_anchor.py:105",
+      "src/llm_vs_zombies/sound_counter.py:67"
+     ],
+     "tests": [
+      "tests/test_draw_schedule.py:154",
+      "tests/test_initialization.py:44"
+     ]
+    },
+    "files": [
+     "docs/controlled-initialization.md",
+     "docs/engine-replay.md",
+     "docs/libTAS与AvZ方案调研.md",
+     "docs/runtime-protocol.md",
+     "docs/video.md",
+     "docs/机制读取点表.json",
+     "docs/机制读取点表.md",
+     "docs/跨界耦合清单.json",
+     "docs/跨界耦合清单.md",
+     "recording/draw_gate.hpp",
+     "runtime/README.md",
+     "runtime/controller.cpp",
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/app_update_anchor.py",
+     "src/llm_vs_zombies/audit_compare.py",
+     "src/llm_vs_zombies/fp_environment.py",
+     "src/llm_vs_zombies/initialization.py",
+     "src/llm_vs_zombies/mj_clock_anchor.py",
+     "src/llm_vs_zombies/sound_counter.py",
+     "tests/test_draw_schedule.py",
+     "tests/test_initialization.py"
+    ]
+   },
+   "source": {
+    "commit": "df59211",
+    "date": "2026-09-19",
+    "subject": "Control original engine drawing at verified simulation boundaries",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #10（固定绘制调度与只读缓存画面）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "deterministic_particle_shake_v1",
+   "definition": "determinism/particle_shake.hpp:7",
+   "semantics": "把 FIELD_SHAKE 两处 `srand(粒子地址×年龄)` 的地址因子换成经槽位/代次验证的完整粒子 ID；明确改变原版逐位行为。",
+   "suggested": "可选 `particle_shake_seed_id_v1`：现名前缀 deterministic_ 容易被误读为“与原版逐位相同”，而该模式恰好不是逐位模式。",
+   "duplicates": "与 `sound_effects_allocation_none_v1` 同属“改变实验语义、必须重新录源”的模式（docs/engine-replay.md:201）",
+   "references": {
+    "total": 6,
+    "by_kind": {
+     "other": [
+      "README.md:74"
+     ],
+     "code": [
+      "determinism/particle_shake.hpp:7",
+      "src/llm_vs_zombies/audit_compare.py:35"
+     ],
+     "docs": [
+      "docs/engine-replay.md:201",
+      "docs/particle-shake-determinism.md:3",
+      "docs/机制读取点表.json:124"
+     ]
+    },
+    "files": [
+     "README.md",
+     "determinism/particle_shake.hpp",
+     "docs/engine-replay.md",
+     "docs/particle-shake-determinism.md",
+     "docs/机制读取点表.json",
+     "src/llm_vs_zombies/audit_compare.py"
+    ]
+   },
+   "source": {
+    "commit": "44a5e64",
+    "date": "2026-09-19",
+    "subject": "fix(determinism): canonicalize particle seeds and stream audit evidence",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #12（定位同一次更新内额外的 MT 随机消费）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "fixed_owner_fp_v1",
+   "definition": "determinism/fp_environment.hpp:10",
+   "semantics": "无 Board 的 owner 线程在场景初始化前固定 x87/MXCSR 控制字，并在运行期持续校验未被改回。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 8,
+    "by_kind": {
+     "code": [
+      "determinism/fp_environment.hpp:10",
+      "runtime/runtime.cpp:207",
+      "src/llm_vs_zombies/fp_environment.py:9"
+     ],
+     "docs": [
+      "docs/fixed-owner-fp.md:3",
+      "docs/implementation-board.md:87",
+      "docs/runtime-protocol.md:5",
+      "docs/动画耦合与可重复性取证.md:95",
+      "docs/并行实验约定.md:138"
+     ]
+    },
+    "files": [
+     "determinism/fp_environment.hpp",
+     "docs/fixed-owner-fp.md",
+     "docs/implementation-board.md",
+     "docs/runtime-protocol.md",
+     "docs/动画耦合与可重复性取证.md",
+     "docs/并行实验约定.md",
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/fp_environment.py"
+    ]
+   },
+   "source": {
+    "commit": "106239f",
+    "date": "2026-09-20",
+    "subject": "feat(runtime): pin the game-owner floating-point mode and run parallel cold replays",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #22（场景初始化前固定主线程浮点模式）；合并提交 106239f 同时落地 #19 的公开并行 cold worker"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "controlled_engine_call_v1",
+   "definition": "runtime/engine_call.hpp:10",
+   "semantics": "每次原版引擎调用都经受检 wrapper，分配进程内 call id 并记录进入/返回、零时钟终局与已执行 tick 计数。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 9,
+    "by_kind": {
+     "docs": [
+      "docs/engine-replay.md:159",
+      "docs/runtime-protocol.md:219"
+     ],
+     "code": [
+      "runtime/README.md:61",
+      "runtime/engine_call.hpp:10",
+      "runtime/runtime.cpp:209",
+      "src/llm_vs_zombies/audit_compare.py:37",
+      "src/llm_vs_zombies/client.py:446",
+      "src/llm_vs_zombies/fp_environment.py:46"
+     ],
+     "tests": [
+      "tests/test_fp_initialization.py:25"
+     ]
+    },
+    "files": [
+     "docs/engine-replay.md",
+     "docs/runtime-protocol.md",
+     "runtime/README.md",
+     "runtime/engine_call.hpp",
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "src/llm_vs_zombies/client.py",
+     "src/llm_vs_zombies/fp_environment.py",
+     "tests/test_fp_initialization.py"
+    ]
+   },
+   "source": {
+    "commit": "44d4a02",
+    "date": "2026-09-19",
+    "subject": "Track returned original engine calls and preserve zero-clock terminal states",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #11（独立原生调用身份及零 GameClock 终局重放）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "sound_effects_allocation_none_v1",
+   "definition": "launcher/silent_audio.hpp:7",
+   "semantics": "主线程首次恢复前把所有音效分配替换为空实现，切断 IsPlaying→分支→MT 消费耦合；音乐/BASS 未虚拟化。",
+   "suggested": null,
+   "duplicates": "`allocation_none`（virtual_audio.py:838 的虚拟设备内部名）；`lvz.audio-activation.v1`（同一模式的激活回执 schema）",
+   "references": {
+    "total": 43,
+    "by_kind": {
+     "other": [
+      "README.md:40",
+      "README.md:44"
+     ],
+     "docs": [
+      "docs/app-update-anchor-native.md:5",
+      "docs/engine-replay.md:259",
+      "docs/evaluation.md:15",
+      "docs/evaluation.md:18",
+      "docs/evaluation.md:30",
+      "docs/headless-validation.md:114",
+      "docs/launcher.md:60",
+      "docs/mj-clock-anchor-native.md:4",
+      "docs/parallel-cold.md:11",
+      "docs/silent-audio.md:4",
+      "docs/并行分支worker.md:79",
+      "docs/并行实验约定.md:202",
+      "docs/并行实验约定.md:210",
+      "docs/并行实验约定.md:53",
+      "docs/机制读取点表.json:137",
+      "docs/虚拟音频设备与离线音轨.md:113",
+      "docs/虚拟音频设备与离线音轨.md:183",
+      "docs/虚拟音频设备与离线音轨.md:30",
+      "docs/虚拟音频设备与离线音轨.md:5",
+      "docs/虚拟音频设备与离线音轨.md:87",
+      "docs/跨界耦合清单.json:180",
+      "docs/跨界耦合清单.json:333",
+      "docs/跨界耦合清单.json:334",
+      "docs/跨界耦合清单.json:369",
+      "docs/跨界耦合清单.md:149",
+      "docs/跨界耦合清单.md:16",
+      "docs/跨界耦合清单.md:243",
+      "docs/跨界耦合清单.md:258",
+      "docs/跨界耦合清单.md:327",
+      "docs/跨界耦合清单.md:335",
+      "docs/跨界耦合清单.md:342"
+     ],
+     "code": [
+      "launcher/silent_audio.hpp:7",
+      "launcher/silent_audio.hpp:8",
+      "runtime/runtime.cpp:209",
+      "src/llm_vs_zombies/branch_workers.py:100",
+      "src/llm_vs_zombies/sound_effects.py:12",
+      "src/llm_vs_zombies/virtual_audio.py:836"
+     ],
+     "tests": [
+      "tests/app_update_anchor.cpp:41",
+      "tests/mj_clock_anchor.cpp:48",
+      "tests/test_virtual_audio.py:9"
+     ]
+    },
+    "files": [
+     "README.md",
+     "docs/app-update-anchor-native.md",
+     "docs/engine-replay.md",
+     "docs/evaluation.md",
+     "docs/headless-validation.md",
+     "docs/launcher.md",
+     "docs/mj-clock-anchor-native.md",
+     "docs/parallel-cold.md",
+     "docs/silent-audio.md",
+     "docs/并行分支worker.md",
+     "docs/并行实验约定.md",
+     "docs/机制读取点表.json",
+     "docs/虚拟音频设备与离线音轨.md",
+     "docs/跨界耦合清单.json",
+     "docs/跨界耦合清单.md",
+     "launcher/silent_audio.hpp",
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/branch_workers.py",
+     "src/llm_vs_zombies/sound_effects.py",
+     "src/llm_vs_zombies/virtual_audio.py",
+     "tests/app_update_anchor.cpp",
+     "tests/mj_clock_anchor.cpp",
+     "tests/test_virtual_audio.py"
+    ]
+   },
+   "source": {
+    "commit": "1946cd9",
+    "date": "2026-09-19",
+    "subject": "feat(headless): add explicit pre-resume allocation-none SFX mode",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #13（主线程启动前启用显式空音效分配模式）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "initial_app_update_anchor_v1",
+   "definition": "determinism/app_update_anchor.hpp:6",
+   "semantics": "warm 前一次性把 LawnApp+0x484 的真实 mUpdateCount 写为实验目标值，并保留真实 before/after 回执。",
+   "suggested": "`app_update_anchor_v1`（去掉相位词 initial_，与既有能力键/方法名 app_update_anchor 对齐；相位属于 SPEC/回执字段）",
+   "duplicates": "`capabilities.app_update_anchor`（同一布尔、同值别名，runtime/runtime.cpp:204）",
+   "references": {
+    "total": 9,
+    "by_kind": {
+     "code": [
+      "determinism/app_update_anchor.hpp:6",
+      "runtime/runtime.cpp:204",
+      "src/llm_vs_zombies/app_update_anchor.py:7"
+     ],
+     "docs": [
+      "docs/app-update-anchor-native.md:3",
+      "docs/engine-replay.md:267",
+      "docs/平行世界C-D差异报告.md:219",
+      "docs/平行世界C-D差异报告.md:53",
+      "docs/跨界耦合清单.json:255",
+      "docs/跨界耦合清单.md:174"
+     ]
+    },
+    "files": [
+     "determinism/app_update_anchor.hpp",
+     "docs/app-update-anchor-native.md",
+     "docs/engine-replay.md",
+     "docs/平行世界C-D差异报告.md",
+     "docs/跨界耦合清单.json",
+     "docs/跨界耦合清单.md",
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/app_update_anchor.py"
+    ]
+   },
+   "source": {
+    "commit": "a9e1c84",
+    "date": "2026-09-19",
+    "subject": "Add explicit prewarm App update anchor with complete receipts",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #14（warm 前一次性显式锚定真实 App 更新计数）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "initial_mj_clock_anchor_v1",
+   "definition": "determinism/mj_clock_anchor.hpp:6",
+   "semantics": "在 App anchor 之后、warm 之前把 LawnApp+0x838（AvZ MjClock）写为固定目标值并记录 before/after。",
+   "suggested": "`mj_clock_anchor_v1`（同样去掉 initial_；与 app_update_anchor_v1 对称。用户示例的 mj_clock 会与既有方法名撞车，不建议）",
+   "duplicates": "`capabilities.mj_clock_anchor`（同值别名，runtime/runtime.cpp:205）；方法名 `mj_clock_anchor`；schema `lvz.mj-clock-anchor.v1`",
+   "references": {
+    "total": 8,
+    "by_kind": {
+     "code": [
+      "determinism/mj_clock_anchor.hpp:6",
+      "runtime/runtime.cpp:205",
+      "src/llm_vs_zombies/mj_clock_anchor.py:15",
+      "src/llm_vs_zombies/mj_clock_anchor.py:3"
+     ],
+     "docs": [
+      "docs/engine-replay.md:275",
+      "docs/mj-clock-anchor-native.md:145",
+      "docs/mj-clock-anchor-native.md:3"
+     ],
+     "tests": [
+      "tests/mj_clock_anchor.cpp:94"
+     ]
+    },
+    "files": [
+     "determinism/mj_clock_anchor.hpp",
+     "docs/engine-replay.md",
+     "docs/mj-clock-anchor-native.md",
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/mj_clock_anchor.py",
+     "tests/mj_clock_anchor.cpp"
+    ]
+   },
+   "source": {
+    "commit": "dd06f16",
+    "date": "2026-09-23",
+    "subject": "feat(determinism): fixed-target B(0) anchor for LawnApp+0x838 (#62)",
+    "pr": "#62",
+    "pr_all": [
+     "#62"
+    ],
+    "note": "issue #62"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "sound_effects_counter_origin_v1",
+   "definition": "determinism/sound_counter_origin.hpp:7",
+   "semantics": "seed/clock 恢复之后、App anchor 之前绑定音效调用计数原点，此后快照给出 calls=R-N 的实验相对计数。",
+   "suggested": null,
+   "duplicates": "issue #65 点名的 `sound_counter_origin_v1`（本基线 0 命中）↔ 实际并存的 `sound_counter_origin`（能力键/方法/事件前缀）与 `sound_effects_counter_origin_v1`（模式名）",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "code": [
+      "determinism/sound_counter_origin.hpp:7",
+      "runtime/runtime.cpp:206",
+      "src/llm_vs_zombies/sound_counter.py:7"
+     ],
+     "docs": [
+      "docs/engine-replay.md:281",
+      "docs/sound-counter-origin-native.md:3"
+     ]
+    },
+    "files": [
+     "determinism/sound_counter_origin.hpp",
+     "docs/engine-replay.md",
+     "docs/sound-counter-origin-native.md",
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/sound_counter.py"
+    ]
+   },
+   "source": {
+    "commit": "90f74b3",
+    "date": "2026-09-19",
+    "subject": "Bind experiment audio counters to a verified native origin",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #15（诊断音效计数的显式实验起点与绝对累计旁证）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "foley_branch_trace_v1",
+   "definition": "determinism/foley_trace.cpp:273",
+   "semantics": "诊断专用：追踪原版 Foley 准入与音频完成分支；manifest 声明 diagnostic_only 与 timing_perturbation:true，默认关闭。",
+   "suggested": null,
+   "duplicates": "`lvz.foley-event.v1` / `lvz.foley-baseline.v1` / `lvz.foley-health.v1`（同一诊断的三个产物 schema）",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "determinism/foley_trace.cpp:273",
+      "src/llm_vs_zombies/virtual_audio.py:1593",
+      "tools/offline_soundtrack.py:7"
+     ],
+     "docs": [
+      "docs/foley-diagnostic-trace.md:3"
+     ]
+    },
+    "files": [
+     "determinism/foley_trace.cpp",
+     "docs/foley-diagnostic-trace.md",
+     "src/llm_vs_zombies/virtual_audio.py",
+     "tools/offline_soundtrack.py"
+    ]
+   },
+   "source": {
+    "commit": "d5e7cb8",
+    "date": "2026-09-19",
+    "subject": "feat(diagnostics): trace original Foley admission and audio completion branches",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #12 的因果定位（036 窄音效探针）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "virtual_audio_tick_v1",
+   "definition": "src/llm_vs_zombies/virtual_audio.py:38",
+   "semantics": "Python 侧 tick 驱动的虚拟音频设备与离线音轨模型，替代真实 DirectSound 产出音轨与事件流。",
+   "suggested": null,
+   "duplicates": "`virtual_clock_tick_v1`（提案名，docs/跨界耦合清单.md:343）：字面几乎是同一串词，语义却是“游戏时间源”而非“音频设备”，必须区分",
+   "references": {
+    "total": 6,
+    "by_kind": {
+     "docs": [
+      "docs/silent-audio.md:144",
+      "docs/虚拟音频设备与离线音轨.md:113",
+      "docs/虚拟音频设备与离线音轨.md:211",
+      "docs/虚拟音频设备与离线音轨.md:3",
+      "docs/虚拟音频设备与离线音轨.md:5"
+     ],
+     "code": [
+      "src/llm_vs_zombies/virtual_audio.py:38"
+     ]
+    },
+    "files": [
+     "docs/silent-audio.md",
+     "docs/虚拟音频设备与离线音轨.md",
+     "src/llm_vs_zombies/virtual_audio.py"
+    ]
+   },
+   "source": {
+    "commit": "2ad6f51",
+    "date": "2026-09-22",
+    "subject": "feat(audio): tick-driven virtual audio device and offline soundtrack (#47)",
+    "pr": "#47",
+    "pr_all": [
+     "#47"
+    ],
+    "note": "issue #37（[N9] 虚拟音频设备与离线音轨）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "branch_scope_v1",
+   "definition": "runtime/controller.cpp:343",
+   "semantics": "hello/status 声明 runtime 支持 (branch_id,epoch,request_id) 去重域与四元组版本命名空间。",
+   "suggested": null,
+   "duplicates": "issue #65 点名的 `branch_scope_v1` ↔ `lvz.branch-scope.v1`：核实为跨命名空间的风格差异，不是重复（能力键 vs schema 名），指向同一份 hello.branch 块；建议登记映射而非改名",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:343"
+     ],
+     "tests": [
+      "tests/runtime_branch_scope_tests.cpp:176",
+      "tests/runtime_branch_scope_tests.cpp:68",
+      "tests/test_client.py:65",
+      "tests/test_engine_replay.py:164"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/runtime_branch_scope_tests.cpp",
+     "tests/test_client.py",
+     "tests/test_engine_replay.py"
+    ]
+   },
+   "source": {
+    "commit": "f22508f",
+    "date": "2026-09-22",
+    "subject": "feat(runtime): branch-scoped dedup and version namespace (#49)",
+    "pr": "#49",
+    "pr_all": [
+     "#49"
+    ],
+    "note": "issue #32（[N4] 分支作用域隔离）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "test_flag_drop_v1",
+   "definition": "tests/flag_drop_live.hpp:9",
+   "semantics": "掉旗动画夹具的测试专用模式名；manifest 标 test_fixture:true，不得作为生产就绪证据。",
+   "suggested": null,
+   "duplicates": "`lvz.flag-drop-fixture.v1`（同一夹具的 sidecar schema）",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "docs": [
+      "docs/determinism-reanimation.md:89"
+     ],
+     "tests": [
+      "tests/flag_drop_live.hpp:9",
+      "tests/test_evaluation_lifecycle.py:294",
+      "tests/test_production_runtime_guards.py:40",
+      "tests/test_reanimation_lifecycle.py:77"
+     ]
+    },
+    "files": [
+     "docs/determinism-reanimation.md",
+     "tests/flag_drop_live.hpp",
+     "tests/test_evaluation_lifecycle.py",
+     "tests/test_production_runtime_guards.py",
+     "tests/test_reanimation_lifecycle.py"
+    ]
+   },
+   "source": {
+    "commit": "4228e62",
+    "date": "2026-09-19",
+    "subject": "fix: preserve flag animation retirement evidence",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #20（按原版掉旗生命周期审计旗帜动画的已释放引用）"
+   }
+  },
+  {
+   "class": "capability-mode",
+   "name": "virtual_clock_tick_v1",
+   "definition": "docs/跨界耦合清单.md:343",
+   "semantics": "仅存在于提案文本：用 game.time_source.mode 提供虚拟时钟（base_ms/qpf），尚未实现。",
+   "suggested": "实现前先定名：建议 `virtual_clock_v1`（或 `game_time_source_virtual_v1`），避免与 virtual_audio_tick_v1 混淆",
+   "duplicates": "`virtual_audio_tick_v1`（见上）；`capabilities.virtual_clock_*`（同一提案另外承诺的能力键前缀）",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "docs": [
+      "docs/跨界耦合清单.md:343"
+     ]
+    },
+    "files": [
+     "docs/跨界耦合清单.md"
+    ]
+   },
+   "source": {
+    "commit": "914091c",
+    "date": "2026-09-22",
+    "subject": "docs: cross-boundary coupling inventory and probes (#46)",
+    "pr": "#46",
+    "pr_all": [
+     "#46"
+    ],
+    "note": "issue #34（[N6] 跨界耦合清单与探针）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.audit.v1",
+   "definition": "determinism/model.hpp:13",
+   "semantics": "原版审计的统一包络 schema：manifest、状态、事件、state-deltas、checksums 共用。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 19,
+    "by_kind": {
+     "code": [
+      "determinism/model.hpp:13",
+      "src/llm_vs_zombies/audit_compare.py:1",
+      "src/llm_vs_zombies/audit_compare.py:32",
+      "src/llm_vs_zombies/root_integrity.py:380",
+      "src/llm_vs_zombies/root_integrity.py:57"
+     ],
+     "tests": [
+      "tests/app_update_anchor.cpp:39",
+      "tests/mj_clock_anchor.cpp:45",
+      "tests/sound_counter_origin.cpp:59",
+      "tests/test_client.py:64",
+      "tests/test_evaluation.py:180",
+      "tests/test_evidence_codec.py:134",
+      "tests/test_giant_fork_diff.py:109",
+      "tests/test_giant_fork_diff.py:120",
+      "tests/test_initialization.py:37",
+      "tests/test_records.py:41",
+      "tests/test_root_integrity.py:254",
+      "tests/test_root_integrity.py:43",
+      "tests/test_root_integrity.py:69",
+      "tests/test_root_integrity.py:70"
+     ]
+    },
+    "files": [
+     "determinism/model.hpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "src/llm_vs_zombies/root_integrity.py",
+     "tests/app_update_anchor.cpp",
+     "tests/mj_clock_anchor.cpp",
+     "tests/sound_counter_origin.cpp",
+     "tests/test_client.py",
+     "tests/test_evaluation.py",
+     "tests/test_evidence_codec.py",
+     "tests/test_giant_fork_diff.py",
+     "tests/test_initialization.py",
+     "tests/test_records.py",
+     "tests/test_root_integrity.py"
+    ]
+   },
+   "source": {
+    "commit": "52f43c1",
+    "date": "2026-09-18",
+    "subject": "Add version-checked RNG state and per-frame audit adapter (refs #3)",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #3"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.binary-evidence.v1",
+   "definition": "determinism/evidence.json:2",
+   "semantics": "二进制证据清单（内存镜像/PE 提取产物）的自描述头。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "determinism/evidence.json:2"
+     ]
+    },
+    "files": [
+     "determinism/evidence.json"
+    ]
+   },
+   "source": {
+    "commit": "52f43c1",
+    "date": "2026-09-18",
+    "subject": "Add version-checked RNG state and per-frame audit adapter (refs #3)",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #3"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.controlled-render.v1",
+   "definition": "runtime/runtime.cpp:276",
+   "semantics": "受控绘制回执：warm/step、帧版本、前后时钟与 RNG 摘要、缓存失效与 skip 原因。",
+   "suggested": null,
+   "duplicates": "`lvz.initialization-evidence.v1`（同为绘制/初始化阶段的回执，命名不成对）",
+   "references": {
+    "total": 6,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:183"
+     ],
+     "code": [
+      "runtime/controller.cpp:213",
+      "runtime/runtime.cpp:276",
+      "src/llm_vs_zombies/audit_compare.py:672"
+     ],
+     "tests": [
+      "tests/test_draw_schedule.py:60",
+      "tests/test_draw_schedule.py:84"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "runtime/controller.cpp",
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "tests/test_draw_schedule.py"
+    ]
+   },
+   "source": {
+    "commit": "df59211",
+    "date": "2026-09-19",
+    "subject": "Control original engine drawing at verified simulation boundaries",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #10"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.engine-call.v1",
+   "definition": "runtime/controller.cpp:138",
+   "semantics": "受控引擎调用的元数据块（模式、entry RVA、call id 计数）。",
+   "suggested": null,
+   "duplicates": "`lvz.engine-call-raw.v1`（元数据 ↔ 逐边界原始旁证，配对正确）",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:226"
+     ],
+     "code": [
+      "runtime/controller.cpp:138",
+      "src/llm_vs_zombies/audit_compare.py:912"
+     ],
+     "tests": [
+      "tests/test_engine_calls.py:86"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "runtime/controller.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "tests/test_engine_calls.py"
+    ]
+   },
+   "source": {
+    "commit": "44d4a02",
+    "date": "2026-09-19",
+    "subject": "Track returned original engine calls and preserve zero-clock terminal states",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #11"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.engine-call-raw.v1",
+   "definition": "determinism/audit.cpp:484",
+   "semantics": "每个 pre/post 边界的引擎调用原始旁证行（Board 前后地址、实际 ID）。",
+   "suggested": null,
+   "duplicates": "`lvz.engine-call.v1`",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "determinism/audit.cpp:484",
+      "src/llm_vs_zombies/audit_compare.py:916"
+     ],
+     "docs": [
+      "docs/runtime-protocol.md:248"
+     ],
+     "tests": [
+      "tests/test_engine_calls.py:70"
+     ]
+    },
+    "files": [
+     "determinism/audit.cpp",
+     "docs/runtime-protocol.md",
+     "src/llm_vs_zombies/audit_compare.py",
+     "tests/test_engine_calls.py"
+    ]
+   },
+   "source": {
+    "commit": "44d4a02",
+    "date": "2026-09-19",
+    "subject": "Track returned original engine calls and preserve zero-clock terminal states",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #11"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.particle-shake-raw.v1",
+   "definition": "determinism/audit.cpp:116",
+   "semantics": "粒子 shake 原始种子旁证行，绑定实际槽位/代次与 canonical_seed。",
+   "suggested": null,
+   "duplicates": "`lvz.fp-environment-raw.v1` / `lvz.sound-counter-raw.v1` / `lvz.engine-call-raw.v1`（*-raw 家族）",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "code": [
+      "determinism/audit.cpp:116",
+      "src/llm_vs_zombies/audit_compare.py:998"
+     ],
+     "docs": [
+      "docs/particle-shake-determinism.md:48"
+     ],
+     "tests": [
+      "tests/test_audit_compare.py:124",
+      "tests/test_engine_replay.py:101"
+     ]
+    },
+    "files": [
+     "determinism/audit.cpp",
+     "docs/particle-shake-determinism.md",
+     "src/llm_vs_zombies/audit_compare.py",
+     "tests/test_audit_compare.py",
+     "tests/test_engine_replay.py"
+    ]
+   },
+   "source": {
+    "commit": "44a5e64",
+    "date": "2026-09-19",
+    "subject": "fix(determinism): canonicalize particle seeds and stream audit evidence",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #12"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.audio-activation.v1",
+   "definition": "determinism/silent_audio_audit.cpp:78",
+   "semantics": "空音效模式在主线程恢复前与 recorder 附着时的静态激活回执。",
+   "suggested": null,
+   "duplicates": "`lvz.audio-event.v1` / `lvz.audio-resources.v1` / `lvz.audio-track.v1`（同为 audio-* 但属于虚拟音频设备）",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "code": [
+      "determinism/silent_audio_audit.cpp:78",
+      "src/llm_vs_zombies/sound_effects.py:102"
+     ],
+     "tests": [
+      "tests/test_sound_effects.py:41"
+     ]
+    },
+    "files": [
+     "determinism/silent_audio_audit.cpp",
+     "src/llm_vs_zombies/sound_effects.py",
+     "tests/test_sound_effects.py"
+    ]
+   },
+   "source": {
+    "commit": "1946cd9",
+    "date": "2026-09-19",
+    "subject": "feat(headless): add explicit pre-resume allocation-none SFX mode",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #13"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.silent-audio-pe-validation.v1",
+   "definition": "tests/silent_audio.cpp:61",
+   "semantics": "锁定 PE 范围与音效全局地址校验的夹具 schema。",
+   "suggested": "`lvz.silent-audio-pe.v1`：现名把校验对象（PE 范围）与断言（validation）混在版本段里",
+   "duplicates": "—",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "tests": [
+      "tests/silent_audio.cpp:61"
+     ]
+    },
+    "files": [
+     "tests/silent_audio.cpp"
+    ]
+   },
+   "source": {
+    "commit": "15aa725",
+    "date": "2026-09-19",
+    "subject": "fix(headless): validate actual locked PE extent and sound globals",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #13"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.app-update-anchor.v1",
+   "definition": "determinism/app_update_anchor.cpp:49",
+   "semantics": "App 更新计数锚定回执：写前/写后完整状态、目标值、演示标志。",
+   "suggested": null,
+   "duplicates": "`lvz.mj-clock-anchor.v1` / `lvz.sound-counter-origin.v1`（三个 *-anchor/-origin 回执家族）",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "code": [
+      "determinism/app_update_anchor.cpp:49",
+      "src/llm_vs_zombies/app_update_anchor.py:71"
+     ],
+     "docs": [
+      "docs/app-update-anchor-native.md:46"
+     ],
+     "tests": [
+      "tests/test_app_update_anchor.py:67",
+      "tests/test_initialization.py:174"
+     ]
+    },
+    "files": [
+     "determinism/app_update_anchor.cpp",
+     "docs/app-update-anchor-native.md",
+     "src/llm_vs_zombies/app_update_anchor.py",
+     "tests/test_app_update_anchor.py",
+     "tests/test_initialization.py"
+    ]
+   },
+   "source": {
+    "commit": "a9e1c84",
+    "date": "2026-09-19",
+    "subject": "Add explicit prewarm App update anchor with complete receipts",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #14"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.sound-counter-origin.v1",
+   "definition": "determinism/sound_counter_origin.cpp:43",
+   "semantics": "音效计数原点回执：origin_raw_calls、before/after 状态与版本。",
+   "suggested": null,
+   "duplicates": "`lvz.sound-counter-raw.v1`；能力侧 `sound_effects_counter_origin_v1`（同为“音效计数”却一个用 sound- 一个用 sound_effects_）",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "code": [
+      "determinism/sound_counter_origin.cpp:43",
+      "src/llm_vs_zombies/sound_counter.py:45"
+     ],
+     "docs": [
+      "docs/sound-counter-origin-native.md:35"
+     ],
+     "tests": [
+      "tests/test_initialization.py:223",
+      "tests/test_sound_counter.py:98"
+     ]
+    },
+    "files": [
+     "determinism/sound_counter_origin.cpp",
+     "docs/sound-counter-origin-native.md",
+     "src/llm_vs_zombies/sound_counter.py",
+     "tests/test_initialization.py",
+     "tests/test_sound_counter.py"
+    ]
+   },
+   "source": {
+    "commit": "90f74b3",
+    "date": "2026-09-19",
+    "subject": "Bind experiment audio counters to a verified native origin",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #15"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.sound-counter-raw.v1",
+   "definition": "determinism/sound_counter_origin.cpp:88",
+   "semantics": "每个权威 pre/post 边界的原始计数与实验相对计数旁证行。",
+   "suggested": null,
+   "duplicates": "`lvz.sound-counter-origin.v1`",
+   "references": {
+    "total": 6,
+    "by_kind": {
+     "code": [
+      "determinism/sound_counter_origin.cpp:88",
+      "src/llm_vs_zombies/sound_counter.py:210"
+     ],
+     "docs": [
+      "docs/sound-counter-origin-native.md:52"
+     ],
+     "tests": [
+      "tests/sound_counter_origin.cpp:119",
+      "tests/test_audio_frame_validation.py:29",
+      "tests/test_sound_counter.py:59"
+     ]
+    },
+    "files": [
+     "determinism/sound_counter_origin.cpp",
+     "docs/sound-counter-origin-native.md",
+     "src/llm_vs_zombies/sound_counter.py",
+     "tests/sound_counter_origin.cpp",
+     "tests/test_audio_frame_validation.py",
+     "tests/test_sound_counter.py"
+    ]
+   },
+   "source": {
+    "commit": "90f74b3",
+    "date": "2026-09-19",
+    "subject": "Bind experiment audio counters to a verified native origin",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #15"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.window-observer.v1",
+   "definition": "src/llm_vs_zombies/window_observer.py:114",
+   "semantics": "只读窗口观察器的控制/就绪/封口文件 schema。",
+   "suggested": null,
+   "duplicates": "`lvz.launch-windows.v2/v3`（观察器的两份对外结论 schema）",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/window_observer.py:114"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/window_observer.py"
+    ]
+   },
+   "source": {
+    "commit": "f9ce28c",
+    "date": "2026-09-19",
+    "subject": "Isolate read-only window sampling from replay decoding",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #16"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.launch-windows.v2",
+   "definition": "src/llm_vs_zombies/window_observer.py:100",
+   "semantics": "启动窗口采样证据（宿主内采样路径，当前仍作为 helper 的默认输出）。",
+   "suggested": null,
+   "duplicates": "`lvz.launch-windows.v3`（同一份证据的两个同时存活的版本号）",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/window_observer.py:100"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/window_observer.py"
+    ]
+   },
+   "source": {
+    "commit": "24cad37",
+    "date": "2026-09-18",
+    "subject": "Add replay, streaming recording and evidence-based experiment evaluation",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #7 相关（评测/回放初版）；v3 由 issue #16 引入"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.launch-windows.v3",
+   "definition": "src/llm_vs_zombies/window_observer.py:610",
+   "semantics": "子进程隔离采样产出的启动/运行窗口证据，附 observer 溯源与 isolation 字段。",
+   "suggested": null,
+   "duplicates": "`lvz.launch-windows.v2`（见上；v2→v3 是本仓库唯一的 schema 升版先例）",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "docs": [
+      "docs/window-observer.md:40"
+     ],
+     "code": [
+      "src/llm_vs_zombies/evaluation.py:643",
+      "src/llm_vs_zombies/window_observer.py:610"
+     ],
+     "tests": [
+      "tests/test_evaluation_lifecycle.py:323",
+      "tests/test_production_runtime_guards.py:37"
+     ]
+    },
+    "files": [
+     "docs/window-observer.md",
+     "src/llm_vs_zombies/evaluation.py",
+     "src/llm_vs_zombies/window_observer.py",
+     "tests/test_evaluation_lifecycle.py",
+     "tests/test_production_runtime_guards.py"
+    ]
+   },
+   "source": {
+    "commit": "f9ce28c",
+    "date": "2026-09-19",
+    "subject": "Isolate read-only window sampling from replay decoding",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #16"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.read-sites.v1",
+   "definition": "docs/机制读取点表.json:2",
+   "semantics": "机制读取点表：字段×读取点的 S 档判据与结论（issue #30）。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "docs": [
+      "docs/机制读取点表.json:2",
+      "docs/机制读取点表.md:391"
+     ]
+    },
+    "files": [
+     "docs/机制读取点表.json",
+     "docs/机制读取点表.md"
+    ]
+   },
+   "source": {
+    "commit": "b0e3372",
+    "date": "2026-09-22",
+    "subject": "docs: 机制读取点表（#30） (#43)",
+    "pr": "#43",
+    "pr_all": [
+     "#43"
+    ],
+    "note": "issue #30（[N2]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.cross-boundary.v1",
+   "definition": "docs/跨界耦合清单.json:2",
+   "semantics": "跨界耦合清单与探针结论（issue #34）。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "docs": [
+      "docs/跨界耦合清单.json:2",
+      "docs/跨界耦合清单.md:3"
+     ]
+    },
+    "files": [
+     "docs/跨界耦合清单.json",
+     "docs/跨界耦合清单.md"
+    ]
+   },
+   "source": {
+    "commit": "914091c",
+    "date": "2026-09-22",
+    "subject": "docs: cross-boundary coupling inventory and probes (#46)",
+    "pr": "#46",
+    "pr_all": [
+     "#46"
+    ],
+    "note": "issue #34（[N6]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.import-scan.v1",
+   "definition": "tools/import_scan.py:23",
+   "semantics": "导入表/动态调用点扫描的原始结果，供耦合清单复核。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "docs": [
+      "docs/跨界耦合清单.json:32"
+     ],
+     "tests": [
+      "tests/test_import_scan.py:155"
+     ],
+     "code": [
+      "tools/import_scan.py:23",
+      "tools/import_scan.py:34"
+     ]
+    },
+    "files": [
+     "docs/跨界耦合清单.json",
+     "tests/test_import_scan.py",
+     "tools/import_scan.py"
+    ]
+   },
+   "source": {
+    "commit": "914091c",
+    "date": "2026-09-22",
+    "subject": "docs: cross-boundary coupling inventory and probes (#46)",
+    "pr": "#46",
+    "pr_all": [
+     "#46"
+    ],
+    "note": "issue #34（[N6]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.initialization-evidence.v1",
+   "definition": "src/llm_vs_zombies/initialization.py:277",
+   "semantics": "场景初始化证据块：配方、目标场景与验证结果。",
+   "suggested": null,
+   "duplicates": "`lvz.controlled-render.v1`",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/initialization.py:277"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/initialization.py"
+    ]
+   },
+   "source": {
+    "commit": "df59211",
+    "date": "2026-09-19",
+    "subject": "Control original engine drawing at verified simulation boundaries",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #10 相关（受控初始化链路）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.evidence-codec.v1",
+   "definition": "src/llm_vs_zombies/evidence_codec.py:20",
+   "semantics": "证据 gzip 容器的封包/校验 receipt。",
+   "suggested": null,
+   "duplicates": "`lvz.evidence-tree.v1`",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/evidence_codec.py:20"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/evidence_codec.py"
+    ]
+   },
+   "source": {
+    "commit": "0467c24",
+    "date": "2026-09-22",
+    "subject": "feat(evidence): store audit evidence in deterministic gzip containers (#40)",
+    "pr": "#40",
+    "pr_all": [
+     "#40"
+    ],
+    "note": "issue #40"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.evidence-tree.v1",
+   "definition": "src/llm_vs_zombies/evidence_tree.py:29",
+   "semantics": "证据树节点、根/父链与树身份（trajectory、branch 绑定）。",
+   "suggested": null,
+   "duplicates": "`lvz.branch-scope.v1`（分支只进报告与树，不进可比状态）",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/evidence_tree.py:29"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/evidence_tree.py"
+    ]
+   },
+   "source": {
+    "commit": "bad628d",
+    "date": "2026-09-22",
+    "subject": "feat(evidence): tree identity, branch scope and node hash chains (#41)",
+    "pr": "#41",
+    "pr_all": [
+     "#41"
+    ],
+    "note": "issue #31（[N3] 树状证据与身份）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-scope.v1",
+   "definition": "runtime/controller.cpp:17",
+   "semantics": "hello/status 的 branch 块：mode、branch_id、parent、origin、dedup_key。",
+   "suggested": null,
+   "duplicates": "issue #65 点名的 `branch_scope_v1`（能力键）↔ 本 schema：风格差异、非重复",
+   "references": {
+    "total": 7,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:97",
+      "docs/分支作用域隔离.md:27"
+     ],
+     "code": [
+      "runtime/controller.cpp:17",
+      "src/llm_vs_zombies/client.py:27"
+     ],
+     "tests": [
+      "tests/runtime_branch_scope_tests.cpp:65",
+      "tests/test_engine_replay.py:161",
+      "tests/test_records.py:43"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "docs/分支作用域隔离.md",
+     "runtime/controller.cpp",
+     "src/llm_vs_zombies/client.py",
+     "tests/runtime_branch_scope_tests.cpp",
+     "tests/test_engine_replay.py",
+     "tests/test_records.py"
+    ]
+   },
+   "source": {
+    "commit": "f22508f",
+    "date": "2026-09-22",
+    "subject": "feat(runtime): branch-scoped dedup and version namespace (#49)",
+    "pr": "#49",
+    "pr_all": [
+     "#49"
+    ],
+    "note": "issue #32（[N4]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-selfcheck.v1",
+   "definition": "tools/branch_selfcheck.py:43",
+   "semantics": "同源分支自检报告（R0–R4 抽样结论）。",
+   "suggested": null,
+   "duplicates": "`lvz.branch-selfcheck-run.v1`；`lvz.branch-workers*.v1`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "docs": [
+      "docs/同源分支自检.md:101"
+     ],
+     "code": [
+      "tools/branch_selfcheck.py:43"
+     ]
+    },
+    "files": [
+     "docs/同源分支自检.md",
+     "tools/branch_selfcheck.py"
+    ]
+   },
+   "source": {
+    "commit": "9dd7f8b",
+    "date": "2026-09-22",
+    "subject": "feat(tools): same-root branch self-check flow (#45)",
+    "pr": "#45",
+    "pr_all": [
+     "#45"
+    ],
+    "note": "issue #36（[N8]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-selfcheck-run.v1",
+   "definition": "tools/branch_selfcheck.py:44",
+   "semantics": "自检运行记录：逐步骤命令、产物与判定。",
+   "suggested": null,
+   "duplicates": "`lvz.branch-selfcheck.v1`",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "tools/branch_selfcheck.py:44"
+     ]
+    },
+    "files": [
+     "tools/branch_selfcheck.py"
+    ]
+   },
+   "source": {
+    "commit": "9dd7f8b",
+    "date": "2026-09-22",
+    "subject": "feat(tools): same-root branch self-check flow (#45)",
+    "pr": "#45",
+    "pr_all": [
+     "#45"
+    ],
+    "note": "issue #36（[N8]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-workers.v1",
+   "definition": "src/llm_vs_zombies/branch_workers.py:43",
+   "semantics": "并行分支 worker 的调取块（任务集合、租约、汇总入口）。",
+   "suggested": "保持；但 `branch-workers-*` 与 `branch-selfcheck*` 两族都占用 branch- 前缀，建议在登记表按“族”索引",
+   "duplicates": "`lvz.branch-worker-task/receipt/frames.v1`、`lvz.branch-workers-report/verify.v1`",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "docs": [
+      "docs/并行分支worker.md:36"
+     ],
+     "code": [
+      "src/llm_vs_zombies/branch_workers.py:43",
+      "tools/branch_workers.py:26"
+     ]
+    },
+    "files": [
+     "docs/并行分支worker.md",
+     "src/llm_vs_zombies/branch_workers.py",
+     "tools/branch_workers.py"
+    ]
+   },
+   "source": {
+    "commit": "ea6faff",
+    "date": "2026-09-22",
+    "subject": "feat(tools): parallel branch workers with per-branch isolation (#48)",
+    "pr": "#48",
+    "pr_all": [
+     "#48"
+    ],
+    "note": "issue #38（[N10]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-worker-task.v1",
+   "definition": "src/llm_vs_zombies/branch_workers.py:44",
+   "semantics": "单个 worker 的任务描述（分支、命令、租约字段）。",
+   "suggested": null,
+   "duplicates": "`lvz.branch-workers.v1`",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/branch_workers.py:44"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/branch_workers.py"
+    ]
+   },
+   "source": {
+    "commit": "ea6faff",
+    "date": "2026-09-22",
+    "subject": "feat(tools): parallel branch workers with per-branch isolation (#48)",
+    "pr": "#48",
+    "pr_all": [
+     "#48"
+    ],
+    "note": "issue #38（[N10]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-worker-receipt.v1",
+   "definition": "src/llm_vs_zombies/branch_workers.py:45",
+   "semantics": "单个 worker 的回执（状态、门禁、失败封存）。",
+   "suggested": null,
+   "duplicates": "`lvz.branch-workers-report.v1`",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/branch_workers.py:45"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/branch_workers.py"
+    ]
+   },
+   "source": {
+    "commit": "ea6faff",
+    "date": "2026-09-22",
+    "subject": "feat(tools): parallel branch workers with per-branch isolation (#48)",
+    "pr": "#48",
+    "pr_all": [
+     "#48"
+    ],
+    "note": "issue #38（[N10]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-workers-report.v1",
+   "definition": "src/llm_vs_zombies/branch_workers.py:46",
+   "semantics": "并行 worker 的汇聚报告（逐分支结果与门禁）。",
+   "suggested": null,
+   "duplicates": "`lvz.branch-worker-receipt.v1`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "docs": [
+      "docs/并行分支worker.md:114"
+     ],
+     "code": [
+      "src/llm_vs_zombies/branch_workers.py:46"
+     ]
+    },
+    "files": [
+     "docs/并行分支worker.md",
+     "src/llm_vs_zombies/branch_workers.py"
+    ]
+   },
+   "source": {
+    "commit": "ea6faff",
+    "date": "2026-09-22",
+    "subject": "feat(tools): parallel branch workers with per-branch isolation (#48)",
+    "pr": "#48",
+    "pr_all": [
+     "#48"
+    ],
+    "note": "issue #38（[N10]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-workers-verify.v1",
+   "definition": "src/llm_vs_zombies/branch_workers.py:47",
+   "semantics": "对既有 worker 产物的只读校验结果。",
+   "suggested": null,
+   "duplicates": "`lvz.branch-selfcheck.v1`",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/branch_workers.py:47"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/branch_workers.py"
+    ]
+   },
+   "source": {
+    "commit": "ea6faff",
+    "date": "2026-09-22",
+    "subject": "feat(tools): parallel branch workers with per-branch isolation (#48)",
+    "pr": "#48",
+    "pr_all": [
+     "#48"
+    ],
+    "note": "issue #38（[N10]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.branch-worker-frames.v1",
+   "definition": "src/llm_vs_zombies/branch_workers.py:48",
+   "semantics": "worker 的帧/序号映射产物。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/branch_workers.py:48"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/branch_workers.py"
+    ]
+   },
+   "source": {
+    "commit": "ea6faff",
+    "date": "2026-09-22",
+    "subject": "feat(tools): parallel branch workers with per-branch isolation (#48)",
+    "pr": "#48",
+    "pr_all": [
+     "#48"
+    ],
+    "note": "issue #38（[N10]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.cold-worker.v1",
+   "definition": "src/llm_vs_zombies/cold_workers.py:25",
+   "semantics": "冷启动 worker 句柄与运行回执（源不变、门禁产物复核）。",
+   "suggested": null,
+   "duplicates": "`lvz.branch-worker-receipt.v1`（两者都是 worker 回执，前缀不同）",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/cold_workers.py:25"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/cold_workers.py"
+    ]
+   },
+   "source": {
+    "commit": "106239f",
+    "date": "2026-09-20",
+    "subject": "feat(runtime): pin the game-owner floating-point mode and run parallel cold replays",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #19 + #22 合并提交 106239f"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.fp-activation.v1",
+   "definition": "determinism/fp_environment.cpp:50",
+   "semantics": "浮点模式激活回执（控制字、线程、补丁归属）。",
+   "suggested": null,
+   "duplicates": "`lvz.fp-health.v1` / `lvz.fp-environment-raw.v1`",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "determinism/fp_environment.cpp:50",
+      "src/llm_vs_zombies/fp_environment.py:77"
+     ],
+     "tests": [
+      "tests/test_fp_environment.py:32",
+      "tests/test_fp_initialization.py:28"
+     ]
+    },
+    "files": [
+     "determinism/fp_environment.cpp",
+     "src/llm_vs_zombies/fp_environment.py",
+     "tests/test_fp_environment.py",
+     "tests/test_fp_initialization.py"
+    ]
+   },
+   "source": {
+    "commit": "106239f",
+    "date": "2026-09-20",
+    "subject": "feat(runtime): pin the game-owner floating-point mode and run parallel cold replays",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #22"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.fp-environment-raw.v1",
+   "definition": "determinism/fp_environment.cpp:90",
+   "semantics": "每个受控边界的原始 FP 控制字/状态旁证行。",
+   "suggested": null,
+   "duplicates": "`*-raw` 家族",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "code": [
+      "determinism/fp_environment.cpp:90",
+      "src/llm_vs_zombies/fp_environment.py:210"
+     ],
+     "tests": [
+      "tests/test_fp_environment.py:93"
+     ]
+    },
+    "files": [
+     "determinism/fp_environment.cpp",
+     "src/llm_vs_zombies/fp_environment.py",
+     "tests/test_fp_environment.py"
+    ]
+   },
+   "source": {
+    "commit": "106239f",
+    "date": "2026-09-20",
+    "subject": "feat(runtime): pin the game-owner floating-point mode and run parallel cold replays",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #22"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.fp-health.v1",
+   "definition": "determinism/fp_environment.cpp:96",
+   "semantics": "浮点模式健康块（持续校验是否漂移）。",
+   "suggested": null,
+   "duplicates": "`lvz.foley-health.v1`（health 家族；另有内嵌 draw/sound_effects health 块未成 schema）",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "determinism/fp_environment.cpp:96",
+      "src/llm_vs_zombies/fp_environment.py:100"
+     ],
+     "tests": [
+      "tests/test_fp_environment.py:65",
+      "tests/test_fp_initialization.py:48"
+     ]
+    },
+    "files": [
+     "determinism/fp_environment.cpp",
+     "src/llm_vs_zombies/fp_environment.py",
+     "tests/test_fp_environment.py",
+     "tests/test_fp_initialization.py"
+    ]
+   },
+   "source": {
+    "commit": "106239f",
+    "date": "2026-09-20",
+    "subject": "feat(runtime): pin the game-owner floating-point mode and run parallel cold replays",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #22"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.mj-clock-anchor.v1",
+   "definition": "determinism/mj_clock_anchor.cpp:22",
+   "semantics": "MJ 时钟锚定回执（LawnApp+0x838 真实 before/after 与读回值）。",
+   "suggested": null,
+   "duplicates": "`lvz.app-update-anchor.v1` / `lvz.sound-counter-origin.v1`",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "determinism/mj_clock_anchor.cpp:22",
+      "src/llm_vs_zombies/mj_clock_anchor.py:19"
+     ],
+     "docs": [
+      "docs/mj-clock-anchor-native.md:123"
+     ],
+     "tests": [
+      "tests/mj_clock_anchor.cpp:94"
+     ]
+    },
+    "files": [
+     "determinism/mj_clock_anchor.cpp",
+     "docs/mj-clock-anchor-native.md",
+     "src/llm_vs_zombies/mj_clock_anchor.py",
+     "tests/mj_clock_anchor.cpp"
+    ]
+   },
+   "source": {
+    "commit": "dd06f16",
+    "date": "2026-09-23",
+    "subject": "feat(determinism): fixed-target B(0) anchor for LawnApp+0x838 (#62)",
+    "pr": "#62",
+    "pr_all": [
+     "#62"
+    ],
+    "note": "issue #62"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.giant-fork-diff.v1",
+   "definition": "tools/giant_fork_diff.py:666",
+   "semantics": "巨人分叉 A/B 审计流的离线 diff 报告。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "tools/giant_fork_diff.py:666"
+     ]
+    },
+    "files": [
+     "tools/giant_fork_diff.py"
+    ]
+   },
+   "source": {
+    "commit": "ad03124",
+    "date": "2026-09-23",
+    "subject": "feat(tools): offline A/B diff of the #51 gargantuar fork audit streams (#60)",
+    "pr": "#60",
+    "pr_all": [
+     "#60"
+    ],
+    "note": "issue #51"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.evaluation-plan.v1",
+   "definition": "src/llm_vs_zombies/evaluation.py:35",
+   "semantics": "评测计划：tier、seeds、策略、初始化配方与预算。",
+   "suggested": null,
+   "duplicates": "`lvz.evaluation.v1`（计划 ↔ 报告应成对；报告名缺 -report）",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/evaluation.py:35"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/evaluation.py"
+    ]
+   },
+   "source": {
+    "commit": "24cad37",
+    "date": "2026-09-18",
+    "subject": "Add replay, streaming recording and evidence-based experiment evaluation",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #7"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.evaluation.v1",
+   "definition": "src/llm_vs_zombies/evaluation.py:34",
+   "semantics": "评测报告：门槛结论、就绪判定与失败原因。",
+   "suggested": "可选 `lvz.evaluation-report.v1`：与 lvz.evaluation-plan.v1 对称",
+   "duplicates": "`lvz.evaluation-plan.v1`",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/evaluation.py:34"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/evaluation.py"
+    ]
+   },
+   "source": {
+    "commit": "24cad37",
+    "date": "2026-09-18",
+    "subject": "Add replay, streaming recording and evidence-based experiment evaluation",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #7"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.engine-replay.v1",
+   "definition": "src/llm_vs_zombies/engine_replay.py:33",
+   "semantics": "打包轨迹 manifest、初始 marker 与重放报告的统一 schema。",
+   "suggested": null,
+   "duplicates": "`lvz.audit.v1`（原生审计包络）",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/engine_replay.py:33",
+      "src/llm_vs_zombies/root_integrity.py:58"
+     ],
+     "tests": [
+      "tests/test_root_integrity.py:73"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/engine_replay.py",
+     "src/llm_vs_zombies/root_integrity.py",
+     "tests/test_root_integrity.py"
+    ]
+   },
+   "source": {
+    "commit": "24cad37",
+    "date": "2026-09-18",
+    "subject": "Add replay, streaming recording and evidence-based experiment evaluation",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #6 / #7"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.boundary-equivalence.v1",
+   "definition": "tools/check-boundary-equivalence.py:61",
+   "semantics": "批量/逐步/渲染三种推进分组的边界等价报告。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "tools/check-boundary-equivalence.py:222",
+      "tools/check-boundary-equivalence.py:61"
+     ]
+    },
+    "files": [
+     "tools/check-boundary-equivalence.py"
+    ]
+   },
+   "source": {
+    "commit": "f7788b1",
+    "date": "2026-09-19",
+    "subject": "Verify batch and render equivalence and include AvZ in archive CI",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #7 相关（工具侧验收）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.foley-baseline.v1",
+   "definition": "determinism/foley_trace.cpp:229",
+   "semantics": "Foley 诊断基线（激活时存在的实例为代数零）。",
+   "suggested": null,
+   "duplicates": "`lvz.foley-event.v1` / `lvz.foley-health.v1`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "determinism/foley_trace.cpp:229"
+     ],
+     "docs": [
+      "docs/foley-diagnostic-trace.md:22"
+     ]
+    },
+    "files": [
+     "determinism/foley_trace.cpp",
+     "docs/foley-diagnostic-trace.md"
+    ]
+   },
+   "source": {
+    "commit": "d5e7cb8",
+    "date": "2026-09-19",
+    "subject": "feat(diagnostics): trace original Foley admission and audio completion branches",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #12 因果定位"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.foley-event.v1",
+   "definition": "determinism/foley_trace.cpp:176",
+   "semantics": "Foley 调用事件：准入、变化与完成分支。",
+   "suggested": null,
+   "duplicates": "`lvz.audio-event.v1`（两个 event 流由不同模块产出，极易混淆）",
+   "references": {
+    "total": 7,
+    "by_kind": {
+     "code": [
+      "determinism/foley_trace.cpp:176",
+      "determinism/foley_trace.cpp:259",
+      "src/llm_vs_zombies/virtual_audio.py:1588",
+      "tools/offline_soundtrack.py:137"
+     ],
+     "docs": [
+      "docs/foley-diagnostic-trace.md:21",
+      "docs/虚拟音频设备与离线音轨.md:185"
+     ],
+     "tests": [
+      "tests/test_virtual_audio.py:436"
+     ]
+    },
+    "files": [
+     "determinism/foley_trace.cpp",
+     "docs/foley-diagnostic-trace.md",
+     "docs/虚拟音频设备与离线音轨.md",
+     "src/llm_vs_zombies/virtual_audio.py",
+     "tests/test_virtual_audio.py",
+     "tools/offline_soundtrack.py"
+    ]
+   },
+   "source": {
+    "commit": "d5e7cb8",
+    "date": "2026-09-19",
+    "subject": "feat(diagnostics): trace original Foley admission and audio completion branches",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #12 因果定位"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.foley-health.v1",
+   "definition": "determinism/foley_trace.cpp:285",
+   "semantics": "Foley 追踪健康块（深度、溢出、线程与计数配对）。",
+   "suggested": null,
+   "duplicates": "`lvz.fp-health.v1`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "determinism/foley_trace.cpp:285"
+     ],
+     "docs": [
+      "docs/foley-diagnostic-trace.md:23"
+     ]
+    },
+    "files": [
+     "determinism/foley_trace.cpp",
+     "docs/foley-diagnostic-trace.md"
+    ]
+   },
+   "source": {
+    "commit": "d5e7cb8",
+    "date": "2026-09-19",
+    "subject": "feat(diagnostics): trace original Foley admission and audio completion branches",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #12 因果定位"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.audio-event.v1",
+   "definition": "src/llm_vs_zombies/virtual_audio.py:39",
+   "semantics": "虚拟音频事件流（play/stop 与 tick 对齐的时间网格）。",
+   "suggested": null,
+   "duplicates": "`lvz.foley-event.v1`",
+   "references": {
+    "total": 8,
+    "by_kind": {
+     "docs": [
+      "docs/虚拟音频设备与离线音轨.md:116",
+      "docs/虚拟音频设备与离线音轨.md:139"
+     ],
+     "code": [
+      "src/llm_vs_zombies/virtual_audio.py:360",
+      "src/llm_vs_zombies/virtual_audio.py:39",
+      "tools/offline_soundtrack.py:127",
+      "tools/offline_soundtrack.py:137",
+      "tools/offline_soundtrack.py:6"
+     ],
+     "tests": [
+      "tests/test_virtual_audio.py:474"
+     ]
+    },
+    "files": [
+     "docs/虚拟音频设备与离线音轨.md",
+     "src/llm_vs_zombies/virtual_audio.py",
+     "tests/test_virtual_audio.py",
+     "tools/offline_soundtrack.py"
+    ]
+   },
+   "source": {
+    "commit": "2ad6f51",
+    "date": "2026-09-22",
+    "subject": "feat(audio): tick-driven virtual audio device and offline soundtrack (#47)",
+    "pr": "#47",
+    "pr_all": [
+     "#47"
+    ],
+    "note": "issue #37（[N9]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.audio-resources.v1",
+   "definition": "src/llm_vs_zombies/virtual_audio.py:40",
+   "semantics": "音效资源表：时长、电平与可听准入所用的 Foley 类型标志。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "docs": [
+      "docs/虚拟音频设备与离线音轨.md:150"
+     ],
+     "code": [
+      "src/llm_vs_zombies/virtual_audio.py:40",
+      "tools/offline_soundtrack.py:128",
+      "tools/offline_soundtrack.py:8"
+     ]
+    },
+    "files": [
+     "docs/虚拟音频设备与离线音轨.md",
+     "src/llm_vs_zombies/virtual_audio.py",
+     "tools/offline_soundtrack.py"
+    ]
+   },
+   "source": {
+    "commit": "2ad6f51",
+    "date": "2026-09-22",
+    "subject": "feat(audio): tick-driven virtual audio device and offline soundtrack (#47)",
+    "pr": "#47",
+    "pr_all": [
+     "#47"
+    ],
+    "note": "issue #37（[N9]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.audio-track.v1",
+   "definition": "src/llm_vs_zombies/virtual_audio.py:41",
+   "semantics": "离线音轨 manifest：接线、准入策略与 WAV/哈希绑定。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/virtual_audio.py:41"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/virtual_audio.py"
+    ]
+   },
+   "source": {
+    "commit": "2ad6f51",
+    "date": "2026-09-22",
+    "subject": "feat(audio): tick-driven virtual audio device and offline soundtrack (#47)",
+    "pr": "#47",
+    "pr_all": [
+     "#47"
+    ],
+    "note": "issue #37（[N9]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.audio-foley-trace.v1",
+   "definition": "src/llm_vs_zombies/virtual_audio.py:42",
+   "semantics": "Foley 原始行到音频事件的适配追踪（含被丢弃原因）。",
+   "suggested": null,
+   "duplicates": "`lvz.audio-event.v1`；能力侧 `foley_branch_trace_v1`",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "code": [
+      "src/llm_vs_zombies/virtual_audio.py:42"
+     ]
+    },
+    "files": [
+     "src/llm_vs_zombies/virtual_audio.py"
+    ]
+   },
+   "source": {
+    "commit": "2ad6f51",
+    "date": "2026-09-22",
+    "subject": "feat(audio): tick-driven virtual audio device and offline soundtrack (#47)",
+    "pr": "#47",
+    "pr_all": [
+     "#47"
+    ],
+    "note": "issue #37（[N9]）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.spawn.v1",
+   "definition": "determinism/spawn_hook.cpp:219",
+   "semantics": "出生事件 payload：ZombieInitialize 出口测得的实际僵尸身份与位置。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "code": [
+      "determinism/spawn_hook.cpp:219",
+      "src/llm_vs_zombies/audit_compare.py:1772"
+     ],
+     "tests": [
+      "tests/test_audit_compare.py:421",
+      "tests/test_audit_compare.py:64",
+      "tests/test_engine_replay.py:117"
+     ]
+    },
+    "files": [
+     "determinism/spawn_hook.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "tests/test_audit_compare.py",
+     "tests/test_engine_replay.py"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（游戏线程动作与逐帧证据）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.reanimation-links.v1",
+   "definition": "determinism/reanimation_audit.cpp:127",
+   "semantics": "动画链接的语义证据：逻辑名 → 实际池条目/代次的映射。",
+   "suggested": null,
+   "duplicates": "`lvz.reanimation-raw.v1`",
+   "references": {
+    "total": 8,
+    "by_kind": {
+     "code": [
+      "determinism/reanimation_audit.cpp:127",
+      "determinism/reanimation_audit.cpp:265",
+      "src/llm_vs_zombies/audit_compare.py:1211",
+      "src/llm_vs_zombies/root_integrity.py:61"
+     ],
+     "tests": [
+      "tests/test_audit_compare.py:15",
+      "tests/test_audit_compare.py:29",
+      "tests/test_engine_replay.py:84",
+      "tests/test_root_integrity.py:57"
+     ]
+    },
+    "files": [
+     "determinism/reanimation_audit.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "src/llm_vs_zombies/root_integrity.py",
+     "tests/test_audit_compare.py",
+     "tests/test_engine_replay.py",
+     "tests/test_root_integrity.py"
+    ]
+   },
+   "source": {
+    "commit": "12afc28",
+    "date": "2026-09-19",
+    "subject": "Audit semantic animation links, seal full evidence and freeze on audit faults",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #3 相关（完整状态证据）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.reanimation-raw.v1",
+   "definition": "determinism/reanimation_audit.cpp:200",
+   "semantics": "原始动画句柄/字段旁证行（不参与跨运行逐位比较）。",
+   "suggested": null,
+   "duplicates": "`lvz.reanimation-links.v1`",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "determinism/reanimation_audit.cpp:200",
+      "src/llm_vs_zombies/audit_compare.py:1197"
+     ],
+     "tests": [
+      "tests/test_audit_compare.py:23",
+      "tests/test_engine_replay.py:142"
+     ]
+    },
+    "files": [
+     "determinism/reanimation_audit.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "tests/test_audit_compare.py",
+     "tests/test_engine_replay.py"
+    ]
+   },
+   "source": {
+    "commit": "12afc28",
+    "date": "2026-09-19",
+    "subject": "Audit semantic animation links, seal full evidence and freeze on audit faults",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #3 相关（完整状态证据）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.flag-drop-fixture.v1",
+   "definition": "tests/flag_drop_live.cpp:23",
+   "semantics": "掉旗夹具 sidecar 行 schema（创建/DropHead/更新后实际字段）。",
+   "suggested": null,
+   "duplicates": "`test_flag_drop_v1`（同一夹具的模式名）",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "tests": [
+      "tests/flag_drop_live.cpp:23"
+     ]
+    },
+    "files": [
+     "tests/flag_drop_live.cpp"
+    ]
+   },
+   "source": {
+    "commit": "4228e62",
+    "date": "2026-09-19",
+    "subject": "fix: preserve flag animation retirement evidence",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #20"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.view.v1",
+   "definition": "docs/LLM对局MVP.md:538",
+   "semantics": "对局 MVP 的视图定义（提案；feature llm-match-mvp，不占 issue 编号）。",
+   "suggested": "实现前先定名，避免与 lvz.audit.v1 的 observation 混用同名概念",
+   "duplicates": "—",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "docs": [
+      "docs/LLM对局MVP.md:191",
+      "docs/LLM对局MVP.md:460",
+      "docs/LLM对局MVP.md:538"
+     ]
+    },
+    "files": [
+     "docs/LLM对局MVP.md"
+    ]
+   },
+   "source": {
+    "commit": "f57c49e",
+    "date": "2026-09-22",
+    "subject": "docs: land match MVP, libTAS survey, and branch data contract",
+    "pr": null,
+    "pr_all": [],
+    "note": "feature llm-match-mvp（docs/LLM对局MVP.md），未实现"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.other.v1",
+   "definition": "tests/test_client.py:219",
+   "semantics": "测试用的“未知 schema”负例，用来证明读取器拒绝未知版本；不是协议的一部分。",
+   "suggested": "`lvz.test-unknown.v1`：让“非生产、仅测试”在名字里可见",
+   "duplicates": "—",
+   "references": {
+    "total": 1,
+    "by_kind": {
+     "tests": [
+      "tests/test_client.py:219"
+     ]
+    },
+    "files": [
+     "tests/test_client.py"
+    ]
+   },
+   "source": {
+    "commit": "f22508f",
+    "date": "2026-09-22",
+    "subject": "feat(runtime): branch-scoped dedup and version namespace (#49)",
+    "pr": "#49",
+    "pr_all": [
+     "#49"
+    ],
+    "note": "issue #32（负例随分支作用域一起加入）"
+   }
+  },
+  {
+   "class": "schema",
+   "name": "lvz.naming-registry.v1",
+   "definition": "docs/naming-registry.json:2",
+   "semantics": "本登记表的机器可读格式（issue #65 新增，登记表自登记）。",
+   "suggested": null,
+   "duplicates": "—",
+   "references": {
+    "total": 0,
+    "by_kind": {},
+    "files": []
+   },
+   "source": {
+    "note": "issue #65（本表）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_json",
+   "definition": "runtime/pipe_server.cpp:73",
+   "semantics": "帧体不是合法 UTF-8 JSON。",
+   "suggested": null,
+   "duplicates": "`invalid_request` / `invalid_params`（协议层校验三连）",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "code": [
+      "runtime/pipe_server.cpp:73"
+     ],
+     "tests": [
+      "tests/runtime_tests.cpp:278"
+     ]
+    },
+    "files": [
+     "runtime/pipe_server.cpp",
+     "tests/runtime_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_request",
+   "definition": "runtime/controller.cpp:301",
+   "semantics": "请求形状非法：缺 request_id、protocol≠1、method 非法或 branch 声明不合法。",
+   "suggested": null,
+   "duplicates": "与 `invalid_params`/`invalid_action`/`invalid_position` 同族（`invalid_*` 共 8 个）",
+   "references": {
+    "total": 15,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:110",
+      "docs/分支作用域隔离.md:42"
+     ],
+     "code": [
+      "runtime/controller.cpp:301",
+      "runtime/controller.cpp:305",
+      "runtime/controller.cpp:309",
+      "runtime/controller.cpp:322",
+      "runtime/controller.cpp:729",
+      "runtime/controller.cpp:730"
+     ],
+     "tests": [
+      "tests/runtime_branch_scope_tests.cpp:101"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "docs/分支作用域隔离.md",
+     "runtime/controller.cpp",
+     "tests/runtime_branch_scope_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_params",
+   "definition": "runtime/controller.cpp:388",
+   "semantics": "方法参数缺失、类型非法或取值越界（用例最多，16 处）。",
+   "suggested": null,
+   "duplicates": "`invalid_request`（请求形状 vs 参数取值的边界模糊）",
+   "references": {
+    "total": 42,
+    "by_kind": {
+     "docs": [
+      "docs/分支作用域隔离.md:43"
+     ],
+     "code": [
+      "runtime/controller.cpp:388",
+      "runtime/controller.cpp:393",
+      "runtime/controller.cpp:396",
+      "runtime/controller.cpp:467",
+      "runtime/controller.cpp:516",
+      "runtime/controller.cpp:536",
+      "runtime/controller.cpp:563",
+      "runtime/controller.cpp:567",
+      "runtime/controller.cpp:597",
+      "runtime/controller.cpp:601",
+      "runtime/controller.cpp:632",
+      "runtime/controller.cpp:661",
+      "runtime/controller.cpp:666",
+      "runtime/controller.cpp:670",
+      "runtime/controller.cpp:697",
+      "runtime/controller.cpp:706"
+     ],
+     "tests": [
+      "tests/app_update_anchor.cpp:67",
+      "tests/mj_clock_anchor.cpp:81",
+      "tests/mj_clock_anchor.cpp:83",
+      "tests/mj_clock_anchor.cpp:85",
+      "tests/runtime_branch_scope_tests.cpp:105",
+      "tests/runtime_tests.cpp:168",
+      "tests/runtime_tests.cpp:181",
+      "tests/runtime_tests.cpp:211",
+      "tests/sound_counter_origin.cpp:96"
+     ]
+    },
+    "files": [
+     "docs/分支作用域隔离.md",
+     "runtime/controller.cpp",
+     "tests/app_update_anchor.cpp",
+     "tests/mj_clock_anchor.cpp",
+     "tests/runtime_branch_scope_tests.cpp",
+     "tests/runtime_tests.cpp",
+     "tests/sound_counter_origin.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_action",
+   "definition": "runtime/runtime.cpp:147",
+   "semantics": "动作对象不是 op/row/col 形状。",
+   "suggested": null,
+   "duplicates": "`invalid_params` 的动作侧细化",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:147",
+      "src/llm_vs_zombies/evaluation.py:603"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp",
+     "src/llm_vs_zombies/evaluation.py"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_position",
+   "definition": "runtime/runtime.cpp:150",
+   "semantics": "行/列越界或非有限值（1-based AvZ 坐标）。",
+   "suggested": null,
+   "duplicates": "`invalid_spawn_position`（同一含义、不同动作分支）",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:150"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_plant_type",
+   "definition": "runtime/runtime.cpp:153",
+   "semantics": "植物类型缺失、非整数或越界（含 48 保留值）。",
+   "suggested": null,
+   "duplicates": "`invalid_spawn_type` / `invalid_target_type`",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:153",
+      "runtime/runtime.cpp:155"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_target_type",
+   "definition": "runtime/runtime.cpp:167",
+   "semantics": "铲除目标类型越界。",
+   "suggested": null,
+   "duplicates": "`invalid_plant_type` / `invalid_spawn_type`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:167"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_spawn_type",
+   "definition": "runtime/spawn_action.hpp:85",
+   "semantics": "spawn 的僵尸类型缺失、非整数或不在 0..32。",
+   "suggested": null,
+   "duplicates": "`invalid_plant_type`（动作各自实现了类型校验）",
+   "references": {
+    "total": 11,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:62"
+     ],
+     "code": [
+      "runtime/spawn_action.hpp:85",
+      "runtime/spawn_action.hpp:90"
+     ],
+     "tests": [
+      "tests/runtime_spawn_action.cpp:43",
+      "tests/runtime_spawn_action.cpp:44",
+      "tests/runtime_spawn_action.cpp:45",
+      "tests/runtime_spawn_action.cpp:46",
+      "tests/runtime_spawn_action.cpp:47",
+      "tests/runtime_spawn_action.cpp:48"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "runtime/spawn_action.hpp",
+     "tests/runtime_spawn_action.cpp"
+    ]
+   },
+   "source": {
+    "commit": "3c158ba",
+    "date": "2026-09-23",
+    "subject": "feat(runtime): spawn action op mapped to AvZ PutZombie (#51) (#52)",
+    "pr": "#52",
+    "pr_all": [
+     "#51",
+     "#52"
+    ],
+    "note": "issue #51"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "invalid_spawn_position",
+   "definition": "runtime/spawn_action.hpp:94",
+   "semantics": "spawn 的行/列缺失、非整数或越界。",
+   "suggested": null,
+   "duplicates": "`invalid_position`",
+   "references": {
+    "total": 12,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:63"
+     ],
+     "code": [
+      "runtime/spawn_action.hpp:100",
+      "runtime/spawn_action.hpp:94"
+     ],
+     "tests": [
+      "tests/runtime_spawn_action.cpp:49",
+      "tests/runtime_spawn_action.cpp:50",
+      "tests/runtime_spawn_action.cpp:51",
+      "tests/runtime_spawn_action.cpp:52",
+      "tests/runtime_spawn_action.cpp:53",
+      "tests/runtime_spawn_action.cpp:54",
+      "tests/runtime_spawn_action.cpp:55"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "runtime/spawn_action.hpp",
+     "tests/runtime_spawn_action.cpp"
+    ]
+   },
+   "source": {
+    "commit": "3c158ba",
+    "date": "2026-09-23",
+    "subject": "feat(runtime): spawn action op mapped to AvZ PutZombie (#51) (#52)",
+    "pr": "#52",
+    "pr_all": [
+     "#51",
+     "#52"
+    ],
+    "note": "issue #51"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "unsupported_method",
+   "definition": "runtime/controller.cpp:421",
+   "semantics": "方法未实现。",
+   "suggested": null,
+   "duplicates": "`unsupported_action` / `unsupported_condition`（unsupported_* 三连）",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:421"
+     ],
+     "tests": [
+      "tests/test_video.py:126",
+      "tests/test_video.py:128"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/test_video.py"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "unsupported_action",
+   "definition": "runtime/runtime.cpp:194",
+   "semantics": "动作 op 不是 plant/shovel/spawn。",
+   "suggested": null,
+   "duplicates": "`unsupported_method`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:194"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "unsupported_condition",
+   "definition": "runtime/controller.cpp:701",
+   "semantics": "advance.until 只支持 wave_changed。",
+   "suggested": null,
+   "duplicates": "`unsupported_method`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:701"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "queue_full",
+   "definition": "runtime/pipe_server.cpp:78",
+   "semantics": "请求队列超过 1024 未决请求。",
+   "suggested": null,
+   "duplicates": "`busy` / `dedup_capacity`（“暂时不能受理”三连）",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/pipe_server.cpp:78"
+     ]
+    },
+    "files": [
+     "runtime/pipe_server.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "response_too_large",
+   "definition": "runtime/pipe_server.cpp:92",
+   "semantics": "响应超过 4 MiB 帧上限。",
+   "suggested": null,
+   "duplicates": "`capture_frame_too_large`（同属帧大小上限，但一个在传输层、一个在捕获层）",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/pipe_server.cpp:92"
+     ]
+    },
+    "files": [
+     "runtime/pipe_server.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "busy",
+   "definition": "runtime/controller.cpp:404",
+   "semantics": "边界被占用：有 pending/正在推进，或需要暂停边界的控制请求被拒（4 处）。",
+   "suggested": null,
+   "duplicates": "`queue_full`",
+   "references": {
+    "total": 19,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:128",
+      "docs/window-observer.md:97"
+     ],
+     "code": [
+      "runtime/controller.cpp:404",
+      "runtime/controller.cpp:474",
+      "runtime/controller.cpp:518",
+      "runtime/controller.cpp:527",
+      "src/llm_vs_zombies/client.py:212",
+      "tools/fixtures/snapshot_fixture.c:6"
+     ],
+     "tests": [
+      "tests/runtime_branch_scope_tests.cpp:110",
+      "tests/runtime_journal_tests.cpp:91",
+      "tests/runtime_journal_tests.cpp:92",
+      "tests/runtime_tests.cpp:190",
+      "tests/runtime_tests.cpp:237",
+      "tests/test_engine_replay.py:487",
+      "tests/test_window_observer.py:129"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "docs/window-observer.md",
+     "runtime/controller.cpp",
+     "src/llm_vs_zombies/client.py",
+     "tests/runtime_branch_scope_tests.cpp",
+     "tests/runtime_journal_tests.cpp",
+     "tests/runtime_tests.cpp",
+     "tests/test_engine_replay.py",
+     "tests/test_window_observer.py",
+     "tools/fixtures/snapshot_fixture.c"
+    ]
+   },
+   "source": {
+    "commit": "ef0e82f",
+    "date": "2026-09-18",
+    "subject": "Add audited Python REPL and Windows IPC client (refs #2)",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #2 相关（IPC 客户端）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "request_id_conflict",
+   "definition": "runtime/controller.cpp:424",
+   "semantics": "同一 ID 在同一去重域内内容不同（含终局回复重放，4 处）。",
+   "suggested": null,
+   "duplicates": "`cross_branch_request_id_conflict`（跨分支版本）",
+   "references": {
+    "total": 24,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:123",
+      "docs/runtime-protocol.md:165",
+      "docs/分支作用域隔离.md:44",
+      "docs/分支作用域隔离.md:74"
+     ],
+     "code": [
+      "runtime/controller.cpp:424",
+      "runtime/controller.cpp:427",
+      "runtime/controller.cpp:434",
+      "runtime/controller.cpp:452"
+     ],
+     "tests": [
+      "tests/app_update_anchor.cpp:78",
+      "tests/mj_clock_anchor.cpp:99",
+      "tests/runtime_branch_scope_tests.cpp:181",
+      "tests/runtime_engine_call_tests.cpp:70",
+      "tests/runtime_engine_call_tests.cpp:72",
+      "tests/runtime_engine_call_tests.cpp:79",
+      "tests/runtime_journal_tests.cpp:58",
+      "tests/runtime_tests.cpp:163",
+      "tests/runtime_tests.cpp:207",
+      "tests/runtime_tests.cpp:222",
+      "tests/runtime_tests.cpp:66",
+      "tests/sound_counter_origin.cpp:108"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "docs/分支作用域隔离.md",
+     "runtime/controller.cpp",
+     "tests/app_update_anchor.cpp",
+     "tests/mj_clock_anchor.cpp",
+     "tests/runtime_branch_scope_tests.cpp",
+     "tests/runtime_engine_call_tests.cpp",
+     "tests/runtime_journal_tests.cpp",
+     "tests/runtime_tests.cpp",
+     "tests/sound_counter_origin.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（首发去重合同）；#8 起成为有界去重"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "cross_branch_request_id_conflict",
+   "definition": "runtime/controller.cpp:444",
+   "semantics": "同一 ID 在他分支已绑定不同内容，拒绝执行也不回填他分支结果。",
+   "suggested": null,
+   "duplicates": "`request_id_conflict`",
+   "references": {
+    "total": 12,
+    "by_kind": {
+     "docs": [
+      "docs/client.md:70",
+      "docs/runtime-protocol.md:119",
+      "docs/分支作用域隔离.md:30",
+      "docs/分支作用域隔离.md:40",
+      "docs/分支作用域隔离.md:73"
+     ],
+     "code": [
+      "runtime/README.md:37",
+      "runtime/controller.cpp:444"
+     ],
+     "tests": [
+      "tests/runtime_branch_scope_tests.cpp:159",
+      "tests/runtime_branch_scope_tests.cpp:86",
+      "tests/test_client.py:179",
+      "tests/test_client.py:183"
+     ]
+    },
+    "files": [
+     "docs/client.md",
+     "docs/runtime-protocol.md",
+     "docs/分支作用域隔离.md",
+     "runtime/README.md",
+     "runtime/controller.cpp",
+     "tests/runtime_branch_scope_tests.cpp",
+     "tests/test_client.py"
+    ]
+   },
+   "source": {
+    "commit": "f22508f",
+    "date": "2026-09-22",
+    "subject": "feat(runtime): branch-scoped dedup and version namespace (#49)",
+    "pr": "#49",
+    "pr_all": [
+     "#49"
+    ],
+    "note": "issue #32"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "request_result_expired",
+   "definition": "runtime/controller.cpp:454",
+   "semantics": "捕获结果已过期且同 ID 不会再触发第二次捕获。",
+   "suggested": null,
+   "duplicates": "`request_id_conflict`（同族语义拆分）",
+   "references": {
+    "total": 6,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:165",
+      "docs/video.md:107"
+     ],
+     "code": [
+      "runtime/README.md:56",
+      "runtime/controller.cpp:454"
+     ],
+     "tests": [
+      "tests/runtime_tests.cpp:217"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "docs/video.md",
+     "runtime/README.md",
+     "runtime/controller.cpp",
+     "tests/runtime_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（首发去重合同）；#8 起成为有界去重"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "dedup_capacity",
+   "definition": "runtime/controller.cpp:724",
+   "semantics": "普通去重条目配额耗尽（close 专用槽位除外）。",
+   "suggested": null,
+   "duplicates": "`capture_dedup_capacity`（捕获缓存容量）",
+   "references": {
+    "total": 9,
+    "by_kind": {
+     "docs": [
+      "docs/headless-validation.md:47",
+      "docs/runtime-protocol.md:123",
+      "docs/runtime-protocol.md:204",
+      "docs/分支作用域隔离.md:44"
+     ],
+     "code": [
+      "runtime/README.md:26",
+      "runtime/controller.cpp:724"
+     ],
+     "tests": [
+      "tests/runtime_journal_tests.cpp:89",
+      "tests/runtime_journal_tests.cpp:97"
+     ]
+    },
+    "files": [
+     "docs/headless-validation.md",
+     "docs/runtime-protocol.md",
+     "docs/分支作用域隔离.md",
+     "runtime/README.md",
+     "runtime/controller.cpp",
+     "tests/runtime_journal_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（首发去重合同）；#8 起成为有界配额"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "capture_dedup_capacity",
+   "definition": "runtime/controller.cpp:469",
+   "semantics": "捕获帧缓存容量耗尽。",
+   "suggested": null,
+   "duplicates": "`dedup_capacity`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:469"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #5 相关（视频/捕获）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "dedup_storage_failed",
+   "definition": "runtime/controller.cpp:406",
+   "semantics": "请求日志写盘失败：冻结变更、只保留控制/关闭通道（同时用作 stop_reason 与 status.state）。",
+   "suggested": null,
+   "duplicates": "同一个字符串跨三个语义位（error.code / stop_reason / status.state）",
+   "references": {
+    "total": 20,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:123",
+      "docs/runtime-protocol.md:129",
+      "docs/runtime-protocol.md:206",
+      "docs/分支作用域隔离.md:44"
+     ],
+     "code": [
+      "runtime/controller.cpp:31",
+      "runtime/controller.cpp:406",
+      "runtime/controller.cpp:436",
+      "runtime/controller.cpp:461",
+      "runtime/controller.cpp:520",
+      "runtime/controller.cpp:726",
+      "runtime/controller.cpp:81"
+     ],
+     "tests": [
+      "tests/runtime_journal_tests.cpp:118",
+      "tests/runtime_journal_tests.cpp:126",
+      "tests/runtime_journal_tests.cpp:151",
+      "tests/runtime_journal_tests.cpp:172"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "docs/分支作用域隔离.md",
+     "runtime/controller.cpp",
+     "tests/runtime_journal_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "31b6c6f",
+    "date": "2026-09-19",
+    "subject": "Persist bounded request history and preserve emergency close",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #8 相关（有界去重）/ #1"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "recording_closed",
+   "definition": "runtime/controller.cpp:408",
+   "semantics": "录制已封口，拒绝进一步变更或捕获。",
+   "suggested": null,
+   "duplicates": "`recording_close_incomplete`；同一字符串也是 audit 事件 kind（determinism/audit.cpp:467）",
+   "references": {
+    "total": 49,
+    "by_kind": {
+     "code": [
+      "determinism/audit.cpp:467",
+      "determinism/foley_trace.cpp:241",
+      "runtime/controller.cpp:408",
+      "runtime/controller.cpp:465",
+      "runtime/controller.cpp:475",
+      "runtime/controller.cpp:528",
+      "runtime/controller.cpp:530",
+      "src/llm_vs_zombies/audit_compare.py:1063",
+      "src/llm_vs_zombies/audit_compare.py:1071",
+      "src/llm_vs_zombies/audit_compare.py:1073",
+      "src/llm_vs_zombies/audit_compare.py:1084",
+      "src/llm_vs_zombies/audit_compare.py:1147",
+      "src/llm_vs_zombies/audit_compare.py:1148",
+      "src/llm_vs_zombies/audit_compare.py:1469",
+      "src/llm_vs_zombies/audit_compare.py:713",
+      "src/llm_vs_zombies/audit_compare.py:855",
+      "src/llm_vs_zombies/engine_replay.py:1276",
+      "src/llm_vs_zombies/evaluation.py:338",
+      "src/llm_vs_zombies/evaluation_support.py:132"
+     ],
+     "docs": [
+      "docs/engine-replay.md:167",
+      "docs/engine-replay.md:207",
+      "docs/engine-replay.md:215",
+      "docs/engine-replay.md:263",
+      "docs/engine-replay.md:61",
+      "docs/particle-shake-determinism.md:52",
+      "docs/runtime-protocol.md:128",
+      "docs/runtime-protocol.md:198",
+      "docs/runtime-protocol.md:294"
+     ],
+     "tests": [
+      "tests/foley_trace_tests.cpp:124",
+      "tests/runtime_branch_scope_tests.cpp:120",
+      "tests/runtime_journal_tests.cpp:65",
+      "tests/runtime_tests.cpp:241",
+      "tests/runtime_tests.cpp:96",
+      "tests/test_audit_compare.py:140",
+      "tests/test_audit_compare.py:45",
+      "tests/test_draw_schedule.py:109",
+      "tests/test_engine_calls.py:147",
+      "tests/test_engine_replay.py:182",
+      "tests/test_evaluation.py:41",
+      "tests/test_evaluation_lifecycle.py:164",
+      "tests/test_evaluation_lifecycle.py:326",
+      "tests/test_production_runtime_guards.py:90",
+      "tests/test_sound_counter.py:66",
+      "tests/test_sound_effects.py:319",
+      "tests/test_sound_effects.py:84"
+     ]
+    },
+    "files": [
+     "determinism/audit.cpp",
+     "determinism/foley_trace.cpp",
+     "docs/engine-replay.md",
+     "docs/particle-shake-determinism.md",
+     "docs/runtime-protocol.md",
+     "runtime/controller.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "src/llm_vs_zombies/engine_replay.py",
+     "src/llm_vs_zombies/evaluation.py",
+     "src/llm_vs_zombies/evaluation_support.py",
+     "tests/foley_trace_tests.cpp",
+     "tests/runtime_branch_scope_tests.cpp",
+     "tests/runtime_journal_tests.cpp",
+     "tests/runtime_tests.cpp",
+     "tests/test_audit_compare.py",
+     "tests/test_draw_schedule.py",
+     "tests/test_engine_calls.py",
+     "tests/test_engine_replay.py",
+     "tests/test_evaluation.py",
+     "tests/test_evaluation_lifecycle.py",
+     "tests/test_production_runtime_guards.py",
+     "tests/test_sound_counter.py",
+     "tests/test_sound_effects.py"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "recording_close_incomplete",
+   "definition": "runtime/controller.cpp:262",
+   "semantics": "关闭时落盘失败，无法声称成功封口（附 native_recording_closed/journal_sealed/restart_required）。",
+   "suggested": null,
+   "duplicates": "`dedup_storage_failed` / `recording_closed`",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:208"
+     ],
+     "code": [
+      "runtime/README.md:49",
+      "runtime/controller.cpp:262"
+     ],
+     "tests": [
+      "tests/runtime_journal_tests.cpp:133"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "runtime/README.md",
+     "runtime/controller.cpp",
+     "tests/runtime_journal_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "31b6c6f",
+    "date": "2026-09-19",
+    "subject": "Persist bounded request history and preserve emergency close",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #8 相关（有界去重）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "stale_observation",
+   "definition": "runtime/controller.cpp:472",
+   "semantics": "请求携带的版本三元组与当前边界不一致。",
+   "suggested": null,
+   "duplicates": "`not_in_fight` / `render_not_prepared`（前置条件家族）",
+   "references": {
+    "total": 12,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:472",
+      "runtime/controller.cpp:512"
+     ],
+     "tests": [
+      "tests/app_update_anchor.cpp:69",
+      "tests/mj_clock_anchor.cpp:87",
+      "tests/runtime_branch_scope_tests.cpp:118",
+      "tests/runtime_tests.cpp:156",
+      "tests/runtime_tests.cpp:180",
+      "tests/runtime_tests.cpp:209",
+      "tests/runtime_tests.cpp:71",
+      "tests/sound_counter_origin.cpp:98"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/app_update_anchor.cpp",
+     "tests/mj_clock_anchor.cpp",
+     "tests/runtime_branch_scope_tests.cpp",
+     "tests/runtime_tests.cpp",
+     "tests/sound_counter_origin.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "not_in_fight",
+   "definition": "runtime/controller.cpp:476",
+   "semantics": "当前不在进行中的对局（3 处：advance/commit/initialize 前置）。",
+   "suggested": null,
+   "duplicates": "`render_not_prepared`",
+   "references": {
+    "total": 11,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:476",
+      "runtime/controller.cpp:655",
+      "runtime/controller.cpp:690"
+     ],
+     "tests": [
+      "tests/runtime_engine_call_tests.cpp:73",
+      "tests/runtime_tests.cpp:121",
+      "tests/runtime_tests.cpp:149",
+      "tests/runtime_tests.cpp:194",
+      "tests/runtime_tests.cpp:85"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/runtime_engine_call_tests.cpp",
+     "tests/runtime_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（IPC 首版）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "initialization_rejected",
+   "definition": "runtime/controller.cpp:684",
+   "semantics": "初始化请求被原生侧拒绝（应援位/场景/守门条件）。",
+   "suggested": null,
+   "duplicates": "`initialization_sealed`",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:684"
+     ],
+     "tests": [
+      "tests/runtime_tests.cpp:123"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/runtime_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #4 相关（场景初始化）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "initialization_sealed",
+   "definition": "runtime/controller.cpp:653",
+   "semantics": "锚定/原点后初始化器已封口，不再接受改变初态的操作。",
+   "suggested": null,
+   "duplicates": "`initialization_rejected`",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:653"
+     ],
+     "tests": [
+      "tests/app_update_anchor.cpp:82",
+      "tests/mj_clock_anchor.cpp:103",
+      "tests/sound_counter_origin.cpp:112"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/app_update_anchor.cpp",
+     "tests/mj_clock_anchor.cpp",
+     "tests/sound_counter_origin.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a9e1c84",
+    "date": "2026-09-19",
+    "subject": "Add explicit prewarm App update anchor with complete receipts",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #14"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "no_game_tick",
+   "definition": "runtime/controller.cpp:238",
+   "semantics": "原生更新执行 0 tick；同时用作 error.code 与 stop_reason。",
+   "suggested": "保持码名但必须消歧：建议错误侧 `advance_no_progress`、停止侧保留 `no_game_tick`",
+   "duplicates": "`step_count_mismatch`；同一字符串双语义位",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:237",
+      "runtime/controller.cpp:282"
+     ],
+     "tests": [
+      "tests/runtime_render_tests.cpp:68",
+      "tests/runtime_tests.cpp:80"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/runtime_render_tests.cpp",
+     "tests/runtime_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控推进边界）；#10 起成为绘制门禁"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "step_count_mismatch",
+   "definition": "runtime/controller.cpp:238",
+   "semantics": "原生更新执行多 tick（≠1）；同时用作 error.code 与 stop_reason。",
+   "suggested": "同样建议拆成错误码与停止原因两个名字",
+   "duplicates": "`no_game_tick`",
+   "references": {
+    "total": 3,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:237",
+      "runtime/controller.cpp:282"
+     ],
+     "tests": [
+      "tests/runtime_tests.cpp:82"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/runtime_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控推进边界）；#10 起成为绘制门禁"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "audit_failed",
+   "definition": "runtime/controller.cpp:92",
+   "semantics": "原生审计/守卫故障的兜底失败（冻结后续推进，2 处）。",
+   "suggested": null,
+   "duplicates": "`render_failed` / `dedup_storage_failed`（故障兜底家族，粒度不一）",
+   "references": {
+    "total": 15,
+    "by_kind": {
+     "docs": [
+      "docs/determinism-reanimation.md:73",
+      "docs/headless-validation.md:220"
+     ],
+     "code": [
+      "runtime/controller.cpp:31",
+      "runtime/controller.cpp:458",
+      "runtime/controller.cpp:92"
+     ],
+     "tests": [
+      "tests/fp_environment_tests.cpp:102",
+      "tests/runtime_engine_call_tests.cpp:157",
+      "tests/runtime_render_tests.cpp:62",
+      "tests/runtime_render_tests.cpp:83",
+      "tests/runtime_render_tests.cpp:85",
+      "tests/runtime_tests.cpp:252",
+      "tests/runtime_tests.cpp:253",
+      "tests/runtime_tests.cpp:256"
+     ]
+    },
+    "files": [
+     "docs/determinism-reanimation.md",
+     "docs/headless-validation.md",
+     "runtime/controller.cpp",
+     "tests/fp_environment_tests.cpp",
+     "tests/runtime_engine_call_tests.cpp",
+     "tests/runtime_render_tests.cpp",
+     "tests/runtime_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "12afc28",
+    "date": "2026-09-19",
+    "subject": "Audit semantic animation links, seal full evidence and freeze on audit faults",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #3 相关（逐帧审计）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "branch_scope_mismatch",
+   "definition": "runtime/controller.cpp:334",
+   "semantics": "请求声明的分支不是本实例的作用域（或向无作用域 runtime 声明作用域）。",
+   "suggested": null,
+   "duplicates": "`branch_rebind_rejected`",
+   "references": {
+    "total": 11,
+    "by_kind": {
+     "docs": [
+      "docs/client.md:70",
+      "docs/runtime-protocol.md:111",
+      "docs/分支作用域隔离.md:29",
+      "docs/分支作用域隔离.md:39",
+      "docs/分支作用域隔离.md:62"
+     ],
+     "code": [
+      "runtime/README.md:36",
+      "runtime/controller.cpp:334"
+     ],
+     "tests": [
+      "tests/runtime_branch_scope_tests.cpp:163",
+      "tests/runtime_branch_scope_tests.cpp:183",
+      "tests/runtime_branch_scope_tests.cpp:95"
+     ]
+    },
+    "files": [
+     "docs/client.md",
+     "docs/runtime-protocol.md",
+     "docs/分支作用域隔离.md",
+     "runtime/README.md",
+     "runtime/controller.cpp",
+     "tests/runtime_branch_scope_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "f22508f",
+    "date": "2026-09-22",
+    "subject": "feat(runtime): branch-scoped dedup and version namespace (#49)",
+    "pr": "#49",
+    "pr_all": [
+     "#49"
+    ],
+    "note": "issue #32"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "branch_rebind_rejected",
+   "definition": "runtime/controller.cpp:399",
+   "semantics": "from_branch_id 与本实例当前作用域不符，拒绝改标历史。",
+   "suggested": null,
+   "duplicates": "`branch_scope_mismatch`",
+   "references": {
+    "total": 6,
+    "by_kind": {
+     "docs": [
+      "docs/client.md:70",
+      "docs/runtime-protocol.md:129",
+      "docs/分支作用域隔离.md:41"
+     ],
+     "code": [
+      "runtime/controller.cpp:399"
+     ],
+     "tests": [
+      "tests/runtime_branch_scope_tests.cpp:103"
+     ]
+    },
+    "files": [
+     "docs/client.md",
+     "docs/runtime-protocol.md",
+     "docs/分支作用域隔离.md",
+     "runtime/controller.cpp",
+     "tests/runtime_branch_scope_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "f22508f",
+    "date": "2026-09-22",
+    "subject": "feat(runtime): branch-scoped dedup and version namespace (#49)",
+    "pr": "#49",
+    "pr_all": [
+     "#49"
+    ],
+    "note": "issue #32"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "render_not_prepared",
+   "definition": "runtime/controller.cpp:692",
+   "semantics": "未完成 prepare_render 就想 advance/commit。",
+   "suggested": null,
+   "duplicates": "`render_prepare_rejected`",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:29"
+     ],
+     "code": [
+      "runtime/controller.cpp:692"
+     ],
+     "tests": [
+      "tests/runtime_render_tests.cpp:43"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "runtime/controller.cpp",
+     "tests/runtime_render_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "df59211",
+    "date": "2026-09-19",
+    "subject": "Control original engine drawing at verified simulation boundaries",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #10"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "render_prepare_rejected",
+   "definition": "runtime/controller.cpp:633",
+   "semantics": "prepare_render 前置不满足（非 tick0/已 warm/非暂停/无种子等，4 处）。",
+   "suggested": null,
+   "duplicates": "`render_not_prepared` / `initialization_sealed`",
+   "references": {
+    "total": 10,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:633",
+      "runtime/controller.cpp:634",
+      "runtime/controller.cpp:635",
+      "runtime/controller.cpp:636"
+     ],
+     "tests": [
+      "tests/mj_clock_anchor.cpp:79",
+      "tests/runtime_render_tests.cpp:48"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/mj_clock_anchor.cpp",
+     "tests/runtime_render_tests.cpp"
+    ]
+   },
+   "source": {
+    "commit": "df59211",
+    "date": "2026-09-19",
+    "subject": "Control original engine drawing at verified simulation boundaries",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #10"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "render_failed",
+   "definition": "runtime/controller.cpp:644",
+   "semantics": "受控绘制失败（同时作为 audit 事件名 render_failed）。",
+   "suggested": null,
+   "duplicates": "同一字符串既作 error.code 又作 audit event（runtime/controller.cpp:207/643）",
+   "references": {
+    "total": 8,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:198"
+     ],
+     "code": [
+      "runtime/controller.cpp:207",
+      "runtime/controller.cpp:643",
+      "runtime/controller.cpp:644",
+      "src/llm_vs_zombies/audit_compare.py:1761"
+     ],
+     "tests": [
+      "tests/runtime_render_tests.cpp:63",
+      "tests/test_initialization.py:99"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "runtime/controller.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "tests/runtime_render_tests.cpp",
+     "tests/test_initialization.py"
+    ]
+   },
+   "source": {
+    "commit": "df59211",
+    "date": "2026-09-19",
+    "subject": "Control original engine drawing at verified simulation boundaries",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #10"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "capture_failed",
+   "definition": "runtime/controller.cpp:500",
+   "semantics": "原生帧捕获失败。",
+   "suggested": null,
+   "duplicates": "`capture_frame_too_large`",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:500"
+     ],
+     "tests": [
+      "tests/runtime_tests.cpp:232",
+      "tests/test_engine_replay.py:201"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/runtime_tests.cpp",
+     "tests/test_engine_replay.py"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #5 相关（捕获）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "capture_frame_too_large",
+   "definition": "runtime/controller.cpp:496",
+   "semantics": "捕获帧超过上限。",
+   "suggested": null,
+   "duplicates": "`response_too_large`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:496"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #5 相关（捕获）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "app_update_anchor_rejected",
+   "definition": "runtime/controller.cpp:571",
+   "semantics": "App 锚定前置不满足（相位/顺序/一次性）。",
+   "suggested": null,
+   "duplicates": "`app_update_anchor_failed`；`mj_clock_anchor_rejected` / `sound_counter_origin_rejected`（同族）",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:571",
+      "runtime/controller.cpp:583"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a9e1c84",
+    "date": "2026-09-19",
+    "subject": "Add explicit prewarm App update anchor with complete receipts",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #14"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "app_update_anchor_failed",
+   "definition": "runtime/controller.cpp:580",
+   "semantics": "App 锚定执行失败且已回滚可见部分。",
+   "suggested": null,
+   "duplicates": "`app_update_anchor_rejected`；同一字符串也是 audit 事件 kind",
+   "references": {
+    "total": 13,
+    "by_kind": {
+     "code": [
+      "determinism/audit.cpp:494",
+      "runtime/controller.cpp:579",
+      "runtime/controller.cpp:580",
+      "runtime/controller.cpp:589",
+      "runtime/controller.cpp:590",
+      "src/llm_vs_zombies/app_update_anchor.py:164",
+      "src/llm_vs_zombies/audit_compare.py:1761"
+     ],
+     "docs": [
+      "docs/app-update-anchor-native.md:63"
+     ],
+     "tests": [
+      "tests/app_update_anchor.cpp:94",
+      "tests/app_update_anchor.cpp:96",
+      "tests/test_app_update_anchor.py:77"
+     ]
+    },
+    "files": [
+     "determinism/audit.cpp",
+     "docs/app-update-anchor-native.md",
+     "runtime/controller.cpp",
+     "src/llm_vs_zombies/app_update_anchor.py",
+     "src/llm_vs_zombies/audit_compare.py",
+     "tests/app_update_anchor.cpp",
+     "tests/test_app_update_anchor.py"
+    ]
+   },
+   "source": {
+    "commit": "a9e1c84",
+    "date": "2026-09-19",
+    "subject": "Add explicit prewarm App update anchor with complete receipts",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #14"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "mj_clock_anchor_rejected",
+   "definition": "runtime/controller.cpp:607",
+   "semantics": "MJ 时钟锚定前置不满足（未先做 App anchor、跨 epoch 等）。",
+   "suggested": null,
+   "duplicates": "`mj_clock_anchor_failed` / `app_update_anchor_rejected`",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:607",
+      "runtime/controller.cpp:619"
+     ],
+     "tests": [
+      "tests/mj_clock_anchor.cpp:77"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp",
+     "tests/mj_clock_anchor.cpp"
+    ]
+   },
+   "source": {
+    "commit": "dd06f16",
+    "date": "2026-09-23",
+    "subject": "feat(determinism): fixed-target B(0) anchor for LawnApp+0x838 (#62)",
+    "pr": "#62",
+    "pr_all": [
+     "#62"
+    ],
+    "note": "issue #62"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "mj_clock_anchor_failed",
+   "definition": "runtime/controller.cpp:616",
+   "semantics": "MJ 时钟锚定写入失败或状态不符。",
+   "suggested": null,
+   "duplicates": "`mj_clock_anchor_rejected`；同一字符串也是 audit 事件 kind",
+   "references": {
+    "total": 13,
+    "by_kind": {
+     "code": [
+      "determinism/audit.cpp:495",
+      "runtime/controller.cpp:615",
+      "runtime/controller.cpp:616",
+      "runtime/controller.cpp:625",
+      "runtime/controller.cpp:626",
+      "src/llm_vs_zombies/app_update_anchor.py:164",
+      "src/llm_vs_zombies/audit_compare.py:1761",
+      "src/llm_vs_zombies/mj_clock_anchor.py:18"
+     ],
+     "docs": [
+      "docs/mj-clock-anchor-native.md:132"
+     ],
+     "tests": [
+      "tests/mj_clock_anchor.cpp:119",
+      "tests/mj_clock_anchor.cpp:121"
+     ]
+    },
+    "files": [
+     "determinism/audit.cpp",
+     "docs/mj-clock-anchor-native.md",
+     "runtime/controller.cpp",
+     "src/llm_vs_zombies/app_update_anchor.py",
+     "src/llm_vs_zombies/audit_compare.py",
+     "src/llm_vs_zombies/mj_clock_anchor.py",
+     "tests/mj_clock_anchor.cpp"
+    ]
+   },
+   "source": {
+    "commit": "dd06f16",
+    "date": "2026-09-23",
+    "subject": "feat(determinism): fixed-target B(0) anchor for LawnApp+0x838 (#62)",
+    "pr": "#62",
+    "pr_all": [
+     "#62"
+    ],
+    "note": "issue #62"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "sound_counter_origin_rejected",
+   "definition": "runtime/controller.cpp:539",
+   "semantics": "计数原点绑定前置不满足（相位/已绑定/未 seed）。",
+   "suggested": null,
+   "duplicates": "`sound_counter_origin_failed` / `app_update_anchor_rejected`",
+   "references": {
+    "total": 4,
+    "by_kind": {
+     "code": [
+      "runtime/controller.cpp:539",
+      "runtime/controller.cpp:549"
+     ]
+    },
+    "files": [
+     "runtime/controller.cpp"
+    ]
+   },
+   "source": {
+    "commit": "90f74b3",
+    "date": "2026-09-19",
+    "subject": "Bind experiment audio counters to a verified native origin",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #15"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "sound_counter_origin_failed",
+   "definition": "runtime/controller.cpp:546",
+   "semantics": "计数原点绑定失败并已闩锁。",
+   "suggested": null,
+   "duplicates": "`sound_counter_origin_rejected`；同一字符串也是 audit 事件 kind",
+   "references": {
+    "total": 11,
+    "by_kind": {
+     "code": [
+      "determinism/audit.cpp:496",
+      "runtime/controller.cpp:545",
+      "runtime/controller.cpp:546",
+      "runtime/controller.cpp:555",
+      "runtime/controller.cpp:556",
+      "src/llm_vs_zombies/audit_compare.py:1761",
+      "src/llm_vs_zombies/sound_counter.py:135"
+     ],
+     "tests": [
+      "tests/sound_counter_origin.cpp:136",
+      "tests/test_sound_counter.py:108"
+     ]
+    },
+    "files": [
+     "determinism/audit.cpp",
+     "runtime/controller.cpp",
+     "src/llm_vs_zombies/audit_compare.py",
+     "src/llm_vs_zombies/sound_counter.py",
+     "tests/sound_counter_origin.cpp",
+     "tests/test_sound_counter.py"
+    ]
+   },
+   "source": {
+    "commit": "90f74b3",
+    "date": "2026-09-19",
+    "subject": "Bind experiment audio counters to a verified native origin",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #15"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "card_not_selected",
+   "definition": "runtime/runtime.cpp:158",
+   "semantics": "目标卡槽没有选卡（避免走到 AvZ 错误弹窗路径）。",
+   "suggested": null,
+   "duplicates": "`card_not_usable` / `plant_rejected`（动作前置家族）",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:158"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "card_not_usable",
+   "definition": "runtime/runtime.cpp:159",
+   "semantics": "卡槽存在但当前不可用（冷却/阳光等）。",
+   "suggested": null,
+   "duplicates": "`card_not_selected`",
+   "references": {
+    "total": 6,
+    "by_kind": {
+     "docs": [
+      "docs/巨人分叉对照报告.md:11",
+      "docs/巨人分叉对照报告.md:152",
+      "docs/巨人分叉对照报告.md:95",
+      "docs/巨人分叉对照报告.md:97"
+     ],
+     "code": [
+      "runtime/runtime.cpp:159"
+     ]
+    },
+    "files": [
+     "docs/巨人分叉对照报告.md",
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "plant_rejected",
+   "definition": "runtime/runtime.cpp:161",
+   "semantics": "引擎的 GetPlantRejectType 判定该格不可种植。",
+   "suggested": null,
+   "duplicates": "`no_plant`（反向：铲除时格上无植物）",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:161"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "no_plant",
+   "definition": "runtime/runtime.cpp:170",
+   "semantics": "铲除目标格没有匹配的存活植物。",
+   "suggested": null,
+   "duplicates": "`plant_rejected`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:170"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "plant_failed",
+   "definition": "runtime/runtime.cpp:163",
+   "semantics": "植物创建返回空。",
+   "suggested": null,
+   "duplicates": "`shovel_failed` / `spawn_failed`（*_failed 动作三连）",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:163"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "shovel_failed",
+   "definition": "runtime/runtime.cpp:171",
+   "semantics": "铲除原语返回失败。",
+   "suggested": null,
+   "duplicates": "`plant_failed` / `spawn_failed`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:171"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "a29502c",
+    "date": "2026-09-18",
+    "subject": "Add hidden engine launcher, resident frame control, spawn audit and native capture",
+    "pr": null,
+    "pr_all": [],
+    "note": "issue #1 相关（受控动作）"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "spawn_row_unavailable",
+   "definition": "runtime/runtime.cpp:184",
+   "semantics": "目标行不能被引擎填充（越界或泥地行，例如普通关第 6 行）。",
+   "suggested": null,
+   "duplicates": "`zombie_pool_full`（同为 spawn 的原生约束拒绝）",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:64"
+     ],
+     "code": [
+      "runtime/runtime.cpp:184"
+     ],
+     "tests": [
+      "tests/test_client.py:391",
+      "tests/test_client.py:399"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "runtime/runtime.cpp",
+     "tests/test_client.py"
+    ]
+   },
+   "source": {
+    "commit": "3c158ba",
+    "date": "2026-09-23",
+    "subject": "feat(runtime): spawn action op mapped to AvZ PutZombie (#51) (#52)",
+    "pr": "#52",
+    "pr_all": [
+     "#51",
+     "#52"
+    ],
+    "note": "issue #51"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "zombie_pool_full",
+   "definition": "runtime/runtime.cpp:188",
+   "semantics": "僵尸池容不下本次出生（含引擎保留槽与雪橇队三只），拒绝以免空指针崩溃。",
+   "suggested": null,
+   "duplicates": "`spawn_row_unavailable`",
+   "references": {
+    "total": 5,
+    "by_kind": {
+     "docs": [
+      "docs/runtime-protocol.md:66",
+      "docs/runtime-protocol.md:69"
+     ],
+     "code": [
+      "logger/avz/recorder.cpp:193",
+      "runtime/runtime.cpp:188"
+     ]
+    },
+    "files": [
+     "docs/runtime-protocol.md",
+     "logger/avz/recorder.cpp",
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "3c158ba",
+    "date": "2026-09-23",
+    "subject": "feat(runtime): spawn action op mapped to AvZ PutZombie (#51) (#52)",
+    "pr": "#52",
+    "pr_all": [
+     "#51",
+     "#52"
+    ],
+    "note": "issue #51"
+   }
+  },
+  {
+   "class": "error-code",
+   "name": "spawn_failed",
+   "definition": "runtime/runtime.cpp:192",
+   "semantics": "出生原语返回空。",
+   "suggested": null,
+   "duplicates": "`plant_failed` / `shovel_failed`",
+   "references": {
+    "total": 2,
+    "by_kind": {
+     "code": [
+      "runtime/runtime.cpp:192"
+     ]
+    },
+    "files": [
+     "runtime/runtime.cpp"
+    ]
+   },
+   "source": {
+    "commit": "3c158ba",
+    "date": "2026-09-23",
+    "subject": "feat(runtime): spawn action op mapped to AvZ PutZombie (#51) (#52)",
+    "pr": "#52",
+    "pr_all": [
+     "#51",
+     "#52"
+    ],
+    "note": "issue #51"
+   }
+  }
+ ]
+}
