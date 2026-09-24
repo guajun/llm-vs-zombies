@@ -80,7 +80,7 @@ Stop 校验 PID、进程创建时间与完整引擎路径，仅终止本 run 创
 
 ## 验收层次
 
-Python 测试覆盖固定输入拒绝、全新目录限制、合成用户档结构、原目录保持不变、实际场景与卡序检查。`launcher/isolation_fixture.cpp` 是不依赖游戏的原生验证程序：经过同一路径启动后，输出私有 appdata、隔离注册表访问结果、窗口隐藏和前台窗口未变化证据。它用于先验证 `CREATE_SUSPENDED + LoadLibrary` 与 bootstrap 顺序。
+Python 测试覆盖固定输入拒绝、全新目录限制、合成用户档结构、原目录保持不变、实际场景与卡序检查。`launcher/isolation_fixture.cpp` 是不依赖游戏的原生验证程序：经过同一路径启动后，输出私有 appdata、隔离注册表访问结果、窗口隐藏、前台窗口未变化证据，以及子进程实际继承的 `LVZ_BRANCH_ID`（`tools/ci.ps1` 会与 `launch` 收到的 id 逐字比对，见 §分支身份）。它用于先验证 `CREATE_SUSPENDED + LoadLibrary` 与 bootstrap 顺序。
 
 实机进一步需要核实原用户档/配置前后不变、隐藏/失焦不阻塞 IPC 与单步、两仪存档实际加载与卡序、重复冷启动初态以及完整两旗。仅有启动成功、私有路径或文件哈希一致，均不证明确定性；完整状态/随机状态的比对归入确定性与 engine replay 验收。
 

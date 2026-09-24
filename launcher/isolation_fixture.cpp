@@ -22,6 +22,11 @@ int main() {
     }
     status=RegOpenKeyExA(HKEY_CURRENT_USER,"Software\\PopCap\\PlantsVsZombies",0,KEY_READ,&key);
     fprintf(result,"open_key=%ld\n",status);okay=okay&&status==ERROR_SUCCESS;if(!status) RegCloseKey(key);
+    // #96: the launcher validates the branch id and sets LVZ_BRANCH_ID before
+    // CreateProcessW, so this child must already see it. Printed as evidence;
+    // the caller compares it with the id it passed to `launch`.
+    char branch[MAX_PATH]={};
+    fprintf(result,"branch_id=%s\n",GetEnvironmentVariableA("LVZ_BRANCH_ID",branch,MAX_PATH)?branch:"(unset)");
     HWND before=GetForegroundWindow();
     auto window=CreateWindowExA(0,"STATIC","LVZ isolation fixture",WS_OVERLAPPEDWINDOW|WS_VISIBLE,0,0,800,600,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     ShowWindow(window,SW_SHOW);SetForegroundWindow(window);SetFocus(window);
