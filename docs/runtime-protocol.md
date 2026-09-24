@@ -135,6 +135,10 @@ and revision; without a scope it could answer with a result it never executed.
   the runtime derives a process-instance label (session directory plus PID), so
   two live processes never share a scope by accident. `LVZ_BRANCH_PARENT_ID`
   records the scope a clone was taken from.
+- The public launcher sets `LVZ_BRANCH_ID` before the engine's primary thread
+  resumes: the default is the run directory name, the pre-resume native receipt
+  records the injected id, and the launcher refuses a run whose `hello.branch`
+  names a different scope (see `docs/launcher.md` §分支身份).
 - Nothing about the branch enters comparable state: the native audit manifest,
   state digests, draw receipts and `engine_call` evidence stay unchanged, so old
   and new recordings remain comparable. The scope is recorded in `hello` (and

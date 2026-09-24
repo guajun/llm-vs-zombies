@@ -51,11 +51,27 @@ Stop 校验 PID、进程创建时间与完整引擎路径，仅终止本 run 创
 
 隐藏窗口的实际进场使用已核验签名的 `LoadingCompleted` 与 `ContinueDialog::ButtonDepress` 内部入口。后者传入正确的 ButtonListener 子对象，完成继续存档操作。bootstrap 将本进程 `GetActiveWindow` 查询映射到它自己的隐藏 HWND，让游戏内部控件接受 IPC 动作；不会改变系统实际活动窗口、前台窗口或发送 OS 输入。初始化 seed 默认为 0，可通过 Python `start(..., seed=...)` 或 launcher CLI `--seed` 指定，先在游戏线程播种，再创建场景。
 
+## 分支身份（`LVZ_BRANCH_ID`）
+
+运行时的分支作用域（[分支作用域隔离](分支作用域隔离.md)，issue #32）与证据树的 `branch_id`（[evidence_tree.py](../src/llm_vs_zombies/evidence_tree.py)）必须是**同一个字符串**，否则去重域与证据归档会指向两个不同名字。启动器是这条链的唯一入口：
+
+| 阶段 | 值 / 落点 |
+|---|---|
+| 决定（`prepare`） | 缺省 = **run 目录名**；显式 `--branch-id` / `start(..., branch_id=...)` 可覆盖。两者都按 `[A-Za-z0-9][A-Za-z0-9._:-]{0,63}` 校验，非法或超长**在创建任何进程之前**就以明确错误失败 |
+| 记录 | `launcher.json` 的 `branch_id`、`branch_source`（`run-directory-name` / `explicit`）、`branch_channel`（`LVZ_BRANCH_ID`） |
+| 注入 | 原生启动器 `launch ENGINE BOOTSTRAP SANDBOX CWD RECEIPT BRANCH [AUDIO_MODE]`：先校验，再 `SetEnvironmentVariableW(L"LVZ_BRANCH_ID")`，然后才 `CreateProcessW`，所以子进程只可能继承合法的 id |
+| 封口 | `sandbox/native-receipt.json` 在主线程恢复**之前**写入 `branch_id`，即使启动客户端中途中断，也有"引擎实际继承了什么"的证据 |
+| 生效 | runtime 读 `LVZ_BRANCH_ID` 成为本实例 scope；`hello.branch` / `status.branch` 回报 `{schema, mode, branch_id, parent_branch_id, origin, dedup_key}` |
+| 复核 | `start()` 逐项核对三处一致：原生回执、`hello.branch.branch_id`、本 run 声明的 id。任一处不符立即停止自有进程并保留失败档，不静默降级 |
+| 再记录 | run manifest 的 `branch`（仅当 runtime 声明 scope 时）、轨迹初始 marker 与重放报告的 `branch_scope` |
+
+兼容性：`LVZ_BRANCH_ID` 未设置时 runtime 仍回退到"会话目录名 + PID"的进程实例标签（旧行为保持不变）；本通道引入之前写下的 `launcher.json`（没有 `branch_id`/`branch_channel`）不参与注入与复核，历史档照旧可读、可校验、可重放。按 R7，分支只进入 `hello`/`status`/manifest/轨迹 marker/重放报告，**不进入**原生审计 manifest、状态摘要、draw/engine_call 证据，因此新旧记录仍可直接比较。原 `run` 名只允许字母/数字/`-`/`_`（[cli.py](../src/llm_vs_zombies/cli.py)），天然落在该语法内；目录名不可用时启动器会要求显式 `--branch-id`，而不是改名。
+
 ## 诊断材料
 
-- `launcher.json`：输入/模块/资源/合成档案哈希，进程身份，阶段与错误，初始观察。
+- `launcher.json`：输入/模块/资源/合成档案哈希，进程身份，分支身份（`branch_id`/`branch_source`/`branch_channel`/`runtime_branch`），阶段与错误，初始观察。
 - `sandbox/bootstrap.log`：实际安装的 hook、重定向路径、隔离 ready、隐藏窗口和消息框错误。
-- `sandbox/native-receipt.json`：主线程恢复前已成功安装隔离的进程凭据。即使启动客户端在取得返回值前中断，Stop 也能从此恢复 PID/创建时间并再次核验身份。
+- `sandbox/native-receipt.json`：主线程恢复前已成功安装隔离的进程凭据（含实际注入的 `branch_id`）。即使启动客户端在取得返回值前中断，Stop 也能从此恢复 PID/创建时间并再次核验身份。
 - `sandbox/modules/runtime-diagnostics.log`：runtime 自身诊断（若 runtime 生成）。
 - `decisions/launcher.jsonl`：启动与初始化 IPC 的客户端审计。
 - `observations/initial.json`：初始化实际返回的观察。

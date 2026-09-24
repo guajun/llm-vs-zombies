@@ -102,6 +102,32 @@ def scenario_spec(name: str = "liangyi") -> Scenario:
 
 
 REQUIRED_INPUTS = scenario_spec("liangyi").inputs()
+BRANCH_CHANNEL = "LVZ_BRANCH_ID"
+
+
+def branch_identity(run: Path, requested: str | None = None) -> dict:
+    """The single branch name this run's runtime and its evidence tree must share.
+
+    The default is the run directory name, because that name is what a tree
+    node is packaged and referenced as; deriving both from one string is what
+    keeps "the branch the engine executed" and "the branch the evidence is
+    filed under" from drifting apart. ``requested`` overrides it for explicit
+    counterfactual branches and is validated with the same grammar as the
+    protocol (``client.branch_scope_id``) and the evidence tree
+    (``evidence_tree.branch_id``). An unusable value fails here, before any
+    process exists: the runtime's own fallback is a process-instance label
+    that no tree can be named after.
+    """
+    from .client import branch_scope_id
+    value, source = (Path(run).name, "run-directory-name") if requested is None else (requested, "explicit")
+    if not isinstance(value, str):
+        raise ValueError("branch id must be a string")
+    try:
+        value = branch_scope_id(value)
+    except ValueError as error:
+        hint = "" if requested is not None else "; rename the run or pass --branch-id"
+        raise ValueError(f"{source} branch id cannot identify this run: {error}{hint}") from error
+    return {"branch_id": value, "branch_source": source}
 
 
 def verify_inputs(root: Path, scenario: str = "liangyi") -> dict[str, str]:
@@ -139,12 +165,14 @@ def synthetic_profile() -> dict[str, bytes]:
     return {"users.dat": users, "user1.dat": struct.pack("<205I", *values)}
 
 
-def prepare(root: Path, run: Path, *, audio_mode: str = "original", scenario: str = "liangyi") -> dict:
+def prepare(root: Path, run: Path, *, audio_mode: str = "original", scenario: str = "liangyi",
+            branch_id: str | None = None) -> dict:
     audio_mode = sound_effects.configured(audio_mode)
     spec = scenario_spec(scenario)
     root, run = root.resolve(), run.resolve()
     if not run.is_relative_to(root / "experiments/runs"):
         raise ValueError("experiment run must be under this project's experiments/runs")
+    identity = branch_identity(run, branch_id)
     manifest = read_json(run / "manifest.json")
     if manifest["status"] != "recording" or (run / "events.jsonl").exists():
         raise ValueError("launcher requires a fresh recording run")
@@ -204,6 +232,7 @@ def prepare(root: Path, run: Path, *, audio_mode: str = "original", scenario: st
              "native_launcher": str(module / "lvz-launcher.exe"), "bootstrap": str(module / "lvz-bootstrap.dll"),
              "runtime": str(module / "recorder.dll"), "headless_mode": "hidden_window",
              "status": "prepared", "audio_mode": audio_mode, "scenario": spec.name, "input_hashes": inputs,
+             **identity, "branch_channel": BRANCH_CHANNEL,
              "module_hashes": {p.name: sha256(p) for p in module.iterdir() if p.suffix in (".dll", ".exe")},
              "profile_hashes": {name: hashlib.sha256(content).hexdigest() for name, content in profiles.items()},
              "resource_hashes": {p.relative_to(game).as_posix(): sha256(p) for p in game.rglob("*") if p.is_file()},
@@ -242,7 +271,7 @@ def stop(run: Path) -> dict:
 def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90.0, seed: int = 0,
           defer_preparation: bool = False, audio_mode: str = "original", mj_clock: int | None = None,
           app_update_count: int | None = None, b0_normalize: list | None = None,
-          scenario: str = "liangyi") -> dict:
+          scenario: str = "liangyi", branch_id: str | None = None) -> dict:
     from .client import connect
     from .session import SessionTrace
     from . import b0_normalization as b0
@@ -265,7 +294,10 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
     # the same evidence to different paths.
     root, run = Path(root).resolve(), Path(run).resolve()
     audio_mode = sound_effects.configured(audio_mode)
-    state = prepare(root, run, audio_mode=audio_mode, scenario=spec.name)
+    # One identity for this run: the runtime scope injected into the engine and
+    # the branch name used for its evidence tree come from the same string.
+    identity = branch_identity(run, branch_id)
+    state = prepare(root, run, audio_mode=audio_mode, scenario=spec.name, branch_id=branch_id)
     state["audio_mode"] = audio_mode
     state["initialization_seed"] = seed
     state["preparation_deferred"] = defer_preparation
@@ -273,14 +305,23 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
     try:
         receipt = _native(state, "launch", state["engine"], state["bootstrap"], state["sandbox"],
                           str(sandbox / "game"), str(sandbox / "native-receipt.json"),
+                          state.get("branch_id", identity["branch_id"]),
                           *([audio_mode] if audio_mode != "original" else []))
+        # The receipt is written before the primary thread resumes, so it is the
+        # earliest proof of which scope the engine actually inherited. Compare it
+        # before merging: the receipt must never be able to re-label this run.
+        if state.get("branch_channel") == BRANCH_CHANNEL and receipt.get("branch_id") != state["branch_id"]:
+            raise ValueError("native launcher receipt does not confirm the injected branch id; "
+                             "the runtime would start in an unknown scope")
         state.update(receipt, status="started")
+        state["branch_id"], state["branch_source"] = identity["branch_id"], identity["branch_source"]
         write_json(run / "launcher.json", state)
         _native(state, "inject", state["pid"], state["engine"], state["creation_time"], state["runtime"])
         state["endpoint"] = f"\\\\.\\pipe\\llm-vs-zombies-{state['pid']}"
         write_json(run / "launcher.json", state)
         with SessionTrace(run / "decisions/launcher.jsonl") as trace, connect(pid=state["pid"], trace=trace, timeout=timeout) as client:
             state["hello"] = client.hello_result
+            state["runtime_branch"] = verify_branch_scope(state, client.hello_result)
             verify_audio_activation(state, client.hello_result)
             fp_mode = fp_environment.negotiate(client.hello_result)
             observation = client.observe()
@@ -356,6 +397,34 @@ def start(root: Path, run: Path, *, initialize: bool = True, timeout: float = 90
         raise
 
 
+def verify_branch_scope(state: dict, hello: dict) -> dict | None:
+    """The resident runtime must own exactly the branch this run declares.
+
+    Returns the runtime's own ``hello.branch`` block so it can be recorded next
+    to the requested id. A runtime that declares nothing, or declares a
+    different id, fails the launch: the process would then deduplicate requests
+    in a namespace that no evidence tree is named after, which is the
+    confusion the branch-scope contract forbids.
+
+    The check is bound to the prepared launcher state: ``prepare`` records
+    ``branch_channel`` and ``branch_id`` together, and a state without the
+    channel (a fixture, or a state dict written before this channel existed) is
+    left exactly on its previous behavior.
+    """
+    from .client import declared_branch_scope
+    if state.get("branch_channel") != BRANCH_CHANNEL:
+        return None
+    expected = state.get("branch_id")
+    if expected is None:
+        raise ValueError(f"{BRANCH_CHANNEL} state is missing its branch_id")
+    declared = declared_branch_scope(hello)
+    if declared is None:
+        raise ValueError(f"runtime declared no branch scope although {BRANCH_CHANNEL} was injected")
+    if declared["mode"] != "branch" or declared["branch_id"] != expected:
+        raise ValueError(f"runtime branch scope {declared['branch_id']!r} differs from this run's branch {expected!r}")
+    return declared
+
+
 def verify_audio_activation(state: dict, hello: dict) -> None:
     """Bind requested mode to the suspended-launch receipt and resident code."""
     actual = sound_effects.negotiate(hello, expected=state["audio_mode"])
@@ -403,6 +472,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-initialize", action="store_true")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--branch-id", default=None,
+                        help="Branch scope for the launched runtime; default is the run directory "
+                             "name, so the runtime identity and the evidence tree branch agree")
     parser.add_argument("--scenario", default="liangyi",
                         help="Reference scenario from the launcher registry (liangyi, jingdian12); "
                              "an unknown name is rejected before any process starts")
@@ -423,13 +495,13 @@ def main(argv: list[str] | None = None) -> int:
             result = stop(arguments.run.resolve())
         elif arguments.command == "prepare":
             result = prepare(arguments.root, arguments.run, audio_mode=arguments.audio_mode,
-                             scenario=arguments.scenario)
+                             scenario=arguments.scenario, branch_id=arguments.branch_id)
         else:
             result = start(arguments.root, arguments.run, initialize=not arguments.no_initialize,
                            timeout=arguments.timeout, seed=arguments.seed, defer_preparation=arguments.defer_preparation,
                            audio_mode=arguments.audio_mode, mj_clock=arguments.mj_clock,
                            app_update_count=arguments.app_update_count,
-                           scenario=arguments.scenario,
+                           scenario=arguments.scenario, branch_id=arguments.branch_id,
                            b0_normalize=[json.loads(item) for item in (arguments.b0_normalize or [])])
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

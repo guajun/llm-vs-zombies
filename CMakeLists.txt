@@ -92,6 +92,13 @@ target_include_directories(runtime_branch_scope_tests PRIVATE runtime runtime/ve
 target_link_options(runtime_branch_scope_tests PRIVATE -static)
 set_target_properties(runtime_branch_scope_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
 add_test(NAME runtime_branch_scope COMMAND runtime_branch_scope_tests)
+# The launcher-side branch identity grammar, pinned to the same rule the
+# runtime (RequestJournal::ValidBranch) and the evidence tree use.
+add_executable(branch_id_tests tests/branch_id_tests.cpp)
+target_include_directories(branch_id_tests PRIVATE ${CMAKE_SOURCE_DIR} runtime/vendor)
+target_link_options(branch_id_tests PRIVATE -static)
+set_target_properties(branch_id_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+add_test(NAME launcher_branch_id COMMAND branch_id_tests)
 add_executable(determinism_model tests/determinism_model.cpp)
 target_include_directories(determinism_model PRIVATE ${CMAKE_SOURCE_DIR} runtime/vendor)
 target_link_options(determinism_model PRIVATE -static)
