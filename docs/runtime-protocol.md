@@ -87,6 +87,51 @@ advertises the op.
   identical content replay the stored result instead of creating a second
   zombie; reusing the ID with different content fails.
 
+## Controlled shovel action (issue #99)
+
+`{op:"shovel_hold_cancel"}` 是**拿起铲子再放回**的受控实验动作：一次左键点十卡槽泳池关
+卡牌栏的铲子矩形，再按声明的取消方式放回。它**不是** `shovel`：`shovel` 走
+`lvz::Shovel`/`AShovel` 把植物从草坪上铲掉，本动作从不碰草坪，也不通过写内存或推进 RNG
+去伪造点击效果。`capabilities.shovel_hold_cancel` 声明该 op。
+
+- 该 op 在通用 `row`/`col` 校验之前分派：请求里不接受任何坐标。请求只允许 `op` 与可选
+  的 `cancel`（`"right"` 默认，或 `"left"`）。`cancel` 不是这两种字符串，或请求出现其它键，
+  都是 `invalid_action`；未知的取消方式返回 `invalid_shovel_cancel`。
+- 点击点固定为 `(x=640, y=30)`：十卡槽时 `GetSeedBankExtraWidth()` 为 153、铲子矩形从
+  x=609 开始，640 落在矩形内且不在任何卡槽里。这个点是**冻结常量**，不接受调用方指定，
+  否则一句 `{"x":0,"y":0}` 就能把"铲子动作"变成别的点击。
+- 调用的是 AvZ 提供的原生场景点击入口 `AAsm::ClickScene(level,x,y,key)`
+  （`avz/framework/src/avz_asm.cpp:125-138`，转发到锁定引擎 `0x411f20`
+  `Board::MouseDown`）。它在游戏线程上由 commit 执行器调用，不发 OS 鼠标消息、不抢焦点，
+  因此隐藏窗口下同样成立；这**不**等价于复现完整物理鼠标输入栈。
+- 前置条件（任一不成立即失败，不做任何点击）：战斗界面（`GameUi()==3`）、
+  `Board::Scene()==2`（泳池十卡槽关卡）、卡槽数恰好 10、光标为空（
+  `MouseAttribution()->Type()==0`）。这样另一个场景或另一个关卡不会被"顺手"点一下。
+- 结果 `{ok:true, ...}` 记录三段完整证据：`before`（点击前）、`picked`（左键后）、`after`
+  （取消后）。每段含 `cursor_type`、`rng`（`CaptureRng()` 的完整快照：`instances/global_mt`
+  与 `instances/game_thread_crt`）、`state_digest`、`sound_effects_digest`；`before`/`after`
+  另含植物身份集合 `plants`（id/type/row/col，1 基坐标）。
+- `changes` 汇报**实测**副作用，而不是预设结论：`rng_instances` 指名来源、`rng_cursor`
+  三个值、`rng_words_equal`、`game_thread_crt` 三个值与 `game_thread_crt_equal`、
+  `state_digest_changed`、`sound_effects_changed` 以及逐叶子的
+  `sound_effects_changes`（容量 64 条，超出置 `sound_effects_changes_truncated`）、
+  `plants_changed`。本动作**不**声称"恰好消费一次随机数"：预检实测在同一配置下 MT 游标
+  前进 3 个输出、624 个词不变、游戏线程 CRT 不变，同时 `sound_effects/calls` 与
+  历史 `9`、`75` 的 `last_variation` 改变。换配置或初态时真实数字以本块为准。
+- 失败码：`shovel_action_requires_fight`、`shovel_action_requires_pool_level`、
+  `shovel_action_requires_ten_seed_slots`、`shovel_cursor_unavailable`、
+  `shovel_cursor_not_empty`、`shovel_pickup_not_observed`（左键后光标不是 6）、
+  `shovel_plant_set_changed`（植物集合与点击前不同）、`shovel_cursor_not_restored`
+  （取消后光标不为空）。
+- 审计与语义：它就是一次普通 `commit` 动作，因此保留 `expect` 版本检查、epoch/revision
+  处理、同 ID 去重与顺序规则；每个尝试在 `audit/events.jsonl` 里是一条 `action` 记录，
+  `action.result` 就是上面的完整回执。动作**不消耗模拟 tick**：它绑定的边界与请求同
+  tick、`revision` 加一，紧接着的那一帧才推进 tick。动作的请求与回执同时进入
+  `decisions/runtime-requests.bin` 与客户端 trace，复跑（冷重放）会重新执行同一个点击并
+  逐字段比对回执，因此"铲子动作可复现"是引擎重放的结论，不是脚本声明。
+- 适用范围：动作本身不定分；计分运行是否允许该动作由上层定义。本 op 定位为训练/受控实验
+  用途，不改变 `plant`/`shovel`/`spawn` 的任何语义。
+
 ## Branch scope and dedup namespaces
 
 A runtime instance owns exactly one **branch scope**. The dedup namespace is
