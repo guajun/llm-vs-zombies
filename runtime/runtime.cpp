@@ -201,6 +201,11 @@ public:
             {"game",lvz::determinism::ProbeTarget()},
             {"capabilities",{{"observe",true},{"commit",true},{"advance",true},{"pause",true},{"status",true},{"cancel",true},{"checkpoints",false},
                 {"strict_determinism",false},{"step_clock_guard",true},{"exact_step_live_validated",false},{"native_demo",false},{"initialize",true},
+                // #97: cards are submitted only while initializationState=="initializing".
+                // A finished round returns to the next round's card-select screen with no
+                // path to hand it a fresh selection, so plans asking for more than one round
+                // are refused until a mid-run card handoff exists.
+                {"card_resubmit_mid_run",false},
                 {"audit_snapshot",true},{"rng_restore",true},{"rng_seed",true},{"clock_restore",true},{"stop_recording",true},
                 {"capture_frame",lvz::recording::ValidateCaptureTarget()},{"capture_frame_live_validated",false},
                 {"app_update_anchor",lvz::determinism::silentaudio::Enabled()},{"initial_app_update_anchor_v1",lvz::determinism::silentaudio::Enabled()},

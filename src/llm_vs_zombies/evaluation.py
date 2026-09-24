@@ -76,11 +76,14 @@ class Plan:
     # Scenario and run length. ``scenario`` names a launcher registry entry
     # (reference save, card order, expected Board::Scene()); the default is the
     # only scenario that existed before this field, so a plan without it keeps
-    # today's behaviour. ``flags_to_complete`` is how many flags the source run
-    # finishes before it stops by itself; the ``full_cycle`` gate stays "at
-    # least one flag completed" either way.
+    # today's behaviour. ``rounds_to_complete`` is how many rounds the source run
+    # finishes before it stops by itself. The game defines one round as two flags
+    # and twenty waves, so the historic "two flags" target is one round here; the
+    # ``full_cycle`` gate stays "at least one round completed" either way. The
+    # pre-#97 name ``flags_to_complete`` is read by Plan.load as a transitional
+    # read-only alias and is never written back.
     scenario: str = "liangyi"
-    flags_to_complete: int = 1
+    rounds_to_complete: int = 1
 
     def scenario_spec(self):
         """The launcher registry entry this plan's scenario names.
@@ -120,8 +123,8 @@ class Plan:
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be an integer in 1..{maximum}")
-        if type(self.flags_to_complete) is not int or not 1 <= self.flags_to_complete <= 100:
-            raise ValueError("flags_to_complete must be an integer in 1..100")
+        if type(self.rounds_to_complete) is not int or not 1 <= self.rounds_to_complete <= 100:
+            raise ValueError("rounds_to_complete must be an integer in 1..100")
         if type(self.cold_workers) is not int or self.cold_workers not in (1, 2):
             raise ValueError("cold_workers must be 1 or 2")
         if self.chunk_ticks > self.tick_budget:
@@ -163,6 +166,14 @@ class Plan:
             value["strategy"] = str((path.parent / value["strategy"]).resolve())
         declared = value.pop("b0_normalization", None)
         legacy = {name: value.pop(name) for name in ("app_update_count", "mj_clock") if name in value}
+        if "flags_to_complete" in value:
+            # #97: the pre-rename field name. It always counted rounds; it is
+            # read here and never written back, so old plans keep playing exactly
+            # as long as they used to.
+            if "rounds_to_complete" in value:
+                raise ValueError("a plan cannot mix rounds_to_complete with its transitional "
+                                 "read-only alias flags_to_complete")
+            value["rounds_to_complete"] = value.pop("flags_to_complete")
         schema = value.get("schema")
         if schema == LEGACY_PLAN_SCHEMA or (schema is None and legacy):
             # v1 is read, never written. ``mj_clock``/``app_update_count`` map to
@@ -221,23 +232,30 @@ def readiness(plan: Plan, checks: dict[str, dict]) -> dict:
             "scope": "tested game/runtime/scenario/seed set/trajectory; audit schema has documented uncovered fields"}
 
 
-def completed_flags(initial: dict, final: dict) -> int | None:
-    """Flags finished since the initial observation, or None when unobserved."""
+def rounds_completed(initial: dict, final: dict) -> int | None:
+    """Rounds finished since the initial observation, or None when unobserved.
+
+    ``completed_rounds`` counts whole rounds: one round is two flags and twenty
+    waves, which is the unit ``Plan.rounds_to_complete`` is declared in. A flag
+    count can be derived from it (two flags per round) but the game exposes no
+    separate flag counter.
+    """
     before, after = initial.get("completed_rounds"), final.get("completed_rounds")
     return after - before if type(before) is int and type(after) is int else None
 
 
-def full_cycle_completed(initial: dict, final: dict, maximum_wave: int, flags_to_complete: int = 1,
+def full_cycle_completed(initial: dict, final: dict, maximum_wave: int, rounds_to_complete: int = 1,
                          expected_scene: int = 3) -> bool:
-    """At least ``flags_to_complete`` flags were finished, after reaching wave 20.
+    """At least ``rounds_to_complete`` rounds were finished, after reaching wave 20.
 
-    The default (one flag, the historic scene 3) is the definition this gate has
-    always used. ``expected_scene`` comes from the scenario registry, because a
-    scenario's board is not necessarily fog, and ``flags_to_complete`` only
-    decides how long the source run keeps playing.
+    The default (one round, the historic scene 3, which is the two flags the gate
+    has always meant) is the definition this gate has always used.
+    ``expected_scene`` comes from the scenario registry, because a scenario's
+    board is not necessarily fog, and ``rounds_to_complete`` only decides how
+    long the source run keeps playing.
     """
-    flags = completed_flags(initial, final)
-    return (flags is not None and flags >= flags_to_complete
+    rounds = rounds_completed(initial, final)
+    return (rounds is not None and rounds >= rounds_to_complete
             and maximum_wave >= 20 and final.get("scene") == expected_scene)
 
 
@@ -612,12 +630,23 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
     pauses.after_step(observation, skip_reason=budget.stop["reason"] if budget.stop else None)
     stalled = decisions = failed_actions = 0
     while True:
-        if full_cycle_completed(initial_observation, observation, maximum_wave, plan.flags_to_complete,
+        if full_cycle_completed(initial_observation, observation, maximum_wave, plan.rounds_to_complete,
                                 expected_scene):
             outcome = "full_cycle_completed"
             break
         if observation["game_ui"] != 3:
-            outcome = "game_over" if observation["game_ui"] == 4 else "terminal_before_complete"
+            rounds = rounds_completed(initial_observation, observation) or 0
+            if observation["game_ui"] == 4:
+                outcome = "game_over"
+            elif 1 <= rounds < plan.rounds_to_complete:
+                # #97: the board finished a round and is back at the next
+                # round's card-select screen while the plan asks for more
+                # rounds. Name that limit instead of reporting a generic early
+                # terminal, because the runtime can only submit cards during
+                # ``initialize``.
+                outcome = "round_handoff_required"
+            else:
+                outcome = "terminal_before_complete"
             break
         if observation["version"]["tick"] >= plan.tick_budget:
             outcome = "tick_budget_exhausted"
@@ -632,7 +661,8 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
             break
         context = {"seed": seed, "decision_index": decisions,
                    "remaining_ticks": plan.tick_budget-observation["version"]["tick"],
-                   "tier": plan.tier, "target": "complete_two_flags" if plan.tier == "strict" else "tick_budget"}
+                   "tier": plan.tier, "rounds_to_complete": plan.rounds_to_complete,
+                   "target": "complete_declared_rounds" if plan.tier == "strict" else "tick_budget"}
         decision = strategy.decide(observation, context)
         # Trusted policy/model execution may take time; do not send a mutation
         # after it has already used the source wall budget.
@@ -656,11 +686,11 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
             break
     return {"final_observation": observation, "maximum_wave": maximum_wave, "decisions": decisions,
             "failed_actions": failed_actions, "outcome": outcome,
-            # The gate stays "at least one flag"; flags_to_complete only decides
+            # The gate stays "at least one round"; rounds_to_complete only decides
             # when the loop above stops by itself.
             "full_cycle": full_cycle_completed(initial_observation, observation, maximum_wave, 1, expected_scene),
-            "flags_completed": completed_flags(initial_observation, observation),
-            "flags_to_complete": plan.flags_to_complete,
+            "rounds_completed": rounds_completed(initial_observation, observation),
+            "rounds_to_complete": plan.rounds_to_complete,
             "resources": budget.report(), "pause_probes": pauses.finish()}
 
 
@@ -669,6 +699,33 @@ def _require_production_runtime(client):
     game = client.hello_result.get("game", {})
     if "test_fixture" in game:
         raise ValueError("test_fixture runtime cannot certify production experiment readiness")
+
+
+# #97: a runtime can only continue past a round boundary when it can be handed a
+# fresh card selection after the board returns to the next round's card-select
+# screen. ``runtime/runtime.cpp`` submits cards only while ``initialize`` is
+# pending, so it declares the capability as false for now.
+ROUND_HANDOFF_CAPABILITY = "card_resubmit_mid_run"
+
+
+def _require_round_capability(client, plan):
+    """Refuse a multi-round plan this runtime cannot actually play out.
+
+    One round is two flags and twenty waves. Asking for more than one round needs
+    mid-run card resubmission; without it the source run stops at the round
+    boundary short of its declared target, so fail before the first mutation
+    with the real reason instead of reporting a silently truncated run (#97).
+    """
+    if plan.rounds_to_complete <= 1:
+        return
+    capabilities = (client.hello_result or {}).get("capabilities") or {}
+    if capabilities.get(ROUND_HANDOFF_CAPABILITY) is not True:
+        raise ValueError(
+            f"rounds_to_complete={plan.rounds_to_complete} needs a fresh card selection after a round ends "
+            f"(one round = two flags = twenty waves), but this runtime does not declare "
+            f"{ROUND_HANDOFF_CAPABILITY}: runtime/runtime.cpp submits cards only during initialization, so the "
+            f"source run would stop at the next round's card-select screen. Use rounds_to_complete=1 until that "
+            f"capability exists (#97).")
 
 
 def _recovery_probe(root: Path, name: str, plan: Plan, seed: int, *, lifecycle=None) -> tuple[Path, dict]:
@@ -964,6 +1021,7 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                 try:
                     with live_session(root, source_run.name, plan, seed, lifecycle=source_lifecycle) as (run, launcher, client, trace):
                         _require_production_runtime(client)
+                        _require_round_capability(client, plan)
                         case["run"] = str(run)
                         recipe = apply_recipe(client, seed, b0_normalization=list(plan.b0_normalization) or None)
                         # apply_recipe rewrites observations/initial.json with the
@@ -997,8 +1055,8 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                         add("full_cycle", ending["full_cycle"], {"maximum_wave": ending["maximum_wave"],
                             "initial_rounds": initial_observation.get("completed_rounds"),
                             "final_rounds": ending["final_observation"].get("completed_rounds"),
-                            "flags_completed": ending.get("flags_completed"),
-                            "flags_to_complete": plan.flags_to_complete,
+                            "rounds_completed": ending.get("rounds_completed"),
+                            "rounds_to_complete": plan.rounds_to_complete,
                             "expected_scene": plan.expected_scene}, run / "experiment-end.json")
                         source_completed = True
                 except Exception as error:
@@ -1027,7 +1085,8 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                         + ", ".join(blockers)) if blockers else "source infrastructure or recording did not pass"
                     continue
                 if plan.tier == "strict" and case.get("full_cycle") is not True:
-                    case.update(status="incomplete", replays_skipped="strict source did not complete two flags")
+                    case.update(status="incomplete",
+                                replays_skipped="strict source did not complete one round (two flags)")
                     continue
                 all_cold = True
                 if plan.cold_workers == 1:
@@ -1135,9 +1194,14 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("--scenario", default="liangyi",
                         help="Scenario registry name (liangyi, jingdian12); an unknown name is rejected "
                              "before the plan is written")
-    sample.add_argument("--flags-to-complete", type=int, default=1, metavar="1..100",
-                        help="Flags the source run finishes before stopping (default 1). A long run "
-                             "(two flags, pool endless) needs flags-to-complete 2 plus a large tick budget")
+    sample.add_argument("--rounds-to-complete", type=int, default=None, metavar="1..100",
+                        help="Rounds the source run finishes before stopping (default 1). The game counts "
+                             "one round as two flags and twenty waves. More than one round needs mid-run "
+                             "card resubmission, which the current runtime does not declare, so such a plan "
+                             "is refused at run time (#97)")
+    sample.add_argument("--flags-to-complete", type=int, default=None, metavar="1..100",
+                        help="Transitional read-only alias of --rounds-to-complete (the pre-#97 name, which "
+                             "always counted rounds); it writes the new key")
     sample.add_argument("--audio-mode", choices=("original", sound_effects.MODE), default="original")
     sample.add_argument("--b0-normalize", action="append", default=None, metavar="JSON",
                         help="Declared B(0) normalization entry as a JSON object {field, target, reason}; "
@@ -1179,6 +1243,11 @@ def main(argv: list[str] | None = None) -> int:
             if not table:
                 table = b0.alias_entries(app_update_count=args.app_update_count, mj_clock=args.mj_clock,
                                          source="flag")
+            if args.flags_to_complete is not None and args.rounds_to_complete is not None:
+                raise ValueError("--rounds-to-complete cannot be mixed with its transitional read-only "
+                                 "alias --flags-to-complete")
+            rounds = args.rounds_to_complete if args.rounds_to_complete is not None else (
+                args.flags_to_complete if args.flags_to_complete is not None else 1)
             plan = Plan(tier=args.tier, seeds=tuple(int(seed) for seed in args.seeds.split(',')),
                         cold_starts=args.cold_starts if args.cold_starts is not None else 10 if strict else 1,
                         cold_workers=args.cold_workers,
@@ -1191,7 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
                         pause_perturbations=tuple(args.pause_perturbations),
                         strategy=str(Path(args.strategy).resolve()) if args.strategy else None,
                         audio_mode=args.audio_mode, b0_normalization=tuple(table),
-                        scenario=args.scenario, flags_to_complete=args.flags_to_complete).validate()
+                        scenario=args.scenario, rounds_to_complete=rounds).validate()
             write_json(args.output, asdict(plan))
             print(args.output)
             if plan.b0_normalization:

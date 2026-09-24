@@ -67,6 +67,9 @@
 
 ## 长局跑法
 
-教程脚本自带 20 波 P6 节奏，要跑完整两旗需要
-`--flags-to-complete 2`（默认 1 会在第一面旗就停）与足够大的 `--tick-budget`
-（两旗 ≈ 20 波；泳池无尽每波间隔按实际出怪时间增长）。详见 `docs/evaluation.md`。
+教程脚本自带 20 波 P6 节奏。计划字段的计数单位是 round：**1 round = 2 flag = 20 波**，
+默认 `--rounds-to-complete 1` 就是打完一个 round（两面旗）后收工，两旗不需要再填 2。
+要接着打下一个 round 必须在运行中重新提交卡片（打完一个 round 游戏会回到下一轮选卡界面），
+当前 runtime 只在 initialization 阶段处理选卡，所以 `--rounds-to-complete >1` 会在源局第一次动作前
+被明确拒绝（原始名 `--flags-to-complete` 只作过渡只读别名，见 #97）。真跑长局时
+`--tick-budget` 要按实际波间隔放大（泳池无尽每波间隔随实际出怪时间增长）。详见 `docs/evaluation.md`。

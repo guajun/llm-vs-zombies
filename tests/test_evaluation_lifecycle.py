@@ -276,7 +276,7 @@ class SuiteTests(unittest.TestCase):
 
     def run_fixture(self, *, strict=False, win=False, runtime_failure=None, strategy_error=False,
                     cold_error=False, disk_stop=False, fixture_runtime=False, cold_workers=1,
-                    rewrite_initial=False):
+                    rewrite_initial=False, rounds_to_complete=1):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name); (root/'experiments/runs').mkdir(parents=True)
@@ -284,7 +284,8 @@ class SuiteTests(unittest.TestCase):
             "    return {'actions': [], 'advance_ticks': min(1, context['remaining_ticks'])}\n")
         plan = ev.Plan(tier='strict' if strict else 'smoke', seeds=(42,), tick_budget=3, chunk_ticks=1,
             cold_starts=10 if strict else 1, cold_workers=cold_workers,
-            strategy=str(policy), pause_points=(), min_free_bytes=1)
+            strategy=str(policy), pause_points=(), min_free_bytes=1,
+            rounds_to_complete=rounds_to_complete)
         initial = {'observation':observation(0), 'state':{'fixture':1},
                    'initialization':{'clock_anchor':{}}, 'identity':{}}
         self.roles=[]; self.closed=[]; self.tail_checked=False
@@ -391,6 +392,16 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(report['cases'][0]['status'],'incomplete')
         self.assertEqual(report['checks']['full_cycle']['status'],'fail')
         self.assertEqual(report['checks']['archive_integrity']['status'],'pass')
+
+    def test_multi_round_plan_is_refused_before_the_source_plays(self):
+        # #97: the declared target is unreachable without mid-run card
+        # resubmission, so the case carries that reason instead of a run that
+        # silently stops at the round boundary.
+        report=self.run_fixture(rounds_to_complete=2)
+        self.assertEqual(self.roles,['source'])
+        self.assertNotEqual(report['cases'][0]['status'],'completed')
+        self.assertIn('card_resubmit_mid_run',report['cases'][0]['error']['message'])
+        self.assertEqual(report['checks']['full_cycle']['status'],'unverified')
 
     def test_smoke_runs_true_cold_and_recovery_and_retention_hashes_stay_valid(self):
         report=self.run_fixture()
