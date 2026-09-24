@@ -51,15 +51,29 @@ Invoke-Step 'isolation fixture' {
     $fixtureExe = Join-Path $projectRoot 'build/launcher/isolation-fixture.exe'
     & $compiler -std=c++20 -O2 -static launcher/isolation_fixture.cpp -luser32 -ladvapi32 -o $fixtureExe
     if ($LASTEXITCODE -ne 0) { throw 'Fixture build failed.' }
-    & ./build/launcher/lvz-launcher.exe launch $fixtureExe (Join-Path $projectRoot 'build/launcher/lvz-bootstrap.dll') $fixtureRoot $fixtureRoot (Join-Path $fixtureRoot 'receipt.json')
+    # #96: `launch` takes the branch id as its sixth argument and records the
+    # channel it injected, so the fixture run also proves that side.
+    $branchId = 'ci-isolation-fixture'
+    $receiptPath = Join-Path $fixtureRoot 'receipt.json'
+    & ./build/launcher/lvz-launcher.exe launch $fixtureExe (Join-Path $projectRoot 'build/launcher/lvz-bootstrap.dll') $fixtureRoot $fixtureRoot $receiptPath $branchId
     if ($LASTEXITCODE -ne 0) { throw 'Pre-main isolation injection failed.' }
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    if (!$receipt.isolation_ready -or $receipt.branch_channel -ne 'LVZ_BRANCH_ID' -or $receipt.branch_id -ne $branchId) {
+        throw "Native launch receipt does not record LVZ_BRANCH_ID=$branchId; inspect $receiptPath."
+    }
     $resultPath = Join-Path $fixtureRoot 'fixture-result.txt'
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
-        if ((Test-Path -LiteralPath $resultPath) -and (Get-Content -LiteralPath $resultPath -Raw) -match '(?m)^passed=1\r?$') { break }
+        $result = if (Test-Path -LiteralPath $resultPath) { Get-Content -LiteralPath $resultPath -Raw } else { '' }
+        if ($result -match '(?m)^passed=1\r?$') { break }
         if ([DateTime]::UtcNow -gt $deadline) { throw 'Isolation fixture did not pass; inspect work/ci-isolation-fixture.' }
         Start-Sleep -Milliseconds 50
     } while ($true)
+    # The child process only proves the pre-main injection when it actually
+    # inherited the validated id the launcher set before CreateProcessW.
+    if ($result -notmatch "(?m)^branch_id=$([Regex]::Escape($branchId))\r?$") {
+        throw "Isolation fixture did not inherit LVZ_BRANCH_ID=$branchId; inspect $resultPath."
+    }
 }
 
 $steps | Format-Table -AutoSize | Out-String | Write-Output
