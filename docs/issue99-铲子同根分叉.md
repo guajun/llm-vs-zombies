@@ -24,7 +24,7 @@ LLM，以隔离模型输出的不确定性。
 | 事件终点 | `stop_when.wave_at_least=2`：第一个观测到第 2 波的战斗边界 |
 | 决策粒度 | `chunk_ticks=100`，公开入口首个策略决策在 B1 |
 | 暂停探针 | tick 1000 处 1 秒墙钟暂停 + 已捕获状态不变证明 |
-| flags_to_complete | 1（短程窗口内不完成任何旗；`full_cycle` 门槛因此不通过，属预期） |
+| rounds_to_complete | 1（短程窗口内不完成任何 round；`full_cycle` 门槛因此不通过，属预期） |
 | 冷启动 | `cold_starts=1`：每条分支另有一次原版冷重放与一次断线恢复探针 |
 | 声明边界 | `epoch 3 / tick 101 / revision 0` |
 | 先决条件 | `wave=0`、`refresh_countdown=498`、`zombies=0`、`plants=52` |
@@ -91,8 +91,10 @@ issue 记录的历史运行 `<原实验主机>\work\hosted-live\experiments\runs
 （历史档：tick 501 时 `wave=0, cd=98`，tick 601 已 `wave=1`；tick 1101 仍 `wave=1`，tick 1201
 已 `wave=2`）。
 
-口径提醒（#97）：1 round = 2 flags = 20 波。历史档的 `flags_to_complete=2` 不能读成"完成两个
-round"；本轮计划把 `full_cycle` 门槛交给既有定义，短程窗口内**不**通过该门槛。
+口径提醒（#97）：字段在 #97 后统一叫 `rounds_to_complete`，单位是 round（1 round = 2 flag = 20 波）；
+旧名 `flags_to_complete` 只剩 `Plan.load` 的过渡只读别名，历史档写的 `flags_to_complete=2` 是
+**2 round = 4 面旗 = 40 波**，不是"两面旗"。本轮计划声明 1（短程窗口内一个 round 都打不完），
+`full_cycle` 门槛交给既有定义，因此**不**通过该门槛。
 
 ## 5. 正式运行与复跑
 
@@ -174,9 +176,9 @@ tick 最后一个 `pre_step` 状态，逐组件比较摘要值（`rng`、`sound_
 
 ## 7. 数据闭环：一条入口、一棵树、一个离线读取器
 
-`tools/issue99_shovel_fork.py` 有四个子命令：`run`（跑四条轨迹并串联后续步骤）、`compare`
-（只读比较）、`tree`（只读封包）、`read`（离线读取）。`run` 不自己启动游戏：它调用公开入口
-`python -m llm_vs_zombies.evaluation run ...`，与人工执行逐字相同。
+`tools/issue99_shovel_fork.py` 有五个子命令：`run`（跑四条轨迹并串联后续步骤）、`compare`
+（只读比较）、`tree`（只读封包）、`read`（离线读取）、`verify`（按已写出的 seal 重新核对树与报告）。
+`run` 不自己启动游戏：它调用公开入口 `python -m llm_vs_zombies.evaluation run ...`，与人工执行逐字相同。
 
 树身份 `tree_id = 529a2f4f1370a720a138fcbf90ffad5ce3e64dfe17d1ae00e178c6a7a97e447f`，结构
 （`experiments/trees/issue99-jd12r-shovel-fork/`，`tree.json` + `nodes/<key>/`）：
@@ -199,10 +201,23 @@ python tools/issue99_shovel_fork.py read --tree experiments\trees\issue99-jd12r-
 ```
 
 `work/issue99-jd12r-seal.json` 把树身份与两份报告（JSON/Markdown）以及每个节点的
-`trajectory_id`、`manifest.json` 摘要绑在一起：报告被替换、节点被换掉、树被篡改都会在读取时
-对不上（本轮的四个 `trajectory_id` 与报告摘要见该文件）。**封存是薄证据基础**：只有轨迹、
-根与父节点身份、摘要校验、只读加载与关联复跑报告；它不包含数据集目录服务、版本发布、样本
-筛选、去重、训练集划分、reward 或训练采样。
+`trajectory_id`、`manifest.json` 摘要绑在一起。`read` 只重算树自己的哈希链，不打开 seal，所以
+seal 与现场的一致性由第五个子命令核对：报告被替换、节点被换掉、树或报告摘要被改写，都会在
+`verify` 里逐条列出（本轮的四个 `trajectory_id` 与报告摘要见该文件）：
+
+```powershell
+$env:PYTHONPATH = 'src'
+python tools/issue99_shovel_fork.py verify `
+  --tree experiments\trees\issue99-jd12r-shovel-fork `
+  --seal work\issue99-jd12r-seal.json
+```
+
+`verify` 只读、不需要 AvZ 或游戏进程；`matches=false` 时以非零退出码结束并保留每条
+`declared`/`actual`。**封存是薄证据基础**：只有轨迹、根与父节点身份、摘要校验、只读加载与关联
+复跑报告；它不包含数据集目录服务、版本发布、样本筛选、去重、训练集划分、reward 或训练采样。
+
+本轮封存现场实测（rebase 后的入口，2026-09-24）：`matches=true`、`tree_id=529a2f4f…e447f`、
+4 个节点、两份报告（JSON/Markdown）的 SHA256 逐条相符，`problems` 为空。
 
 ## 8. 能力结论
 
@@ -218,7 +233,7 @@ python tools/issue99_shovel_fork.py read --tree experiments\trees\issue99-jd12r-
 | 报告指定 RNG 实例及真实状态变化，并记录音效副作用 | ✅ | `instances/global_mt` + `instances/game_thread_crt` 三段快照；音效三处变化逐项列出；不声称"恰好一次" |
 | 冻结窗口内出现可复现语义差异 → 判定"成功演示游戏轨迹分叉" | ✅ | 首波出怪内容与波次计时在窗口内不同，且同分支两次一致 |
 | 一条入口接受根、对照/干预计划并生成两分支树及关联复跑证据 | ✅ | `tools/issue99_shovel_fork.py run`（四份 suite + 比较 + 树 + seal） |
-| 树中根、父边界、分支身份、动作、轨迹、审计与自检报告相互绑定，可校验 | ✅ | `tree.json` 索引 + 每节点 `tree` 段（哈希链）；seal 绑定报告摘要 |
+| 树中根、父边界、分支身份、动作、轨迹、审计与自检报告相互绑定，可校验 | ✅ | `tree.json` 索引 + 每节点 `tree` 段（哈希链）；seal 绑定报告摘要，`tools/issue99_shovel_fork.py verify` 逐条重算并列出不符项 |
 | 无 AvZ、无游戏进程的只读加载器能读取两条轨迹并重建根与分支关系 | ✅ | `tools/issue99_shovel_fork.py read` |
 | 最小样本区分环境脚本动作与实验干预动作 | ✅ | `hosted_fire`（托管脚本发炮，形态同 #84）与 `action`（实验干预，含 `request_id`/`ordinal`）在 `audit/events.jsonl` 里分开记录，轨迹里只有后者是请求动作 |
 | 失败/缺证据轨迹不能冒充已验证训练数据 | ✅ | 只读加载器与比较器在缺边界、缺证据时返回失败/未验证，不自动通过 |
@@ -268,7 +283,12 @@ python tools\issue99_shovel_fork.py run `
 # 3) 离线读取（不需要 AvZ、不需要游戏进程）
 python tools\issue99_shovel_fork.py read --tree experiments\trees\issue99-jd12r-shovel-fork
 
-# 4) 离线自检
+# 4) 按 seal 重新核对树与两份报告（matches=false 时非零退出）
+python tools\issue99_shovel_fork.py verify `
+  --tree experiments\trees\issue99-jd12r-shovel-fork `
+  --seal work\issue99-jd12r-seal.json
+
+# 5) 离线自检
 ctest --test-dir build\cmake -R "runtime_shovel_action|runtime_spawn_action"
 python -m unittest tests.test_issue99_shovel_fork -v
 ```

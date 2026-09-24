@@ -36,7 +36,7 @@
     }
   ],
   "scenario": "jingdian12",
-  "flags_to_complete": 1,
+  "rounds_to_complete": 1,
   "intervention": {
     "schema": "lvz.intervention.v1",
     "id": "shovel-hold-cancel-01",

@@ -1,6 +1,6 @@
 """Issue #99: one entry for the controlled shovel experiment, its report and its tree.
 
-The entry has four subcommands:
+The entry has five subcommands:
 
 * ``run``     - drive the four declared trajectories (control, control rerun,
   intervention, intervention rerun) through the public evaluation entry, then
@@ -9,6 +9,10 @@ The entry has four subcommands:
 * ``tree``    - read-only packaging of the four runs into one evidence tree;
 * ``read``    - the read-only loader: open a packaged tree without AvZ, without a
   game process and without the launcher, and print what it can re-derive.
+* ``verify``  - re-check one written seal against that tree and its reports: the
+  seal binds a tree identity, every node's manifest digest and every report
+  digest, and this is the entry that recomputes both sides and names each
+  mismatch instead of leaving the comparison to a human diff.
 
 Nothing here starts a game by itself: ``run`` calls the same public command a
 human would (``python -m llm_vs_zombies.evaluation run ...``) and the other
@@ -35,6 +39,7 @@ from llm_vs_zombies.evidence_tree import (EvidenceTree, attach_tree, branch_plac
                                           package_tree, root_identity, root_placement, validate_tree)
 
 SCHEMA = "lvz.issue99-shovel-fork.v1"
+SEAL_SCHEMA = "lvz.issue99-shovel-fork-seal.v1"
 ROLES = ("control", "control-rerun", "intervention", "intervention-rerun")
 # Component digests of one boundary, grouped by what a difference means. The
 # groups are reported separately on purpose: the precheck showed this action
@@ -457,7 +462,7 @@ def write_reports(report: dict, *, json_path, markdown_path) -> None:
 
 def seal(tree_directory, *, reports, nodes) -> dict:
     """Bind one packaged tree to the reports that explain it."""
-    record = {"schema": "lvz.issue99-shovel-fork-seal.v1",
+    record = {"schema": SEAL_SCHEMA,
               "tree": str(Path(tree_directory)),
               "tree_id": nodes["tree_id"],
               "reports": [{"path": str(Path(path)), "sha256": sha256_file(path)} for path in reports],
@@ -466,6 +471,57 @@ def seal(tree_directory, *, reports, nodes) -> dict:
                          "manifest_sha256": sha256_file(Path(tree_directory) / "nodes" / node["key"] / "trajectory.json")}
                         for node in nodes["nodes"]]}
     return record
+
+
+def verify_seal(tree_directory, seal_path, *, loaded: dict | None = None) -> dict:
+    """Re-check one written seal against the tree and reports it binds (read-only).
+
+    ``seal`` only writes: the record binds a tree identity, every node's
+    ``trajectory_id`` and manifest digest, and the digest of each report. The
+    ``read`` entry re-derives the tree but never opens the seal, so without this
+    comparison a replaced report or a swapped node could only be caught by hand.
+    Every field is recomputed here and each mismatch is named; the result is a
+    report, not an exception, so a caller can print all problems at once.
+    """
+    record = read_json(seal_path)
+    if record.get("schema") != SEAL_SCHEMA:
+        raise SystemExit(f"{seal_path}: not an issue #99 seal (schema {record.get('schema')!r})")
+    tree_directory = Path(tree_directory)
+    loaded = read_tree(tree_directory) if loaded is None else loaded
+    problems: list = []
+    if record.get("tree_id") != loaded["tree_id"]:
+        problems.append({"what": "tree_id", "declared": record.get("tree_id"), "actual": loaded["tree_id"]})
+    declared_nodes = {node["key"]: node for node in record.get("nodes") or []}
+    for node in loaded["nodes"]:
+        claimed = declared_nodes.pop(node["key"], None)
+        if claimed is None:
+            problems.append({"what": "node", "key": node["key"], "detail": "the seal does not bind this node"})
+            continue
+        for field in ("branch_id", "trunk", "parent_key", "trajectory_id"):
+            if claimed.get(field) != node.get(field):
+                problems.append({"what": f"node.{field}", "key": node["key"],
+                                 "declared": claimed.get(field), "actual": node.get(field)})
+        manifest = tree_directory / "nodes" / node["key"] / "trajectory.json"
+        actual = sha256_file(manifest) if manifest.is_file() else None
+        if claimed.get("manifest_sha256") != actual:
+            problems.append({"what": "node.manifest_sha256", "key": node["key"],
+                             "declared": claimed.get("manifest_sha256"), "actual": actual})
+    for key in sorted(declared_nodes):
+        problems.append({"what": "node", "key": key, "detail": "the seal binds a node the tree does not have"})
+    reports = []
+    for item in record.get("reports") or []:
+        path = Path(item["path"])
+        actual = sha256_file(path) if path.is_file() else None
+        match = actual is not None and actual == item.get("sha256")
+        reports.append({"path": str(path), "declared_sha256": item.get("sha256"),
+                        "actual_sha256": actual, "match": match})
+        if not match:
+            problems.append({"what": "report.sha256", "path": str(path),
+                             "declared": item.get("sha256"), "actual": actual})
+    return {"schema": SEAL_SCHEMA, "tree": str(tree_directory), "seal": str(Path(seal_path)),
+            "declared_tree": record.get("tree"), "tree_id": loaded["tree_id"],
+            "nodes": len(loaded["nodes"]), "reports": reports,
+            "matches": not problems, "problems": problems}
 
 
 def evaluate(plan, output, *, skip_build: bool, log_directory) -> None:
@@ -551,6 +607,12 @@ def cmd_read(args) -> int:
     return 0
 
 
+def cmd_verify(args) -> int:
+    result = verify_seal(args.tree, args.seal)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["matches"] else 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -592,6 +654,11 @@ def main(argv=None) -> int:
     read = subparsers.add_parser("read", help="read-only loader for a packaged tree")
     read.add_argument("--tree", type=Path, required=True)
     read.set_defaults(handler=cmd_read)
+
+    verify = subparsers.add_parser("verify", help="re-check one written seal against its tree and reports (read-only)")
+    verify.add_argument("--tree", type=Path, required=True)
+    verify.add_argument("--seal", type=Path, required=True)
+    verify.set_defaults(handler=cmd_verify)
 
     args = parser.parse_args(argv)
     return args.handler(args)

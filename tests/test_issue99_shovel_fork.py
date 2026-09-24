@@ -16,7 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from issue99_shovel_fork import GROUPS, compare_pair, markdown_report, verdict  # noqa: E402
+from issue99_shovel_fork import (GROUPS, SEAL_SCHEMA, compare_pair, main, markdown_report,  # noqa: E402
+                                 sha256_file, verdict, verify_seal)
 from llm_vs_zombies.evaluation import (INTERVENTION_OPS, Plan, intervention_relation,  # noqa: E402
                                        intervention_requirement_failure, intervention_spec,
                                        stop_condition_spec)
@@ -260,6 +261,93 @@ class WiringTests(unittest.TestCase):
         self.assertNotIn("RestoreRng", live)
         self.assertNotIn("SeedRng", live)
         self.assertNotIn("AShovel(", live)
+
+
+class SealVerificationTests(unittest.TestCase):
+    """The seal is written by ``run``/``tree``; ``verify`` is the entry that reads it.
+
+    ``read`` re-derives the tree from the tree itself, so the seal has to be
+    checked against that result by something: these tests pin that every bound
+    field is recomputed and that a mismatch is named rather than accepted.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.tree = self.root / "tree"
+        manifest = self.tree / "nodes" / "control" / "trajectory.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"initial": {"observation": {"version": {"epoch": 3, "tick": 0}}}}\n',
+                            encoding="utf-8", newline="\n")
+        self.manifest = manifest
+        self.report = self.root / "report.json"
+        self.report.write_text('{"verdict": {"scope": "smoke"}}\n', encoding="utf-8", newline="\n")
+        self.loaded = {"tree_id": "tree-abc", "root": "control",
+                       "nodes": [{"key": "control", "branch_id": "issue99-control-a", "trunk": True,
+                                  "parent_key": None, "trajectory_id": "trajectory-1"}],
+                       "branches": ["issue99-control-b"], "trunk_nodes": ["control"], "scope": "smoke"}
+        self.record = {"schema": SEAL_SCHEMA, "tree": str(self.tree), "tree_id": "tree-abc",
+                       "reports": [{"path": str(self.report), "sha256": sha256_file(self.report)}],
+                       "nodes": [{"key": "control", "branch_id": "issue99-control-a", "trunk": True,
+                                  "parent_key": None, "trajectory_id": "trajectory-1",
+                                  "manifest_sha256": sha256_file(manifest)}]}
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def seal_file(self, **change) -> Path:
+        path = self.root / "seal.json"
+        path.write_text(json.dumps(dict(self.record, **change), ensure_ascii=False), encoding="utf-8", newline="\n")
+        return path
+
+    def problems(self, seal) -> list:
+        result = verify_seal(self.tree, seal, loaded=self.loaded)
+        self.assertFalse(result["matches"])
+        return [problem["what"] for problem in result["problems"]]
+
+    def test_a_matching_seal_is_verified_field_by_field(self):
+        result = verify_seal(self.tree, self.seal_file(), loaded=self.loaded)
+        self.assertTrue(result["matches"])
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(result["tree_id"], "tree-abc")
+        self.assertTrue(result["reports"][0]["match"])
+
+    def test_every_bound_field_is_recomputed_and_each_mismatch_is_named(self):
+        self.assertIn("tree_id", self.problems(self.seal_file(tree_id="other")))
+        self.assertIn("node.trajectory_id",
+                      self.problems(self.seal_file(nodes=[dict(self.record["nodes"][0], trajectory_id="swapped")])))
+        self.assertIn("node.branch_id",
+                      self.problems(self.seal_file(nodes=[dict(self.record["nodes"][0], branch_id="other")])))
+        extra = [dict(self.record["nodes"][0], key="ghost")]
+        self.assertIn("node", self.problems(self.seal_file(nodes=extra)))
+
+    def test_a_replaced_manifest_or_report_is_caught(self):
+        seal = self.seal_file()
+        self.manifest.write_text('{"initial": {}}\n', encoding="utf-8", newline="\n")
+        self.assertIn("node.manifest_sha256", self.problems(seal))
+        self.manifest.write_text('{"initial": {"observation": {"version": {"epoch": 3, "tick": 0}}}}\n',
+                                 encoding="utf-8", newline="\n")
+        self.assertTrue(verify_seal(self.tree, seal, loaded=self.loaded)["matches"])
+        self.report.write_text('{"verdict": {"scope": "rewritten"}}\n', encoding="utf-8", newline="\n")
+        self.assertIn("report.sha256", self.problems(seal))
+
+    def test_the_entry_point_reports_the_result_through_its_exit_code(self):
+        # The command line cannot inject ``loaded``, so the loader is stubbed to
+        # pin the wiring (arguments, exit code, printed JSON) without a live run.
+        import contextlib
+        import io
+        from unittest import mock
+
+        output = io.StringIO()
+        with mock.patch("issue99_shovel_fork.read_tree", return_value=self.loaded), \
+                contextlib.redirect_stdout(output):
+            matched = main(["verify", "--tree", str(self.tree), "--seal", str(self.seal_file())])
+            mismatched = main(["verify", "--tree", str(self.tree),
+                               "--seal", str(self.seal_file(tree_id="other"))])
+        self.assertEqual((matched, mismatched), (0, 1))
+        self.assertIn('"matches": true', output.getvalue())
+        self.assertIn('"matches": false', output.getvalue())
+        self.assertIn('"tree_id"', output.getvalue())
 
 
 if __name__ == "__main__":
