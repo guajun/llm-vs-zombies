@@ -9,6 +9,8 @@ game/local-engine/
 avz/runtime/
 experiments/runs/*/
 !experiments/runs/.gitkeep
+experiments/trees/*/
+!experiments/trees/.gitkeep
 experiments/scenarios/**/*.dat
 *.dmp
 .env

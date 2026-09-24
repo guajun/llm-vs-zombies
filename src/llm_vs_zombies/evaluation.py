@@ -36,6 +36,12 @@ from .evaluation_support import (BoundaryBudget, BoundaryStop, ReplayBoundaryCli
 SCHEMA = "lvz.evaluation.v1"
 PLAN_SCHEMA = "lvz.evaluation-plan.v2"
 LEGACY_PLAN_SCHEMA = "lvz.evaluation-plan.v1"
+INTERVENTION_SCHEMA = "lvz.intervention.v1"
+# The one action this runner knows how to place at a declared boundary. It is
+# the controlled "pick the shovel up and put it back" action of issue #99: it
+# never digs a plant out and never writes a random source by hand.
+INTERVENTION_OPS = ("shovel_hold_cancel",)
+INTERVENTION_REQUIREMENTS = ("wave", "refresh_countdown", "game_clock", "zombies", "plants")
 LIVE_GATES = ("private_launch", "runtime_windows", "session_cleanup", "archive_integrity", "host_identity", "resource_limits",
               "scenario", "fixed_rng", "initial_state", "single_step",
               "pause_invariance", "disconnect_recovery", "failure_recovery", "recording",
@@ -84,6 +90,14 @@ class Plan:
     # read-only alias and is never written back.
     scenario: str = "liangyi"
     rounds_to_complete: int = 1
+    # One declared action at one declared boundary. Both branches of a
+    # controlled experiment share every other field, so the plan itself is the
+    # record of what differed; ``None`` is the untouched control branch.
+    intervention: dict | None = None
+    # Event-defined end of a short-range run: stop at the first audited
+    # boundary whose wave number reached the declared value. ``tick_budget``
+    # stays the frozen hard cap and is never extended to reach it.
+    stop_when: dict | None = None
 
     def scenario_spec(self):
         """The launcher registry entry this plan's scenario names.
@@ -109,6 +123,11 @@ class Plan:
 
     def validate(self) -> "Plan":
         sound_effects.configured(self.audio_mode)
+        # Normalize both declared-control fields here so every construction path
+        # (a plan file, a test, a future caller) is judged by one validator and
+        # the run writes the normalized shape back out.
+        object.__setattr__(self, "intervention", intervention_spec(self.intervention))
+        object.__setattr__(self, "stop_when", stop_condition_spec(self.stop_when))
         if self.b0_normalization is None or not isinstance(self.b0_normalization, (tuple, list)):
             raise ValueError("b0_normalization must be an ordered array of entries")
         if self.schema != PLAN_SCHEMA or self.tier not in {"smoke", "strict"}:
@@ -155,6 +174,16 @@ class Plan:
                              f"known kinds: {', '.join(suspend_probes.PERTURBATIONS)}")
         if self.tier == "strict" and (self.cold_starts < 10 or not self.strategy):
             raise ValueError("strict requires at least 10 cold starts per seed and an explicit strategy file")
+        # A declared intervention is bound to the frozen tick budget: the plan
+        # either reaches its boundary inside the cap or the branch is reported
+        # as not reached. Nothing here extends the budget at run time.
+        if self.intervention is not None:
+            if self.intervention["at"]["tick"] > self.tick_budget:
+                raise ValueError("intervention at.tick exceeds tick_budget")
+            if self.intervention["advance_ticks"] > self.chunk_ticks:
+                raise ValueError("intervention advance_ticks must not exceed chunk_ticks")
+        if self.stop_when is not None and self.intervention is None:
+            raise ValueError("stop_when describes a short-range run and requires a declared intervention")
         return self
 
     @classmethod
@@ -621,6 +650,128 @@ def _coverage_passed(report):
     return True if report.get("coverage_status") == "pass" else False if report.get("coverage_status") == "fail" else None
 
 
+def _declared_int(value, label: str, *, minimum: int = 0, maximum: int = 1000000) -> int:
+    """One declared integer: booleans are rejected instead of counting as 0/1."""
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"{label} must be an integer in {minimum}..{maximum}")
+    return value
+
+
+def intervention_spec(value) -> dict | None:
+    """Normalize and validate one declared boundary intervention.
+
+    The spec is deliberately closed: a plan names the exact version triple it
+    will act at, the preconditions the boundary must still satisfy, one action
+    from ``INTERVENTION_OPS`` and the tick budget of the request that carries
+    it. Anything else fails here, before a game process exists.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("intervention must be an object or null")
+    allowed = {"schema", "id", "at", "require", "action", "advance_ticks"}
+    if not {"schema", "id", "at", "action", "advance_ticks"} <= set(value) or set(value) - allowed:
+        raise ValueError(f"intervention requires exactly {sorted(allowed)}")
+    if value["schema"] != INTERVENTION_SCHEMA:
+        raise ValueError("unsupported intervention schema")
+    name = value["id"]
+    if not isinstance(name, str) or not 1 <= len(name) <= 64 or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+            for character in name):
+        raise ValueError("intervention id must be 1..64 characters of [A-Za-z0-9._:-]")
+    point = value["at"]
+    if not isinstance(point, dict) or set(point) != {"epoch", "tick", "revision"}:
+        raise ValueError("intervention at requires exactly epoch, tick and revision")
+    at = {name: _declared_int(point[name], f"intervention at.{name}") for name in ("epoch", "tick", "revision")}
+    if at["tick"] < 1:
+        raise ValueError("intervention at.tick must be at least 1: the first decision boundary is B1")
+    require = value.get("require", {})
+    if not isinstance(require, dict) or set(require) - set(INTERVENTION_REQUIREMENTS):
+        raise ValueError(f"intervention require accepts only {list(INTERVENTION_REQUIREMENTS)}")
+    require = {field: _declared_int(require[field], f"intervention require.{field}")
+               for field in INTERVENTION_REQUIREMENTS if field in require}
+    action = value["action"]
+    # ``null`` is the control branch: the same declared boundary is observed and
+    # verified, and nothing is sent. It is what makes the two plans structurally
+    # identical apart from the declared action.
+    if action is not None:
+        if not isinstance(action, dict) or set(action) - {"op", "cancel"} or action.get("op") not in INTERVENTION_OPS:
+            raise ValueError(f"intervention action must be null or name one of {list(INTERVENTION_OPS)}")
+        if "cancel" in action and action["cancel"] not in ("right", "left"):
+            raise ValueError("intervention action cancel must be 'right' or 'left'")
+        action = dict(action)
+    ticks = _declared_int(value["advance_ticks"], "intervention advance_ticks", maximum=100000)
+    # A control branch sends nothing, so it has no request budget. Forcing the
+    # deadline-shaped field to zero keeps the two plans identical in every
+    # field that has a meaning on both sides.
+    if action is None and ticks != 0:
+        raise ValueError("a control intervention (action null) must declare advance_ticks 0")
+    return {"schema": INTERVENTION_SCHEMA, "id": name, "at": at, "require": require,
+            "action": action, "advance_ticks": ticks}
+
+
+def stop_condition_spec(value) -> dict | None:
+    """The event-defined end of a short-range plan: one wave threshold."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"wave_at_least"}:
+        raise ValueError("stop_when requires exactly wave_at_least")
+    return {"wave_at_least": _declared_int(value["wave_at_least"], "stop_when.wave_at_least", minimum=1,
+                                           maximum=1000)}
+
+
+def intervention_relation(version: dict, at: dict) -> str:
+    """``before``/``at``/``past``: one observed boundary against the declared one.
+
+    Versions compare as the (epoch, tick, revision) triple the runtime reports;
+    a boundary that already passed the declared point means the plan did not
+    describe the run it produced, which is a failure, not a reason to act late.
+    """
+    observed = tuple(version.get(name) for name in ("epoch", "tick", "revision"))
+    if any(type(item) is not int for item in observed):
+        raise ValueError("observation version is not a complete epoch/tick/revision triple")
+    declared = tuple(at[name] for name in ("epoch", "tick", "revision"))
+    return "at" if observed == declared else ("past" if observed > declared else "before")
+
+
+def intervention_requirement_failure(observation: dict, require: dict) -> str | None:
+    """Which declared precondition the boundary no longer satisfies, if any."""
+    for field, expected in require.items():
+        actual = observation.get(field)
+        if field in ("zombies", "plants"):
+            actual = len(actual or [])
+        if actual != expected:
+            return f"{field}={actual!r} (declared {expected!r})"
+    return None
+
+
+def summarize_intervention(action_results: list) -> dict:
+    """The comparable part of one intervention response.
+
+    The full action result (including every captured RNG word) stays in the
+    request journal, the audit record and the session trace; this summary is
+    what the run report and the branch comparison quote, so a reader can see
+    what the action claimed without loading the raw record.
+    """
+    if len(action_results) != 1:
+        return {"ok": False, "error": "intervention_record_missing", "actions": len(action_results)}
+    result = action_results[0]
+    changes = result.get("changes") or {}
+    return {"ok": result.get("ok") is True, "error": result.get("error"),
+            "cursor_type": [result.get("before", {}).get("cursor_type"),
+                            result.get("picked", {}).get("cursor_type"),
+                            result.get("after", {}).get("cursor_type")],
+            "rng_instances": changes.get("rng_instances"), "rng_complete": changes.get("rng_complete"),
+            "rng_cursor": changes.get("rng_cursor"),
+            "rng_words_equal": changes.get("rng_words_equal"),
+            "game_thread_crt": changes.get("game_thread_crt"),
+            "game_thread_crt_equal": changes.get("game_thread_crt_equal"),
+            "sound_effects_changed": changes.get("sound_effects_changed"),
+            "sound_effects_changes": changes.get("sound_effects_changes"),
+            "plants_changed": changes.get("plants_changed"),
+            "state_digest_changed": changes.get("state_digest_changed")}
+
+
 def _play_source(client, trace, strategy_path, plan, seed, initial_observation, first, run, budget):
     observation = first["observation"]
     maximum_wave = max(initial_observation["wave"], observation["wave"])
@@ -628,6 +779,10 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
     strategy = ScriptStrategy(client, trace, strategy_path, plan.chunk_ticks)
     pauses = PauseSchedule(client, run, plan.pause_points, plan.pause_perturbations)
     pauses.after_step(observation, skip_reason=budget.stop["reason"] if budget.stop else None)
+    intervention = plan.intervention
+    intervention_record = None if intervention is None else {"id": intervention["id"], "declared_at": intervention["at"],
+                                                              "action": intervention["action"], "fired": False,
+                                                              "fired_at": None, "note": None, "summary": None}
     stalled = decisions = failed_actions = 0
     while True:
         if full_cycle_completed(initial_observation, observation, maximum_wave, plan.rounds_to_complete,
@@ -659,6 +814,68 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
         except BoundaryStop as stop:
             outcome = stop.reason
             break
+        # The event-defined end of a short-range run. Reaching it before the
+        # declared intervention means this plan did not describe this run: the
+        # branch is reported as unverified instead of acting late.
+        if plan.stop_when is not None and observation.get("wave", 0) >= plan.stop_when["wave_at_least"]:
+            if intervention is None or intervention_record["fired"]:
+                outcome = "stop_condition_reached"
+            else:
+                outcome = "intervention_not_reached"
+                intervention_record["note"] = (f"wave {observation.get('wave', 0)} reached before "
+                                               f"epoch/tick/revision {intervention['at']}")
+            break
+        if intervention is not None and not intervention_record["fired"]:
+            try:
+                relation = intervention_relation(observation["version"], intervention["at"])
+            except ValueError as error:
+                outcome, intervention_record["note"] = "intervention_unavailable", str(error)
+                break
+            if relation == "past":
+                outcome = "intervention_not_reached"
+                intervention_record["note"] = (f"boundary {observation['version']} already passed "
+                                               f"{intervention['at']}")
+                break
+            if relation == "at":
+                failure = intervention_requirement_failure(observation, intervention["require"])
+                if failure is not None:
+                    outcome, intervention_record["note"] = "intervention_precondition_failed", failure
+                    break
+                if intervention["action"] is None:
+                    # Control branch: the boundary is declared, reached and
+                    # verified, and no request is sent.
+                    intervention_record["fired"] = True
+                    intervention_record["fired_at"] = observation["version"]
+                    intervention_record["note"] = "control branch: declared boundary reached, no action declared"
+                    trace.emit("intervention", {"id": intervention["id"], "declared_at": intervention["at"],
+                                                "executed_at": intervention_record["fired_at"], "action": None,
+                                                "action_results": [], "observation_version": observation["version"]})
+                else:
+                    before_tick = observation["version"]["tick"]
+                    result = client.commit([dict(intervention["action"])], advance_ticks=intervention["advance_ticks"])
+                    intervention_record["fired"] = True
+                    intervention_record["fired_at"] = observation["version"]
+                    observation = result["observation"]
+                    maximum_wave = max(maximum_wave, observation.get("wave", 0))
+                    decisions += 1
+                    failed_actions += sum(item.get("ok") is False for item in result["action_results"])
+                    stalled = stalled + 1 if observation["version"]["tick"] == before_tick else 0
+                    intervention_record["summary"] = summarize_intervention(result.get("action_results") or [])
+                    trace.emit("intervention", {"id": intervention["id"], "declared_at": intervention["at"],
+                                                "executed_at": intervention_record["fired_at"],
+                                                "action": intervention["action"], "advance_ticks": intervention["advance_ticks"],
+                                                "action_results": result.get("action_results"), "stop_reason": result["stop_reason"],
+                                                "observation_version": observation["version"]})
+                    budget.check(observation["version"], enforce=False)
+                    pauses.after_step(observation, skip_reason=budget.stop["reason"] if budget.stop else None)
+                    budget.check(observation["version"], enforce=False)
+                    if any(item.get("ok") is not True for item in result["action_results"]):
+                        outcome = "intervention_failed"
+                        break
+                    if result["stop_reason"] not in {"budget_exhausted", "action_failed", "wave_changed", "scene_changed"}:
+                        outcome = result["stop_reason"]
+                        break
+                    continue
         context = {"seed": seed, "decision_index": decisions,
                    "remaining_ticks": plan.tick_budget-observation["version"]["tick"],
                    "tier": plan.tier, "rounds_to_complete": plan.rounds_to_complete,
@@ -686,6 +903,7 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
             break
     return {"final_observation": observation, "maximum_wave": maximum_wave, "decisions": decisions,
             "failed_actions": failed_actions, "outcome": outcome,
+            "intervention": intervention_record,
             # The gate stays "at least one round"; rounds_to_complete only decides
             # when the loop above stops by itself.
             "full_cycle": full_cycle_completed(initial_observation, observation, maximum_wave, 1, expected_scene),

@@ -1,0 +1,62 @@
+{
+  "schema": "lvz.evaluation-plan.v2",
+  "tier": "smoke",
+  "seeds": [
+    42
+  ],
+  "cold_starts": 1,
+  "cold_workers": 1,
+  "tick_budget": 2000,
+  "chunk_ticks": 100,
+  "pause_seconds": 1.0,
+  "timeout_seconds": 600.0,
+  "wall_budget_seconds": 21600.0,
+  "cold_wall_budget_seconds": 21600.0,
+  "min_free_bytes": 2147483648,
+  "packaging_reserve_bytes": 1073741824,
+  "disk_check_ticks": 500,
+  "pause_points": [
+    [
+      1000,
+      1.0
+    ]
+  ],
+  "strategy": null,
+  "audio_mode": "sound_effects_allocation_none_v1",
+  "b0_normalization": [
+    {
+      "field": "/sound_effects/app_update_count",
+      "target": 1500,
+      "reason": "issue #99: same declared root as the jd12 baseline"
+    },
+    {
+      "field": "/app/mj_clock",
+      "target": 1340,
+      "reason": "issue #99: same declared root as the jd12 baseline"
+    }
+  ],
+  "scenario": "jingdian12",
+  "flags_to_complete": 1,
+  "intervention": {
+    "schema": "lvz.intervention.v1",
+    "id": "shovel-hold-cancel-01",
+    "at": {
+      "epoch": 3,
+      "tick": 101,
+      "revision": 0
+    },
+    "require": {
+      "wave": 0,
+      "refresh_countdown": 498,
+      "zombies": 0,
+      "plants": 52
+    },
+    "action": {
+      "op": "shovel_hold_cancel"
+    },
+    "advance_ticks": 100
+  },
+  "stop_when": {
+    "wave_at_least": 2
+  }
+}

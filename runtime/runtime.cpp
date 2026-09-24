@@ -9,6 +9,7 @@
 #include "fp_guard.hpp"
 #include "recorder.hpp"
 #include "spawn_action.hpp"
+#include "shovel_hold.hpp"
 #include "determinism/audit.hpp"
 #include "recording/native_capture.hpp"
 #include "recording/frame_cache.hpp"
@@ -145,6 +146,10 @@ public:
     }
     Json Execute(const Json& a) override {
         auto fail=[](const char* error) { return Json{{"ok",false},{"error",error}}; };
+        // The controlled shovel action takes no lawn coordinates, so it is
+        // dispatched before the row/col contract of plant/shovel/spawn.
+        if(a.is_object()&&a.contains("op")&&a["op"].is_string()
+            &&a["op"].get<std::string>()==ShovelHoldCancelOp) return RunShovelHoldCancel(a);
         if(!a.is_object()||!a.contains("op")||!a["op"].is_string()||!a.contains("row")||!a["row"].is_number_integer()
             ||!a.contains("col")||!a["col"].is_number()) return fail("invalid_action");
         int row=a["row"].get<int>(); float col=a["col"].get<float>();
@@ -214,6 +219,7 @@ public:
                 {"sound_counter_origin",lvz::determinism::silentaudio::Enabled()},{"sound_effects_counter_origin_v1",lvz::determinism::silentaudio::Enabled()},
                 {"fixed_owner_fp_v1",true},
                 {"spawn_action",true},
+                {"shovel_hold_cancel",true},
                 {"sound_effects_allocation_none_v1",lvz::determinism::silentaudio::Enabled()},{"prepare_render",true},{"deterministic_draw_schedule_v1",true},{"controlled_engine_call_v1",true}}}};
     }
     bool RequiresRenderPreparation()const override {return true;}
