@@ -432,6 +432,27 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(report['cases'][0]['status'],'failed')
         self.assertTrue(report['cases'][0]['sessions'][-1]['archive_sealed'])
 
+    def test_source_window_failure_names_the_blocking_component(self):
+        # A 1,642s source run once recorded a single 0.605s observer probe out
+        # of 65,437 samples (limit 0.25s). The aggregate was correctly
+        # unverified, but the skip reason blamed "infrastructure or recording"
+        # while every recording gate passed, which sent the reader looking at
+        # the replay side. Name the component that actually blocked.
+        report=self.run_fixture(runtime_failure='source')
+        self.assertEqual(self.roles,['source'])
+        case=report['cases'][0]
+        self.assertEqual(case['status'],'failed')
+        self.assertEqual(case['replay_blockers'],['runtime_windows'])
+        self.assertEqual(case['replays_skipped'],
+                         'source infrastructure or recording did not pass: runtime_windows')
+        session=case['sessions'][0]
+        self.assertEqual(session['infrastructure_components'],
+                         {'recording':'pass','runtime_windows':'unverified','private_launch':'pass',
+                          'host_identity':'pass','resource_limits':'pass'})
+        self.assertEqual(session['infrastructure_failures'],['runtime_windows'])
+        self.assertFalse(session['infrastructure_passed'])
+        self.assertEqual(report['checks']['recording']['status'],'pass')
+
     def test_recovery_window_failure_is_not_hidden_by_same_seed_passes(self):
         report=self.run_fixture(runtime_failure='recovery')
         self.assertEqual(self.roles,['source','cold','recovery'])

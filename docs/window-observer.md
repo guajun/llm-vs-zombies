@@ -108,3 +108,20 @@ parent runs CPU work with a long Python thread-switch interval, parent/body
 failure cleanup, and reader/startup/shutdown/corrupt-output fixtures. These tests
 observe test processes, never a game; they are not live experiment acceptance.
 A new long game replay with complete window evidence is still required.
+
+Run `jd12-flags2-01-s42-c0` (经典十二炮, 16,000 ticks, 1,642s runtime window)
+is the longest runtime observation so far and shows the limitation above from
+the other side. 65,437 samples saw the game hidden with no sampled game
+foreground or visible owned window, but exactly one probe took 0.605s: 24x the
+25ms target, above the 250ms ceiling and 5x the next largest probe (0.118s).
+The runtime evidence was therefore correctly `unverified`, and the suite
+skipped the cold replay it gates. Nothing was wrong with the recording: all
+recording, cleanup, archive and host gates for that source passed, yet the
+skip reason read "source infrastructure or recording did not pass" and sent
+the reader to the replay side. Retention receipts now carry
+`infrastructure_components` and `infrastructure_failures`, and the case names
+the blocking component (`runtime_windows` here) in `replay_blockers` and
+`replays_skipped`. The 25ms interval, the 250ms maximum gap and the refusal to
+pass incomplete observation are unchanged; a long run still needs, rather than
+deserves, its own clean window evidence. `m1-par-c2-s42-c1` shows the same
+single-outlier shape under parallel cold load (0.589s in a 273s window).
