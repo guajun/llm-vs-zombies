@@ -272,6 +272,15 @@ def profile_fingerprint() -> dict:
 
 
 def private_launch_passed(state: dict) -> bool | None:
+    """Judge the launch from our own window evidence, not from another process.
+
+    ``foreground_check_status`` is fail when the observer sampled the game's own
+    window (by held handle or by owning PID) in the foreground or as visible, and
+    pass only for complete bounded sampling of an owned hidden window. A global
+    foreground handle that merely changed is a diagnostic in the observer
+    evidence: another process can create or activate a window while this run
+    does nothing, so it can neither prove nor break this gate.
+    """
     if state.get("isolation_ready") is not True:
         return False
     status = (state.get("evaluation_windows") or {}).get("foreground_check_status")

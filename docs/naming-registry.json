@@ -49,7 +49,7 @@
   "current": [
    "能力/模式未知：runtime 只在 capabilities 里公布自己实现的能力，客户端按能力键判定是否使用某模式（sound_effects.py:67、fp_environment.py:54、initialization.py:26）。未公布即视为不支持。",
    "schema 版本未知：全部严格拒绝。declared_branch_scope() 对 schema != lvz.branch-scope.v1 抛 ProtocolError（tests/test_client.py:215-222 用 lvz.other.v1 做负例）；virtual_audio.py:435-436 对未知事件 schema 抛错；root_integrity/engine_replay/evidence_codec/evidence_tree 对 schema 不符抛 EvidenceError。",
-   "同族旧版本：允许只读，但只承认该版本明确保证的结论。evaluation.py:643 只对 lvz.launch-windows.v3 取 foreground_check_status，v2 证据一律视为“未验证”而不是猜测通过。",
+   "同族旧版本：允许只读，但只承认该版本明确保证的结论。evaluation.py:748 只对 lvz.launch-windows.v3 取 foreground_check_status，v2 证据一律视为“未验证”而不是猜测通过。",
    "错误码未知：客户端把 error.code 当不透明字符串向上抛（client.py:85、engine_replay.py:203-206），不做错误映射，也不猜测重试。"
   ],
   "proposed": [
@@ -1294,7 +1294,7 @@
   {
    "class": "schema",
    "name": "lvz.window-observer.v1",
-   "definition": "src/llm_vs_zombies/window_observer.py:114",
+   "definition": "src/llm_vs_zombies/window_observer.py:34",
    "semantics": "只读窗口观察器的控制/就绪/封口文件 schema。",
    "suggested": null,
    "duplicates": "`lvz.launch-windows.v2/v3`（观察器的两份对外结论 schema）",
@@ -1302,7 +1302,7 @@
     "total": 1,
     "by_kind": {
      "code": [
-      "src/llm_vs_zombies/window_observer.py:114"
+      "src/llm_vs_zombies/window_observer.py:34"
      ]
     },
     "files": [
@@ -1321,7 +1321,7 @@
   {
    "class": "schema",
    "name": "lvz.launch-windows.v2",
-   "definition": "src/llm_vs_zombies/window_observer.py:100",
+   "definition": "src/llm_vs_zombies/window_observer.py:262",
    "semantics": "启动窗口采样证据（宿主内采样路径，当前仍作为 helper 的默认输出）。",
    "suggested": null,
    "duplicates": "`lvz.launch-windows.v3`（同一份证据的两个同时存活的版本号）",
@@ -1329,7 +1329,7 @@
     "total": 1,
     "by_kind": {
      "code": [
-      "src/llm_vs_zombies/window_observer.py:100"
+      "src/llm_vs_zombies/window_observer.py:262"
      ]
     },
     "files": [
@@ -1348,7 +1348,7 @@
   {
    "class": "schema",
    "name": "lvz.launch-windows.v3",
-   "definition": "src/llm_vs_zombies/window_observer.py:610",
+   "definition": "src/llm_vs_zombies/window_observer.py:896",
    "semantics": "子进程隔离采样产出的启动/运行窗口证据，附 observer 溯源与 isolation 字段。",
    "suggested": null,
    "duplicates": "`lvz.launch-windows.v2`（见上；v2→v3 是本仓库唯一的 schema 升版先例）",
@@ -1359,8 +1359,8 @@
       "docs/window-observer.md:40"
      ],
      "code": [
-      "src/llm_vs_zombies/evaluation.py:643",
-      "src/llm_vs_zombies/window_observer.py:610"
+      "src/llm_vs_zombies/evaluation.py:748",
+      "src/llm_vs_zombies/window_observer.py:896"
      ],
      "tests": [
       "tests/test_evaluation_lifecycle.py:323",

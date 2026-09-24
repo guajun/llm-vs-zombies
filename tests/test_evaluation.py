@@ -72,6 +72,35 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(windows["foreground_check_status"], "pass")
         self.assertIs(private_launch_passed({"isolation_ready": True, "evaluation_windows": windows}), True)
 
+    def test_our_own_window_in_the_foreground_fails_without_a_pid_match(self):
+        # The global foreground handle is identical before and after, so no
+        # "another process moved it" story can excuse it: the sampled handle is
+        # one of the windows this observation holds, and that is our own evidence.
+        samples = [self.window_sample(0, 500, 100, owned=True),
+                   self.window_sample(.025, 500, 100, owned=True)]
+        windows = launch_window_evidence(samples, 42)
+        self.assertTrue(windows["foreground_unchanged"])
+        self.assertFalse(windows["game_foreground_observed"])
+        self.assertTrue(windows["our_window_foreground_observed"])
+        self.assertEqual(windows["foreground_change_used_as_evidence"], False)
+        self.assertTrue(windows["claims"]["our_window_never_foreground"] is False)
+        self.assertEqual(windows["foreground_check_status"], "fail")
+        self.assertIs(private_launch_passed({"isolation_ready": True, "evaluation_windows": windows}), False)
+
+    def test_private_launch_verdict_never_depends_on_another_processes_windows(self):
+        # Three unrelated foreground switches between other processes, while our
+        # held window stays hidden. The verdict stays pass and the global handle
+        # inequality is reported as a diagnostic only.
+        windows = launch_window_evidence([self.window_sample(0, 10, 200, owned=True),
+                                          self.window_sample(.025, 20, 300, owned=True),
+                                          self.window_sample(.05, 30, 400, owned=True)], 42)
+        self.assertFalse(windows["foreground_unchanged"])
+        self.assertTrue(windows["claims"]["our_window_never_visible"])
+        self.assertTrue(windows["claims"]["our_window_never_foreground"])
+        self.assertEqual(windows["claims"]["global_foreground_equality_is_evidence"], False)
+        self.assertEqual(windows["foreground_check_status"], "pass")
+        self.assertIs(private_launch_passed({"isolation_ready": True, "evaluation_windows": windows}), True)
+
     def test_transient_game_foreground_fails_even_when_endpoints_match(self):
         windows = launch_window_evidence([self.window_sample(0), self.window_sample(.025, 500, 42),
                                          self.window_sample(.05, owned=True)], 42)

@@ -31,9 +31,11 @@ replace them with the `pid=` argument, rather than silently losing per-sample
 owned-window visibility. Collection before context exit is also rejected.
 
 Raw samples are flushed as JSONL directly by the child; parent parsing cannot
-back-pressure a pipe or hold the child's GIL. Small atomic control files carry
-PID binding and stop. The child takes a final sample after the stop request,
-flushes/closes its raw file and writes a seal with sample count, byte count,
+back-pressure a pipe or hold the child's GIL. A write-once control document and
+one write-once PID binding carry the setup, and a named event carries the stop
+request (see the control-channel section below). The child takes a final
+scan-backed sample after the stop request, flushes/closes its raw file and
+writes a seal with sample count, byte count,
 SHA256, source SHA256, process identities, times, errors and actual exit reason.
 The parent checks that the sample interval covers its entire context, then
 validates the raw stream and seal. It does **not** append a parent sample after
@@ -65,49 +67,126 @@ final sample. Samples cannot be reordered to hide bad chronology. System-wide
 scheduling or disk stalls can still exceed 250ms and remain unverified. Finite
 sampling remains unable to exclude activation between reads.
 
-Windows control-file publication now has a separate path from immutable ready
-and sealed evidence. The worker opens `control.json` with read/write/delete
-sharing; the parent publishes a completed temporary file with `ReplaceFileW`
-when the destination already exists. Its initial creation still uses
-`os.replace`. Existing read handles retain the old complete document. The
-ordinary `_write` used for ready/sealed evidence is unchanged. A publication
-error is propagated, and any complete temporary file is retained; there is no
-delete/recreate or partial-write fallback.
+## Control channel (issue #21)
 
-A simultaneous name lookup can still fail transiently during replacement.
-Only native Windows errors 2, 5, 32 and 33 are retried, with at most eight
-attempts and a 50ms retry budget, waiting at most 5ms between attempts. There
-is no retry of malformed JSON or unrelated errors. A permanent missing or
-inaccessible control file stops the worker and preserves a failed seal and
-the original sample prefix. OS calls themselves cannot be forcibly bounded by
-this retry budget; their real elapsed time is still subject to the existing
-sample/probe checks.
+`control.json` is no longer a mutable document. The parent claims the evidence
+directory, creates one session-local named event, publishes `control.json`
+exactly once (schema, token, parent identity, sampling interval, scan interval
+and the stop event's name) and publishes `target.json` at most once when the
+game PID is bound. Both publications are a single rename onto a name that does
+not exist yet, so the worker can only observe a document absent or complete, and
+`_publish_once` refuses a second publication of the same name instead of
+rewriting it. No reader has to survive a replacement, and nothing the parent
+writes is ever rewritten; `samples.jsonl` stays append-only and single-writer as
+before.
 
-The seal's additive `control_reads` diagnostics retain attempt count, transient
-failure count, recovered-read count, maximum retry duration and the first32
-error records (time, attempt, Win32/errno code and original message). Later
-errors still contribute to the full count. Recovery does not create a sample,
-reuse an old control document, change timestamps or reset the sampling clock.
-The25ms interval and250ms maximum actual gap/probe duration remain unchanged.
-Old seals without these diagnostics remain readable. This fix does not explain
-or excuse the separate slow probes retained in run047.
+The only mutable cross-process channel is that named event object
+(`Local\lvz-window-observer-stop-<token>`), created by the parent before the
+worker starts and opened by the worker once. `__exit__` sends the stop request
+with a single `SetEvent`; the worker polls it with a zero-timeout
+`WaitForSingleObject`, writes one final scan-backed sample and seals. Parent
+death is still detected through the held parent process handle, so a worker
+whose parent died still ends with an incomplete `parent_exited` seal instead of
+waiting forever.
 
-`tests/test_window_control_io.py` exercises actual Windows held-reader
-replacement, 400 publications delivered to each of three readers (all three
-acknowledge before the next publication, without busy polling), recovery from a short exclusive lock,
-permanent lock/missing-file failures, retained failed-publication bytes, and
-a failed worker seal after a real raw prefix. An unbounded tight publisher
-flood can exhaust the retry budget and correctly remains failure. These are
-file-I/O fixtures, not game acceptance. The choice of replacement API follows
-the documented distinction between
-[moving and replacing files](https://learn.microsoft.com/en-us/windows/win32/fileio/moving-and-replacing-files)
-and is tested against this Windows host rather than inferred from flags alone.
+Publishing a name can transiently deny a concurrent open for about a millisecond
+while the directory entry becomes visible. The worker reads the write-once
+documents through `_read_published_document`, which retries only those transient
+errors (Python reports `PermissionError(errno=13)`; the raw Win32 codes are
+5/32/33) with at most eight attempts and a 0.5s budget, records `control_reads`
+and `target_reads` (transient count, recovered reads, maximum retry duration and
+the first 32 error records) in the seal, and then fails naming the component.
+Because the document never changes, a retry can never pick up a different or
+partial document - unlike the replaced `control.json` of the previous design.
+Missing documents, invalid JSON, an identity mismatch and a missing stop channel
+fail immediately and name their component (`control document`, `stop channel`,
+`target binding document`, `target identity`). The 25ms interval and the 250ms
+maximum actual gap/probe duration are unchanged, and a permanent channel failure
+preserves a failed seal plus the original sample prefix.
 
-`tests/test_window_observer.py` includes an actual Windows observer while its
-parent runs CPU work with a long Python thread-switch interval, parent/body
-failure cleanup, and reader/startup/shutdown/corrupt-output fixtures. These tests
-observe test processes, never a game; they are not live experiment acceptance.
-A new long game replay with complete window evidence is still required.
+| Component | Bound | Receipt on failure |
+|---|---|---|
+| startup ready | 5s, or the owned child exits | `observer startup: ...`; the context is never entered |
+| stop event | `SetEvent`, then a 2s wait; a hung child is terminated by its own `Popen` handle and waited at most 2s again | `observer stop channel: ...`, `observer did not stop within deadline; owned observer terminated`, `observer exit status N` |
+| control/target documents | 8 transient attempts or 0.5s per document | seal `failure.component` plus `control_reads`/`target_reads` |
+| lifetime | 24h, four million samples, 2GiB | `observer_limit` seal, cannot pass |
+
+A worker killed without a seal leaves `parent-closed.json` and no `sealed.json`;
+the parent records the exit status and the gate stays `unverified`. Nothing
+waits indefinitely, and no failure is manufactured into a sample.
+
+## Window identity (issue #21 follow-up)
+
+Process identity was already bound to a query-only handle plus the real creation
+time; window identity was not. The worker enumerated every top-level window on
+the system on every 25ms tick and filtered by PID, which is both the dominant
+per-sample cost and a source of multi-hundred-millisecond probe stalls when two
+worlds share one desktop.
+
+`WindowTracker` now discovers the target's top-level HWNDs in a scan and then
+re-verifies exactly those handles every sample with `IsWindow`,
+`GetWindowThreadProcessId` (the owner must still be the target PID) and
+`IsWindowVisible`. The full enumeration repeats only while nothing is held (the
+launch phase, before resume creates the window), on request, every
+`scan_interval_seconds` (1.0s) as a backstop for windows created after
+discovery, and for the sample taken after a stop request so the final visibility
+claim is scan-backed. Losing the last held window forces an immediate
+rediscovery inside the same sample. A destroyed handle - or one whose value was
+reused by another process - is dropped and counted in
+`window_discovery.dropped_destroyed`/`dropped_reused`, so a reused HWND value is
+never reported as the game's window and another process's windows never enter
+this evidence. The seal retains the discovery diagnostics (`scans`,
+`verifications`, `discovered`, `dropped_*`, `maximum_scan_seconds`,
+`scan_interval_seconds`) and the v3 evidence repeats them under
+`observer.window_discovery`. A reused handle inside the same target process
+cannot be told apart from the original by any Win32 query; both are that
+process's windows, so the visibility and foreground conclusions do not change.
+No injection, activation, visibility change or desktop input is added: every
+call stays a read-only query.
+
+## Private-launch claim
+
+`private_launch` is judged from this observation's own evidence: the sampled
+foreground handle must not be one of the held windows, the sampled foreground
+owner must not be the target PID, and no owned window may be visible in any
+sample - an intermediate visible sample is never erased by a hidden final one.
+`foreground_unchanged` stays in the evidence together with
+`foreground_change_cause: "not_inferred"`,
+`foreground_change_used_as_evidence: false` and a `claims` block that records
+the basis: equality or inequality of two global foreground handles is never a
+reason for a pass or a fail, because another process can create or activate a
+window while this run does nothing.
+
+## Tests
+
+`tests/test_window_control_io.py` covers the write-once publications under a
+reader hammering the publication instant (every successful read is the complete
+document, and every transient denial recovers inside the bound), the refusal of
+a second publication and of overwriting a retained temporary, real
+cross-process delivery of the named stop event, refusal to adopt an existing
+channel name, and worker failures that name `control document`, `stop channel`,
+`target binding document` and `target identity` while keeping the raw prefix.
+`tests/test_window_tracking.py` covers held-handle verification through an
+injectable read-only query surface (discovery once, per-sample verification,
+periodic backstop discovery, destroyed and reused handles, replacement inside
+the same sample, another process's window churn), the private-launch claims, the
+unchanged 25ms/250ms limits, and one real Windows fixture in which an invisible
+top-level window created by a child process is discovered by the real scan and
+observed to `pass` end to end. Those fixtures never start or interact with a
+game. `tests/test_window_observer.py` includes an actual Windows observer while
+its parent runs CPU work with a long Python thread-switch interval, write-once
+publication checkpoints, a killed worker, parent/body failure cleanup, and
+reader/startup/shutdown/corrupt-output fixtures. None of this is live game
+acceptance: a new long game replay with complete window evidence is still
+required.
+
+Issue #94 (one long-run probe above 250ms cancelling replay eligibility, and
+per-tick coverage of granted tick ranges) is deliberately untouched: a single
+slow probe still fails exactly as before, and the 047 (380.44/385.10ms),
+`jd12-flags2-01` (0.605s) and `m1-par-c2` (0.589s) archives keep their recorded
+verdicts. The raw stream keeps `seq`, `monotonic_seconds`,
+`probe_finished_seconds` and `target`, which is the pairing cursor that later
+work needs.
 
 Run `jd12-flags2-01-s42-c0` (经典十二炮, 16,000 ticks, 1,642s runtime window)
 is the longest runtime observation so far and shows the limitation above from
