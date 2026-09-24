@@ -36,7 +36,10 @@ class ObserverTests(unittest.TestCase):
         monitor.started_at, monitor.stopped_at = 10.01, 10.04
         target = FixtureIdentity(42).value
         owner, parent = FixtureIdentity(2).value, FixtureIdentity(1).value
-        monitor.control = {'schema': observer.SCHEMA, 'token': 'test', 'target': target, 'parent': parent}
+        monitor.control = {'schema': observer.SCHEMA, 'token': 'test', 'parent': parent,
+                           'stop_channel': observer.stop_channel_name('test')}
+        monitor.target = target
+        monitor.control_sha256, monitor.target_sha256 = 'c' * 64, 'd' * 64
         samples = [{'seq': i, 'monotonic_seconds': stamp, 'probe_finished_seconds': stamp + .001,
             'target': target, 'foreground': 0, 'foreground_pid': None, 'foreground_resolved': True,
             'owned_windows': [{'handle': 99, 'visible': False}]} for i, stamp in enumerate((10., 10.025, 10.05))]
@@ -45,6 +48,7 @@ class ObserverTests(unittest.TestCase):
         (monitor.directory / 'samples.jsonl').write_bytes(raw)
         seal = {'schema': observer.SCHEMA, 'token': 'test', 'sealed': True, 'stop_reason': 'requested_stop',
             'target': target, 'owner': owner, 'parent': parent, 'source_sha256': monitor._source_hash,
+            'control_sha256': monitor.control_sha256, 'target_sha256': monitor.target_sha256,
             'samples': 3, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(),
             'error_count': 0, 'errors': [], 'first_sample_seconds': 10., 'last_sample_finished_seconds': 10.051}
         observer._write(monitor.directory / 'sealed.json', seal)
@@ -60,7 +64,8 @@ class ObserverTests(unittest.TestCase):
             self.assertTrue((monitor.directory / 'samples.jsonl').is_file())
 
     def test_unbound_wrong_pid_missing_seal_and_truncated_raw_are_unverified(self):
-        for fault in ('pid', 'seal', 'truncate', 'target', 'scope', 'count', 'errors', 'source'):
+        for fault in ('pid', 'seal', 'truncate', 'target', 'scope', 'count', 'errors', 'source',
+                      'control_hash', 'target_hash'):
             with self.subTest(fault=fault):
                 original = self.root
                 self.root = original / fault; self.root.mkdir()
@@ -74,9 +79,35 @@ class ObserverTests(unittest.TestCase):
                     elif fault == 'count': seal['samples'] += 1
                     elif fault == 'errors': seal['error_count'] = 1
                     elif fault == 'source': seal['source_sha256'] = '0' * 64
+                    elif fault == 'control_hash': seal['control_sha256'] = '0' * 64
+                    elif fault == 'target_hash': seal['target_sha256'] = '0' * 64
                     observer._write(monitor.directory / 'sealed.json', seal)
                 self.assertEqual(monitor.result(43 if fault == 'pid' else 42)['foreground_check_status'], 'unverified')
                 self.root = original
+
+    def test_named_component_failure_is_reported_instead_of_a_generic_verdict(self):
+        monitor, _, seal = self.fixture()
+        seal.update(error_count=1, errors=['ObserverFailure: stop channel: cannot open'],
+                    failure={'component': 'stop channel', 'error': 'ObserverFailure',
+                             'message': 'stop channel: cannot open'})
+        observer._write(monitor.directory / 'sealed.json', seal)
+        result = monitor.result(42)
+        self.assertEqual(result['foreground_check_status'], 'unverified')
+        self.assertTrue(any('stop channel' in error for error in result['sampling']['errors']), result['sampling']['errors'])
+
+    def test_a_slow_probe_beyond_the_unchanged_limit_cannot_pass(self):
+        monitor, samples, seal = self.fixture()
+        samples[1]['probe_finished_seconds'] = samples[1]['monotonic_seconds'] + .251
+        raw = b''.join((json.dumps(sample) + '\n').encode() for sample in samples)
+        (monitor.directory / 'samples.jsonl').write_bytes(raw)
+        seal.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                    last_sample_finished_seconds=samples[-1]['probe_finished_seconds'])
+        observer._write(monitor.directory / 'sealed.json', seal)
+        result = monitor.result(42)
+        self.assertEqual(result['sampling']['allowed_maximum_gap_seconds'], .25)
+        self.assertEqual(result['foreground_check_status'], 'unverified')
+        self.assertTrue(any('excessively slow actual window probe' in error for error in result['sampling']['errors']),
+                        result['sampling']['errors'])
 
     def test_startup_failure_keeps_original_error_and_retained_diagnostics(self):
         monitor = observer.LaunchWindowMonitor(evidence_directory=self.root / 'failed-start')
@@ -93,7 +124,6 @@ class ObserverTests(unittest.TestCase):
         monitor = observer.LaunchWindowMonitor(evidence_directory=self.root / 'hung')
         monitor.directory.mkdir()
         monitor._owns_directory = True
-        monitor.control = {'seq': 0, 'stop': False}
         (monitor.directory / 'observer.lock').write_text('test')
         process = Mock(pid=999, returncode=None)
         process.wait.side_effect = subprocess.TimeoutExpired(['owned-observer'], 2)
@@ -145,6 +175,58 @@ class ObserverTests(unittest.TestCase):
         self.assertNotEqual(monitor.process.pid, os.getpid())
         self.assertEqual(result['observer']['target']['pid'], os.getpid())
         # This probes the test process, not a game; no live readiness claim.
+
+    @unittest.skipUnless(os.name == 'nt', 'actual Windows publication requires Windows')
+    def test_control_documents_are_published_once_and_never_rewritten(self):
+        monitor = observer.LaunchWindowMonitor(pid=os.getpid(), evidence_directory=self.root / 'write-once')
+        with monitor:
+            control = (monitor.directory / 'control.json').read_bytes()
+            target = (monitor.directory / 'target.json').read_bytes()
+            time.sleep(.1)
+            self.assertEqual((monitor.directory / 'control.json').read_bytes(), control)
+            self.assertEqual((monitor.directory / 'target.json').read_bytes(), target)
+        result = monitor.result(os.getpid())
+        self.assertEqual(result['foreground_check_status'], 'unverified')
+        # The stop travelled over the named event, so the bytes are still identical.
+        self.assertEqual(observer._hash(monitor.directory / 'control.json'), monitor.control_sha256)
+        self.assertEqual(observer._hash(monitor.directory / 'target.json'), monitor.target_sha256)
+        self.assertEqual(result['observer']['transport'],
+                         'write_once_control_documents_and_named_stop_event')
+        self.assertFalse((monitor.directory / 'control.json.tmp').exists())
+        self.assertFalse((monitor.directory / 'target.json.tmp').exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'actual Windows process kill requires Windows')
+    def test_killed_observer_is_bounded_and_named_instead_of_hanging_the_run(self):
+        monitor = observer.LaunchWindowMonitor(pid=os.getpid(), evidence_directory=self.root / 'killed')
+        with monitor:
+            time.sleep(.1)
+            monitor.process.kill()
+            monitor.process.wait(timeout=5)
+            started = time.monotonic()
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, monitor.stop_timeout_seconds + 1)
+        result = monitor.result(os.getpid())
+        self.assertEqual(result['foreground_check_status'], 'unverified')
+        self.assertTrue(any('observer exit status' in error for error in monitor.errors), monitor.errors)
+        self.assertTrue((monitor.directory / 'parent-closed.json').is_file())
+        self.assertFalse((monitor.directory / 'observer.lock').exists())
+        self.assertFalse((monitor.directory / 'sealed.json').exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'actual Windows binding requires Windows')
+    def test_rebinding_the_same_identity_is_idempotent_and_a_new_one_is_refused(self):
+        monitor = observer.LaunchWindowMonitor(evidence_directory=self.root / 'rebind')
+        with monitor:
+            monitor.bind_pid(os.getpid())
+            published = monitor.target_sha256
+            monitor.bind_pid(os.getpid())
+            self.assertEqual(monitor.target_sha256, published)
+            self.assertEqual(observer._read(monitor.directory / 'target.json'), monitor.target)
+            with self.assertRaisesRegex(RuntimeError, 'cannot change'):
+                monitor.bind_pid(monitor.process.pid)
+            self.assertEqual(monitor.pid, os.getpid())
+        result = monitor.result(os.getpid())
+        self.assertEqual(result['observer']['target'], monitor.target)
+        self.assertEqual(result['observer']['target_sha256'], published)
 
     @unittest.skipUnless(os.name == 'nt', 'actual Win32 read-only observer requires Windows')
     def test_unknown_launch_pid_can_bind_before_exit_and_exception_stops_observer(self):

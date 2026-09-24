@@ -307,7 +307,7 @@
     {"id": "C33", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "磁盘/CPU 竞争与证据采样", "name": "并行运行时的资源竞争", "trigger": "整轮",
      "sources": ["既有实测"], "read_sites": ["docs/headless-validation.md §224", "docs/window-observer.md", "docs/parallel-cold.md"],
      "control_flow": "output_only", "status": "待定", "status_condition": null,
-     "evidence": ["docs/headless-validation.md:218-227（047：A 运行期窗口观察最大间隔 380.44 ms 超 250 ms 门槛；B 因 A 失败在 tick 2501 中止，并遇到 control.json 的 PermissionError；整轮 passed=false）", "docs/window-observer.md（ReplaceFileW + 仅 2/5/32/33 重试，重试预算有限）"],
+     "evidence": ["docs/headless-validation.md:218-227（047：A 运行期窗口观察最大间隔 380.44 ms 超 250 ms 门槛；B 因 A 失败在 tick 2501 中止，并遇到 control.json 的 PermissionError；整轮 passed=false）", "docs/window-observer.md（控制通道：只写一次的 control.json/target.json + 命名事件停通道；047 原档保留）"],
      "notes": "该轮失败不归因于并发本身（既有文档明确），但并行的完整验收确实尚未取得；资源不足保留真实失败，不删除旧档。"},
 
     {"id": "C34", "contract_item": "并行时的共享设备、用户档与目录", "family": "parallel_shared", "api": "ShowWindow / ChangeDisplaySettingsA / WS_EX_NOACTIVATE", "name": "显示设备与窗口", "trigger": "启动",

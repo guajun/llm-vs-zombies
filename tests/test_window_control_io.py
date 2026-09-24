@@ -1,278 +1,344 @@
-"""Real Windows file-sharing races and bounded recovery; no game or GUI calls."""
-from concurrent.futures import ThreadPoolExecutor
-import ctypes
-import hashlib
-import io
+"""Write-once control documents and the named stop event; no game and no GUI calls.
+
+The pre-#21 channel rewrote one mutable ``control.json`` while the worker polled
+it, so a reader could collide with a replacement. The replacement channel is
+structurally different: the two control documents are published exactly once by
+a single rename onto a name that does not exist yet, and the only mutable
+cross-process state is a named Windows event object.
+"""
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
-from unittest.mock import patch
+import uuid
 
 from llm_vs_zombies import window_observer as observer
 
 
-def telemetry():
-    return {"attempts": 0, "transient_failures": 0, "recovered_reads": 0,
-            "maximum_retry_duration_seconds": 0.0, "failures": []}
+class SilentWindows:
+    """Injectable read-only query surface; no window is created or touched."""
+
+    def __init__(self):
+        self.windows = {}
+        self.queries = {"foreground": 0, "enumerate": 0, "alive": 0, "visible": 0, "owner": 0}
+
+    def foreground(self):
+        self.queries["foreground"] += 1
+        return 0, None, True
+
+    def owned_windows(self, pid):
+        self.queries["enumerate"] += 1
+        return sorted(handle for handle, owner in self.windows.items() if owner == pid)
+
+    def alive(self, handle):
+        self.queries["alive"] += 1
+        return handle in self.windows
+
+    def owner_pid(self, handle):
+        self.queries["owner"] += 1
+        return self.windows.get(handle)
+
+    def visible(self, handle):
+        self.queries["visible"] += 1
+        return False
 
 
-def sharing_error(code=32):
-    error = PermissionError(13, 'injected Windows sharing conflict')
-    error.winerror = code
-    return error
-
-
-class ControlReadTests(unittest.TestCase):
+class WriteOnceControlTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.path = self.root/'control.json'
-        self.stats = telemetry()
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_recovery_retains_actual_failures_and_accepts_only_a_full_document(self):
-        failures = [sharing_error(5), sharing_error(32), sharing_error(33)]
-        with patch.object(observer, '_open_control', side_effect=failures+[io.StringIO('{"seq": 7}')]):
-            self.assertEqual(observer._read_control(self.path, self.stats), {'seq':7})
-        self.assertEqual(self.stats['attempts'],4)
-        self.assertEqual(self.stats['transient_failures'],3)
-        self.assertEqual(self.stats['recovered_reads'],1)
-        self.assertEqual([x['winerror'] for x in self.stats['failures']],[5,32,33])
-        self.assertGreater(self.stats['maximum_retry_duration_seconds'],0)
+    def test_second_publication_is_refused_and_the_first_bytes_never_change(self):
+        path = self.root / "control.json"
+        published = observer._publish_once(path, {"seq": 0, "payload": "first"})
+        original = path.read_bytes()
+        with self.assertRaisesRegex(FileExistsError, "write-once"):
+            observer._publish_once(path, {"seq": 1, "payload": "second"})
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(observer._hash(path), published)
+        self.assertEqual(observer._read(path), {"seq": 0, "payload": "first"})
+        self.assertFalse(path.with_suffix(".json.tmp").exists())
 
-    def test_permanent_access_failure_is_bounded_and_raises_original_error(self):
-        error = sharing_error(5)
-        with patch.object(observer, '_open_control', side_effect=error) as opened, \
-             patch.object(observer.time, 'sleep'):
-            with self.assertRaises(PermissionError) as caught:
-                observer._read_control(self.path,self.stats)
-        self.assertIs(caught.exception,error)
-        self.assertEqual(opened.call_count,observer.CONTROL_READ_ATTEMPTS)
-        self.assertEqual(self.stats['transient_failures'],observer.CONTROL_READ_ATTEMPTS)
-        self.assertEqual(self.stats['recovered_reads'],0)
+    def test_a_retained_temporary_is_never_clobbered_by_a_later_attempt(self):
+        path = self.root / "target.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text('{"retained": true}\n', encoding="utf-8")
+        with self.assertRaisesRegex(FileExistsError, "retained"):
+            observer._publish_once(path, {"retained": False})
+        self.assertEqual(json.loads(temporary.read_text(encoding="utf-8")), {"retained": True})
+        self.assertFalse(path.exists())
 
-    def test_retry_deadline_does_not_start_another_attempt_after_overslept_wait(self):
-        # Started=0, first failure=0.01, diagnostic timestamp=0.01, wake=0.051.
-        with patch.object(observer.time,'monotonic',side_effect=[0.,.01,.01,.051]), \
-             patch.object(observer.time,'sleep'), \
-             patch.object(observer,'_open_control',side_effect=sharing_error()) as opened:
-            with self.assertRaises(PermissionError):
-                observer._read_control(self.path,self.stats)
-        self.assertEqual(opened.call_count,1)
+    def test_only_the_observer_control_documents_can_be_published(self):
+        with self.assertRaisesRegex(ValueError, "control documents"):
+            observer._publish_once(self.root / "sealed.json", {"sealed": True})
 
-    def test_missing_malformed_and_other_io_failures_do_not_retry(self):
-        for failure in [FileNotFoundError(2,'missing'), OSError(23,'data error'),
-                        PermissionError(13,'not a Win32 replace conflict')]:
-            with self.subTest(error=repr(failure)), \
-                 patch.object(observer,'_open_control',side_effect=failure) as opened:
-                with self.assertRaises(type(failure)):
-                    observer._read_control(self.path,telemetry())
-                self.assertEqual(opened.call_count,1)
-        with patch.object(observer,'_open_control',return_value=io.StringIO('{"seq":')) as opened:
-            with self.assertRaises(json.JSONDecodeError):
-                observer._read_control(self.path,telemetry())
-            self.assertEqual(opened.call_count,1)
+    def test_held_reader_cannot_block_a_later_publication_of_another_document(self):
+        control, target = self.root / "control.json", self.root / "target.json"
+        observer._publish_once(control, {"token": "kept"})
+        with control.open(encoding="utf-8") as held:
+            # Nothing is replaced, so an open handle cannot deny publication.
+            observer._publish_once(target, {"pid": 42, "creation_time_100ns": 7})
+            self.assertEqual(json.load(held), {"token": "kept"})
+        self.assertEqual(observer._read(target), {"pid": 42, "creation_time_100ns": 7})
 
-    def test_error_detail_memory_is_bounded_without_losing_total_count(self):
-        stats = telemetry()
-        for _ in range(35):
-            with patch.object(observer,'_open_control',side_effect=[sharing_error(),io.StringIO('{}')]), \
-                 patch.object(observer.time,'sleep'):
-                observer._read_control(self.path,stats)
-        self.assertEqual(stats['transient_failures'],35)
-        self.assertEqual(stats['recovered_reads'],35)
-        self.assertEqual(len(stats['failures']),32)
+    def test_reader_at_the_publication_instant_sees_absent_or_complete_only(self):
+        # Publishing a name can transiently deny a *concurrent* open for about a
+        # millisecond while the directory entry becomes visible. That is a
+        # name-state artifact, not a partial document: any successful read is
+        # the complete document, and a retry always succeeds (see the measured
+        # bound below).
+        document = {"seq": 7, "payload": "p" * 4096}
+        blocked, recovered = 0, []
+        for iteration in range(40):
+            directory = self.root / f"round-{iteration}"
+            directory.mkdir()
+            path = directory / "control.json"
+            stop, observed = threading.Event(), []
 
-    def test_large_real_sample_gap_still_rejects_recovered_control_read(self):
-        samples=[{'monotonic_seconds':x,'foreground':0,'foreground_pid':None,
-                  'foreground_resolved':True,'owned_windows':[{'handle':99,'visible':False}]}
-                 for x in (10.,10.251)]
-        result=observer.launch_window_evidence(samples,42)
-        self.assertEqual(result['sampling']['allowed_maximum_gap_seconds'],.25)
-        self.assertFalse(result['sampling']['complete'])
-        self.assertEqual(result['foreground_check_status'],'unverified')
-
-
-@unittest.skipUnless(os.name=='nt','actual Windows share/delete contract')
-class WindowsControlFileTests(unittest.TestCase):
-    setUp = ControlReadTests.setUp
-    tearDown = ControlReadTests.tearDown
-    def exclusive_handle(self):
-        from ctypes import wintypes
-        api=observer._control_file_api()
-        handle=api.CreateFileW(str(self.path),0x80000000,0,None,3,0x80,None)
-        if handle==wintypes.HANDLE(-1).value:
-            raise ctypes.WinError(ctypes.get_last_error())
-        return handle
-
-    def test_live_reader_handle_allows_atomic_replace_and_reads_its_old_snapshot(self):
-        old={'seq':0,'payload':'old'*5000}
-        new={'seq':1,'payload':'new'*5000}
-        observer._write_control(self.path,old)
-        with observer._open_control(self.path) as held:
-            # The actual Win32 handle stays open while another thread replaces
-            # the exact destination. Default CRT sharing makes this fail.
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                pool.submit(observer._write_control,self.path,new).result(timeout=3)
-            self.assertEqual(json.load(held),old)
-            self.assertEqual(observer._read_control(self.path,self.stats),new)
-
-    def test_repeated_publications_deliver_complete_ordered_documents_to_each_reader(self):
-        def document(seq):
-            payload=f'{seq:06d}'*512
-            return {'seq':seq,'payload':payload,'sha256':hashlib.sha256(payload.encode()).hexdigest()}
-        observer._write_control(self.path,document(0))
-        barrier=threading.Barrier(4)
-        finished=threading.Event()
-        acknowledged=threading.Condition()
-        seen=[-1]*3
-        published=[0]
-        failures=[]
-        def reader(index):
-            barrier.wait(timeout=3)
-            last=-1; count=0; stats=telemetry()
-            try:
-                while not finished.is_set():
-                    with acknowledged:
-                        acknowledged.wait_for(lambda:published[0]>last or finished.is_set(),timeout=5)
-                        if finished.is_set():
+            def reader():
+                nonlocal blocked
+                while not stop.is_set():
+                    try:
+                        observed.append(observer._read(path))
+                    except FileNotFoundError:
+                        observed.append(None)
+                    except PermissionError as error:
+                        # A published name can be denied for about a millisecond
+                        # while its directory entry becomes visible. Recover with
+                        # the same bounded wait the worker uses, never a longer one.
+                        blocked += 1
+                        started = time.monotonic()
+                        while time.monotonic() - started < observer.PUBLISH_READ_SECONDS:
+                            time.sleep(observer.PUBLISH_READ_INTERVAL)
+                            try:
+                                observed.append(observer._read(path))
+                            except (FileNotFoundError, PermissionError):
+                                continue
+                            recovered.append((time.monotonic() - started, error))
                             break
-                    value=observer._read_control(self.path,stats)
-                    self.assertGreaterEqual(value['seq'],last)
-                    self.assertEqual(value,document(value['seq']))
-                    last=value['seq'];count+=1
-                    with acknowledged:
-                        seen[index]=last
-                        acknowledged.notify_all()
-            except BaseException as error:
-                with acknowledged:
-                    failures.append(error)
-                    acknowledged.notify_all()
-                raise
-            return count,stats
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            futures=[pool.submit(reader,index) for index in range(3)]
-            barrier.wait(timeout=3)
+
+            thread = threading.Thread(target=reader)
+            thread.start()
             try:
-                for seq in range(1,401):
-                    observer._write_control(self.path,document(seq))
-                    # Give each reader one job per publication instead of
-                    # spinning three readers continuously on an unchanged file.
-                    # The held-handle test above guarantees actual replacement
-                    # overlap; this test verifies repeated complete publication
-                    # and monotonic reads without benchmarking CI scheduling.
-                    with acknowledged:
-                        published[0]=seq
-                        acknowledged.notify_all()
-                        completed=acknowledged.wait_for(lambda:all(v>=seq for v in seen) or failures,timeout=5)
-                        if failures:
-                            raise failures[0]  # Preserve the actual reader failure.
-                        self.assertTrue(completed,f'publication {seq} not acknowledged: {seen}')
+                observer._publish_once(path, document)
+                self.assertEqual(observer._read(path), document)
             finally:
-                finished.set()
-                with acknowledged:
-                    acknowledged.notify_all()
-            results=[future.result(timeout=5) for future in futures]
-        self.assertTrue(all(count>=400 for count,_ in results),results)
-        self.assertEqual(observer._read_control(self.path,self.stats),document(400))
+                stop.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(observed, "the reader never ran")
+            self.assertTrue(all(item in (None, document) for item in observed), observed[:5])
+        self.assertEqual(len(recovered), blocked, "a transient publication denial never recovered")
+        for elapsed, error in recovered:
+            self.assertTrue(observer._transient_publish_failure(error))
+            self.assertLess(elapsed, observer.PUBLISH_READ_SECONDS)
 
-    def test_actual_exclusive_lock_recovery_keeps_retry_evidence(self):
-        observer._write_control(self.path,{'seq':3})
-        handle=self.exclusive_handle()
-        blocked=threading.Event()
-        original=observer._open_control
-        def observed_open(path):
+
+class NamedStopChannelNameTests(unittest.TestCase):
+    def test_name_is_derived_from_the_monitor_token(self):
+        self.assertEqual(observer.stop_channel_name("abc"),
+                         "Local\\lvz-window-observer-stop-abc")
+
+    def test_names_that_cannot_be_bound_to_one_monitor_are_rejected(self):
+        for bad in ("", "a\\b", "a/b", None, 5, True, "x" * 97):
+            with self.subTest(token=bad), self.assertRaises(ValueError):
+                observer.stop_channel_name(bad)
+
+
+@unittest.skipUnless(os.name == "nt", "named event objects require Windows")
+class NamedStopChannelTests(unittest.TestCase):
+    def setUp(self):
+        self.token = uuid.uuid4().hex
+
+    def test_signal_is_delivered_to_a_separate_process_with_a_bounded_wait(self):
+        script = ("import sys, time\n"
+                  "from llm_vs_zombies.window_observer import open_stop_channel, stop_requested\n"
+                  "handle = open_stop_channel(sys.argv[1])\n"
+                  "print('opened', flush=True)\n"
+                  "deadline = time.monotonic() + 5\n"
+                  "requested = False\n"
+                  "while not requested and time.monotonic() < deadline:\n"
+                  "    requested = stop_requested(handle)\n"
+                  "    time.sleep(0.005)\n"
+                  "print('signalled' if requested else 'timeout', flush=True)\n")
+        channel = observer.StopChannel(self.token)
+        try:
+            child = subprocess.Popen([sys.executable, "-u", "-c", script, channel.name],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
             try:
-                return original(path)
-            except OSError:
-                blocked.set()
-                raise
-        try:
-            with patch.object(observer,'_open_control',side_effect=observed_open), \
-                 ThreadPoolExecutor(max_workers=1) as pool:
-                future=pool.submit(observer._read_control,self.path,self.stats)
-                self.assertTrue(blocked.wait(timeout=2))
-                observer._control_file_api().CloseHandle(handle);handle=None
-                self.assertEqual(future.result(timeout=2),{'seq':3})
+                self.assertEqual(child.stdout.readline().decode().strip(), "opened")
+                channel.signal()
+                out, err = child.communicate(timeout=10)
+                self.assertEqual(out.decode().strip(), "signalled", err.decode())
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
         finally:
-            if handle is not None:
-                observer._control_file_api().CloseHandle(handle)
-        self.assertGreaterEqual(self.stats['transient_failures'],1)
-        self.assertEqual(self.stats['recovered_reads'],1)
+            channel.close()
 
-    def test_actual_permanent_exclusive_lock_seals_worker_failure_without_sampling(self):
-        observer._write_control(self.path,{'seq':0})
-        before=self.path.read_bytes()
-        handle=self.exclusive_handle()
+    def test_a_second_monitor_cannot_adopt_an_existing_channel_name(self):
+        first = observer.StopChannel(self.token)
         try:
-            with patch.object(observer,'window_probe',side_effect=AssertionError('must not sample')) as probe:
-                result=observer._worker(self.root,'test')
-            probe.assert_not_called()
+            with self.assertRaisesRegex(observer.ObserverFailure, "already exists") as caught:
+                observer.StopChannel(self.token)
+            self.assertEqual(caught.exception.component, "stop channel")
         finally:
-            observer._control_file_api().CloseHandle(handle)
-        self.assertEqual(result,1)
-        seal=observer._read(self.root/'sealed.json')
-        self.assertEqual(seal['stop_reason'],'worker_error')
-        self.assertEqual(seal['samples'],0)
-        self.assertEqual(seal['error_count'],1)
-        self.assertIn('PermissionError',seal['errors'][0])
-        self.assertGreater(seal['control_reads']['transient_failures'],0)
-        self.assertEqual(seal['control_reads']['recovered_reads'],0)
-        self.assertEqual(self.path.read_bytes(),before)
+            first.close()
+        # After the owner released it the name is gone and can be created again.
+        again = observer.StopChannel(self.token)
+        again.close()
 
-    def test_actual_permanent_missing_control_fails_without_inventing_a_file(self):
-        with self.assertRaises(FileNotFoundError):
-            observer._read_control(self.path,self.stats)
-        self.assertFalse(self.path.exists())
-        self.assertGreater(self.stats['transient_failures'],0)
-        self.assertEqual(self.stats['recovered_reads'],0)
-        self.assertTrue(all(x['winerror']==2 for x in self.stats['failures']))
-
-    def test_permanent_race_after_a_real_raw_sample_keeps_prefix_and_failed_seal(self):
-        class Identity:
-            def __init__(self,pid): self.value={'pid':pid,'creation_time_100ns':pid*100}
-            def alive(self): return True
-            def close(self): pass
-        observer._write_control(self.path,{'schema':observer.SCHEMA,'token':'test',
-            'parent':Identity(42).value,'seq':0,'target':None,'stop':False,'interval_seconds':.001})
-        held=[]
-        def probe(_):
-            held.append(self.exclusive_handle())
-            return {'foreground':0,'foreground_pid':None,'foreground_resolved':True,'owned_windows':[]}
+    def test_the_event_object_outlives_the_parent_handle_and_vanishes_on_exit(self):
+        script = ("import sys, time\n"
+                  "from llm_vs_zombies.window_observer import open_stop_channel\n"
+                  "handle = open_stop_channel(sys.argv[1])\n"
+                  "print('opened', flush=True)\n"
+                  "time.sleep(float(sys.argv[2]))\n")
+        channel = observer.StopChannel(self.token)
+        child = None
         try:
-            with patch.object(observer,'ProcessIdentity',Identity),patch.object(observer,'window_probe',side_effect=probe):
-                result=observer._worker(self.root,'test')
+            child = subprocess.Popen([sys.executable, "-u", "-c", script, channel.name, "1.0"],
+                stdout=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(child.stdout.readline().decode().strip(), "opened")
+            child.stdout.close()
+            channel.close()
+            self.assertIsNone(child.poll(), "the worker handle keeps the event alive")
+            reopened = observer.open_stop_channel(channel.name)
+            observer.close_channel(reopened)
+            child.wait(timeout=10)
+            with self.assertRaisesRegex(observer.ObserverFailure, "cannot open") as caught:
+                observer.open_stop_channel(channel.name)
+            self.assertEqual(caught.exception.component, "stop channel")
         finally:
-            for handle in held:
-                observer._control_file_api().CloseHandle(handle)
-        raw=(self.root/'samples.jsonl').read_bytes()
-        seal=observer._read(self.root/'sealed.json')
-        self.assertEqual(result,1)
-        self.assertEqual(len(raw.splitlines()),1)
-        self.assertEqual(seal['samples'],1)
-        self.assertEqual(seal['sha256'],hashlib.sha256(raw).hexdigest())
-        self.assertEqual(seal['bytes'],len(raw))
-        self.assertEqual(seal['stop_reason'],'worker_error')
-        self.assertEqual(seal['error_count'],1)
-        self.assertEqual(seal['control_reads']['recovered_reads'],0)
-        self.assertTrue(observer._read(self.root/'ready.json')['first_sample_ok'])
+            if child is not None and child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            channel.close()
 
-    def test_permanent_publish_denial_retains_old_control_and_complete_temporary(self):
-        observer._write_control(self.path,{'seq':0})
-        handle=self.exclusive_handle()
+
+class WorkerChannelFailureTests(unittest.TestCase):
+    """A dead or missing channel fails, is bounded and names the component."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.token = uuid.uuid4().hex
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @staticmethod
+    def parent_identity():
+        identity = observer.ProcessIdentity(os.getpid())
         try:
-            with self.assertRaises(PermissionError):
-                observer._write_control(self.path,{'seq':1})
+            return identity.value
         finally:
-            observer._control_file_api().CloseHandle(handle)
-        self.assertEqual(observer._read(self.path),{'seq':0})
-        self.assertEqual(observer._read(self.path.with_suffix('.json.tmp')),{'seq':1})
+            identity.close()
+
+    def publish_control(self, **overrides):
+        document = {"schema": observer.SCHEMA, "token": self.token, "parent": self.parent_identity(),
+                    "interval_seconds": 0.005, "scan_interval_seconds": 1.0,
+                    "stop_channel": observer.stop_channel_name(self.token)}
+        document.update(overrides)
+        observer._publish_once(self.root / "control.json", document)
+        return document
+
+    def seal(self):
+        return json.loads((self.root / "sealed.json").read_text(encoding="utf-8"))
+
+    def test_missing_stop_channel_names_the_component_before_any_sample(self):
+        self.publish_control()
+        result = observer._worker(self.root, self.token, windows=SilentWindows())
+        self.assertEqual(result, 1)
+        seal = self.seal()
+        self.assertEqual(seal["stop_reason"], "worker_error")
+        self.assertEqual(seal["samples"], 0)
+        self.assertEqual(seal["failure"]["component"], "stop channel")
+        self.assertIn("cannot open", seal["failure"]["message"])
+        self.assertFalse((self.root / "samples.jsonl").exists())
+        self.assertFalse((self.root / "observer.lock").exists())
+
+    def test_missing_control_document_is_a_named_failure(self):
+        result = observer._worker(self.root, self.token, windows=SilentWindows())
+        self.assertEqual(result, 1)
+        seal = self.seal()
+        self.assertEqual(seal["failure"]["component"], "control document")
+        self.assertEqual(seal["samples"], 0)
+        self.assertFalse((self.root / "control.json").exists())
+
+    def test_control_document_for_another_token_is_refused(self):
+        self.publish_control(token=uuid.uuid4().hex)
+        self.assertEqual(observer._worker(self.root, self.token, windows=SilentWindows()), 1)
+        self.assertEqual(self.seal()["failure"]["component"], "control document")
+
+    def test_unreadable_target_binding_is_named_and_keeps_the_raw_prefix(self):
+        channel = observer.StopChannel(self.token)
+        try:
+            self.publish_control()
+            (self.root / "target.json").write_text("{not json", encoding="utf-8")
+            self.assertEqual(observer._worker(self.root, self.token, windows=SilentWindows()), 1)
+            seal = self.seal()
+            self.assertEqual(seal["failure"]["component"], "target binding document")
+            self.assertEqual(seal["stop_reason"], "worker_error")
+            self.assertTrue((self.root / "samples.jsonl").exists())
+            self.assertEqual(seal["sha256"], observer._hash(self.root / "samples.jsonl"))
+            self.assertEqual(seal["bytes"], (self.root / "samples.jsonl").stat().st_size)
+        finally:
+            channel.close()
+
+    def test_target_whose_creation_identity_changed_is_refused(self):
+        channel = observer.StopChannel(self.token)
+        try:
+            self.publish_control()
+            identity = self.parent_identity()
+            identity["creation_time_100ns"] += 1
+            observer._publish_once(self.root / "target.json", identity)
+            self.assertEqual(observer._worker(self.root, self.token, windows=SilentWindows()), 1)
+            self.assertEqual(self.seal()["failure"]["component"], "target identity")
+        finally:
+            channel.close()
+
+    def test_unbound_worker_samples_without_enumerating_or_inventing_owned_windows(self):
+        windows = SilentWindows()
+        channel = observer.StopChannel(self.token)
+        try:
+            self.publish_control()
+
+            def stop_soon():
+                time.sleep(0.12)
+                channel.signal()
+
+            stopper = threading.Thread(target=stop_soon)
+            stopper.start()
+            started = time.monotonic()
+            result = observer._worker(self.root, self.token, windows=windows)
+            elapsed = time.monotonic() - started
+            stopper.join(timeout=5)
+            self.assertEqual(result, 0)
+            seal = self.seal()
+            self.assertEqual(seal["stop_reason"], "requested_stop")
+            self.assertIsNone(seal["target"])
+            self.assertEqual(seal["window_discovery"], {"mode": "target_not_bound"})
+            self.assertGreaterEqual(seal["samples"], 2)
+            self.assertLess(elapsed, 5)
+            samples = [json.loads(line) for line in
+                       (self.root / "samples.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(all(sample["target"] is None for sample in samples))
+            self.assertTrue(all(sample["owned_windows"] == [] for sample in samples))
+            self.assertGreater(windows.queries["foreground"], 0)
+            self.assertEqual(windows.queries["enumerate"], 0)
+        finally:
+            channel.close()
 
 
-if __name__=='__main__':
+if __name__ == "__main__":
     unittest.main()
