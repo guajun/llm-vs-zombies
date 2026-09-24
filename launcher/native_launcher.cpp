@@ -6,10 +6,21 @@
 #include <vector>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
+#include "branch_id.hpp"
 #include "silent_audio.hpp"
 
 namespace {
 std::runtime_error Failure(const char* stage) { return std::runtime_error(std::string(stage)+": Win32 error "+std::to_string(GetLastError())); }
+// Branch ids are ASCII by grammar. Convert without assuming a code page so a
+// non-ASCII argument fails instead of turning into a different id.
+std::string NarrowAscii(const wchar_t* value,const char* what) {
+    std::string result;
+    for(;*value;++value) {
+        if(*value<0x20||*value>0x7e) throw std::runtime_error(std::string(what)+" must be printable ASCII");
+        result.push_back(static_cast<char>(*value));
+    }
+    return result;
+}
 DWORD Remote(HANDLE process,LPTHREAD_START_ROUTINE function,void* argument) {
     HANDLE thread=CreateRemoteThread(process,nullptr,0,function,argument,0,nullptr);
     if(!thread) throw Failure("CreateRemoteThread");
@@ -44,11 +55,17 @@ int wmain(int argc,wchar_t** argv) {
     HANDLE process=nullptr,thread=nullptr;
     bool launched=false;
     try {
-        if((argc==7||argc==8)&&!wcscmp(argv[1],L"launch")) {
-            const bool silent=argc==8;
-            if(silent&&wcscmp(argv[7],lvz::silentaudio::ModeW)) throw std::runtime_error("unsupported audio mode");
+        if((argc==8||argc==9)&&!wcscmp(argv[1],L"launch")) {
+            // launch ENGINE BOOTSTRAP SANDBOX CWD RECEIPT BRANCH [AUDIO_MODE]
+            const bool silent=argc==9;
+            if(silent&&wcscmp(argv[8],lvz::silentaudio::ModeW)) throw std::runtime_error("unsupported audio mode");
+            // Validate before anything is created or reconfigured: an illegal
+            // or oversized branch id fails the launch instead of silently
+            // leaving the run on the runtime's process-instance label.
+            const std::string branch=NarrowAscii(argv[7],"branch id");
+            lvz::branch::Require(branch);
+            if(!SetEnvironmentVariableW(L"LVZ_BRANCH_ID",argv[7]))throw Failure("branch environment");
             if(!SetEnvironmentVariableW(L"LVZ_AUDIO_MODE",silent?lvz::silentaudio::ModeW:L"original"))throw Failure("audio environment");
-            // launch ENGINE BOOTSTRAP SANDBOX CWD RECEIPT
             if(!SetEnvironmentVariableW(L"LVZ_SANDBOX",argv[4]))throw Failure("sandbox environment");
             STARTUPINFOW startup{}; startup.cb=sizeof(startup); startup.dwFlags=STARTF_USESHOWWINDOW; startup.wShowWindow=SW_HIDE;
             PROCESS_INFORMATION info{};
@@ -94,7 +111,8 @@ int wmain(int argc,wchar_t** argv) {
             if(result) throw std::runtime_error("bootstrap isolation failed: code "+std::to_string(result));
             FILE* receipt=_wfopen(argv[6],L"wb");
             if(!receipt) throw std::runtime_error("cannot write launcher receipt");
-            nlohmann::json output={{"pid",info.dwProcessId},{"creation_time",Started(process)},{"isolation_ready",true}};
+            nlohmann::json output={{"pid",info.dwProcessId},{"creation_time",Started(process)},
+                {"branch_id",branch},{"branch_channel","LVZ_BRANCH_ID"},{"isolation_ready",true}};
             if(silent)output["audio_activation"]=audio;
             const bool written=fprintf(receipt,"%s\n",output.dump().c_str())>=0 && fflush(receipt)==0;
             const bool closed=fclose(receipt)==0;
@@ -108,7 +126,7 @@ int wmain(int argc,wchar_t** argv) {
             Verify(process,argv[3],created);
             if(!wcscmp(argv[1],L"inject")) { auto module=Load(process,argv[5]); printf("{\"module\":%lu}\n",module); }
             else { if(!TerminateProcess(process,0)) throw Failure("TerminateProcess"); WaitForSingleObject(process,5000); puts("{\"stopped\":true}"); }
-        } else throw std::runtime_error("usage: launch ENGINE BOOTSTRAP SANDBOX CWD RECEIPT | inject PID ENGINE CREATION_TIME DLL | stop PID ENGINE CREATION_TIME unused");
+        } else throw std::runtime_error("usage: launch ENGINE BOOTSTRAP SANDBOX CWD RECEIPT BRANCH [AUDIO_MODE] | inject PID ENGINE CREATION_TIME DLL | stop PID ENGINE CREATION_TIME unused");
         if(thread) CloseHandle(thread); if(process) CloseHandle(process); return 0;
     } catch(const std::exception& error) {
         if(launched && process) { TerminateProcess(process,100); WaitForSingleObject(process,5000); }
