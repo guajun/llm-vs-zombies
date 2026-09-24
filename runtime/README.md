@@ -83,6 +83,11 @@ cold-start acceptance is incomplete. Hidden-window pumping and observation are
 launcher concerns, not a pure windowless-server claim; the measured scope and
 remaining gates are in [live validation](../docs/headless-validation.md).
 
+`card_resubmit_mid_run` is false as well: cards are submitted only while an
+`initialize` request is pending, so a finished round returns to the next round's
+card-select screen with no continuation. Evaluation plans asking for more than
+one round are refused for that reason instead of stopping short silently (#97).
+
 The overlay also removes AvZ's recursive script-lifetime wait and makes card
 selection non-blocking. The upstream submodule is untouched; CMake checks SHA-256
 for every transformed source. The deterministic adapter verifies target image

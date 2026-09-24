@@ -4,7 +4,7 @@
   "ticks_per_game_second": 100,
   "observation_mode": "full_memory",
   "target_waves": 20,
-  "end_condition": "evaluation plan or explicit stop_recording; target_waves describes one two-flag cycle",
+  "end_condition": "evaluation plan or explicit stop_recording; target_waves describes one round = two flags = twenty waves",
   "allow_rerecord": false,
   "zombie_generation": "game_default; recorder does not call ASetZombies",
   "game_rng_seed": null,

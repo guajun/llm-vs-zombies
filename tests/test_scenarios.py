@@ -122,33 +122,59 @@ class PlanScenarioTests(unittest.TestCase):
 
     def test_default_plan_and_old_plans_keep_today_behaviour(self):
         plan = ev.Plan().validate()
-        self.assertEqual((plan.scenario, plan.flags_to_complete), ("liangyi", 1))
+        self.assertEqual((plan.scenario, plan.rounds_to_complete), ("liangyi", 1))
         self.assertEqual(plan.expected_scene, 3)
         with tempfile.TemporaryDirectory() as temp:
             # a v2 document written before these fields existed
             plan = ev.Plan.load(self.write(temp, {"schema": "lvz.evaluation-plan.v2", "tier": "smoke"}))
-            self.assertEqual((plan.scenario, plan.flags_to_complete, plan.expected_scene), ("liangyi", 1, 3))
+            self.assertEqual((plan.scenario, plan.rounds_to_complete, plan.expected_scene), ("liangyi", 1, 3))
             # a v1 document
             plan = ev.Plan.load(self.write(temp, {"schema": "lvz.evaluation-plan.v1"}))
-            self.assertEqual((plan.scenario, plan.flags_to_complete, plan.expected_scene), ("liangyi", 1, 3))
+            self.assertEqual((plan.scenario, plan.rounds_to_complete, plan.expected_scene), ("liangyi", 1, 3))
             # the fields survive the JSON round trip the runner and cold workers use
             again = ev.Plan.load(self.write(temp, ev.asdict(plan)))
-            self.assertEqual((again.scenario, again.flags_to_complete, again.expected_scene),
-                             (plan.scenario, plan.flags_to_complete, plan.expected_scene))
+            self.assertEqual((again.scenario, again.rounds_to_complete, again.expected_scene),
+                             (plan.scenario, plan.rounds_to_complete, plan.expected_scene))
             self.assertEqual((again.seeds, again.tick_budget, again.audio_mode, again.b0_normalization),
                              (plan.seeds, plan.tick_budget, plan.audio_mode, plan.b0_normalization))
+            self.assertNotIn("flags_to_complete", ev.asdict(plan))
 
-    def test_plan_cli_round_trips_scenario_and_flags(self):
+    def test_the_pre_rename_field_is_a_read_only_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            # #97: the old name always counted rounds, so it still names the same
+            # run; only the new key is ever written back.
+            plan = ev.Plan.load(self.write(temp, {"schema": "lvz.evaluation-plan.v2",
+                                                  "scenario": "jingdian12", "flags_to_complete": 2}))
+            self.assertEqual((plan.scenario, plan.rounds_to_complete), ("jingdian12", 2))
+            self.assertNotIn("flags_to_complete", ev.asdict(plan))
+            mixed = self.write(temp, {"schema": "lvz.evaluation-plan.v2",
+                                      "rounds_to_complete": 1, "flags_to_complete": 2})
+            with self.assertRaisesRegex(ValueError, "read-only alias flags_to_complete"):
+                ev.Plan.load(mixed)
+
+    def test_plan_cli_round_trips_scenario_and_rounds(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "jingdian12.json"
             with patch("builtins.print"):
                 self.assertEqual(ev.main(["plan", str(path), "--scenario", "jingdian12",
-                                          "--flags-to-complete", "2", "--tick-budget", "200000"]), 0)
+                                          "--rounds-to-complete", "2", "--tick-budget", "200000"]), 0)
             document = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual((document["scenario"], document["flags_to_complete"]), ("jingdian12", 2))
+            self.assertEqual((document["scenario"], document["rounds_to_complete"]), ("jingdian12", 2))
+            self.assertNotIn("flags_to_complete", document)
             plan = ev.Plan.load(path)
-            self.assertEqual((plan.scenario, plan.flags_to_complete, plan.expected_scene), ("jingdian12", 2, 2))
+            self.assertEqual((plan.scenario, plan.rounds_to_complete, plan.expected_scene), ("jingdian12", 2, 2))
             self.assertEqual(plan.scenario_spec(), lv.scenario_spec("jingdian12"))
+            # the transitional alias still selects the same run and writes the new key
+            alias = Path(temp) / "alias.json"
+            with patch("builtins.print"):
+                self.assertEqual(ev.main(["plan", str(alias), "--flags-to-complete", "2"]), 0)
+            aliased = json.loads(alias.read_text(encoding="utf-8"))
+            self.assertEqual(aliased["rounds_to_complete"], 2)
+            self.assertNotIn("flags_to_complete", aliased)
+            mixed = Path(temp) / "mixed.json"
+            with self.assertRaises(SystemExit), patch("builtins.print"), contextlib.redirect_stderr(io.StringIO()):
+                ev.main(["plan", str(mixed), "--rounds-to-complete", "1", "--flags-to-complete", "2"])
+            self.assertFalse(mixed.exists())
 
     def test_unknown_scenario_plan_is_rejected_before_it_is_written(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -162,15 +188,18 @@ class PlanScenarioTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unknown scenario"):
                 ev.Plan(scenario="pool-endless").validate()
 
-    def test_flags_to_complete_bounds_and_type_are_enforced(self):
+    def test_rounds_to_complete_bounds_and_type_are_enforced(self):
         for value in (0, 101, -1, True, 1.0, "2", None):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "flags_to_complete"):
-                ev.Plan(flags_to_complete=value).validate()
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "rounds_to_complete"):
+                ev.Plan(rounds_to_complete=value).validate()
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "plan.json"
             with self.assertRaises(SystemExit), patch("builtins.print"), contextlib.redirect_stderr(io.StringIO()):
-                ev.main(["plan", str(path), "--flags-to-complete", "101"])
+                ev.main(["plan", str(path), "--rounds-to-complete", "101"])
             self.assertFalse(path.exists())
+            # the alias is validated under the new name too
+            with self.assertRaisesRegex(ValueError, "rounds_to_complete"):
+                ev.Plan.load(self.write(temp, {"schema": "lvz.evaluation-plan.v2", "flags_to_complete": 101}))
 
     def test_full_cycle_gate_uses_the_scenario_scene_not_a_fixed_three(self):
         pool_initial = {"completed_rounds": 4, "scene": 2}
@@ -179,12 +208,29 @@ class PlanScenarioTests(unittest.TestCase):
         # ... and the default is still fog, so older calls keep their meaning.
         self.assertTrue(ev.full_cycle_completed(pool_initial, {"completed_rounds": 5, "scene": 3}, 20))
         self.assertFalse(ev.full_cycle_completed(pool_initial, {"completed_rounds": 5, "scene": 2}, 20))
-        self.assertEqual(ev.completed_flags(pool_initial, {"completed_rounds": 6}), 2)
-        self.assertIsNone(ev.completed_flags(pool_initial, {}))
+        # one round of completed_rounds growth is the two flags the gate always meant
+        self.assertEqual(ev.rounds_completed(pool_initial, {"completed_rounds": 5}), 1)
+        self.assertEqual(ev.rounds_completed(pool_initial, {"completed_rounds": 6}), 2)
+        self.assertIsNone(ev.rounds_completed(pool_initial, {}))
+        self.assertFalse(ev.full_cycle_completed(pool_initial, {"completed_rounds": 5, "scene": 2}, 20, 2, 2))
+        self.assertTrue(ev.full_cycle_completed(pool_initial, {"completed_rounds": 6, "scene": 2}, 20, 2, 2))
 
 
-class PlaySourceFlagTests(unittest.TestCase):
-    """The source loop stops after ``flags_to_complete`` flags, not after one."""
+class RoundCapabilityTests(unittest.TestCase):
+    """A plan may only ask for rounds the runtime can actually play out (#97)."""
+
+    def test_a_multi_round_plan_is_refused_when_the_runtime_cannot_resubmit_cards(self):
+        client = Mock()
+        client.hello_result = {"capabilities": {"initialize": True}}
+        ev._require_round_capability(client, ev.Plan())  # one round never needs it
+        with self.assertRaisesRegex(ValueError, r"rounds_to_complete=2.*card_resubmit_mid_run.*#97"):
+            ev._require_round_capability(client, ev.Plan(rounds_to_complete=2))
+        client.hello_result = {"capabilities": {"card_resubmit_mid_run": True}}
+        ev._require_round_capability(client, ev.Plan(rounds_to_complete=2))
+
+
+class PlaySourceRoundTests(unittest.TestCase):
+    """The source loop stops after ``rounds_to_complete`` rounds, not after one."""
 
     @staticmethod
     def observation(tick, *, rounds, scene=2, wave=20, ui=3):
@@ -192,10 +238,14 @@ class PlaySourceFlagTests(unittest.TestCase):
                 "wave": wave, "completed_rounds": rounds, "game_ui": ui, "scene": scene}
 
     def play(self, plan, commits, *, first_rounds=0, first_tick=1):
+        """``commits`` are (tick, rounds) or (tick, rounds, game_ui) steps."""
+        steps = [item if isinstance(item, dict) else
+                 {"tick": item[0], "rounds": item[1], **({"ui": item[2]} if len(item) > 2 else {})}
+                 for item in commits]
         client = Mock()
-        client.commit.side_effect = [{"observation": self.observation(tick, rounds=rounds),
+        client.commit.side_effect = [{"observation": self.observation(**step),
                                       "action_results": [], "stop_reason": "budget_exhausted"}
-                                     for tick, rounds in commits]
+                                     for step in steps]
         strategy = Mock()
         strategy.decide.return_value = {"actions": [], "advance_ticks": 1}
         budget = Mock(stop=None)
@@ -208,26 +258,44 @@ class PlaySourceFlagTests(unittest.TestCase):
                                    {"observation": self.observation(first_tick, rounds=first_rounds)},
                                    Path(directory), budget)
 
-    def test_one_flag_still_stops_the_default_run(self):
+    def test_one_round_still_stops_the_default_run(self):
         plan = ev.Plan(tick_budget=100, chunk_ticks=1, pause_points=(), scenario="jingdian12")
         result = self.play(plan, [(2, 1), (3, 2)])
-        self.assertEqual((result["outcome"], result["flags_completed"]), ("full_cycle_completed", 1))
+        self.assertEqual((result["outcome"], result["rounds_completed"]), ("full_cycle_completed", 1))
+        self.assertEqual(result["rounds_to_complete"], 1)
         self.assertTrue(result["full_cycle"])
 
-    def test_two_flags_do_not_stop_at_the_first_flag(self):
+    def test_two_rounds_do_not_stop_at_the_first_round(self):
         plan = ev.Plan(tick_budget=100, chunk_ticks=1, pause_points=(), scenario="jingdian12",
-                       flags_to_complete=2)
+                       rounds_to_complete=2)
         result = self.play(plan, [(2, 1), (3, 2)])
         self.assertEqual((result["outcome"], result["decisions"]), ("full_cycle_completed", 2))
-        self.assertEqual((result["flags_completed"], result["flags_to_complete"]), (2, 2))
+        self.assertEqual((result["rounds_completed"], result["rounds_to_complete"]), (2, 2))
 
     def test_the_gate_is_unchanged_when_the_declared_run_is_longer(self):
         plan = ev.Plan(tick_budget=2, chunk_ticks=1, pause_points=(), scenario="jingdian12",
-                       flags_to_complete=2)
+                       rounds_to_complete=2)
         result = self.play(plan, [(2, 1)])
         self.assertEqual(result["outcome"], "tick_budget_exhausted")
-        self.assertEqual(result["flags_completed"], 1)
-        self.assertTrue(result["full_cycle"], "one completed flag must still satisfy the gate")
+        self.assertEqual(result["rounds_completed"], 1)
+        self.assertTrue(result["full_cycle"], "one completed round must still satisfy the gate")
+
+    def test_the_round_boundary_is_named_instead_of_a_generic_early_stop(self):
+        # #97: one round is done and the board is back at the next round's
+        # card-select screen while two were declared. The run must say why it
+        # stopped instead of reporting a silent terminal_before_complete.
+        plan = ev.Plan(tick_budget=100, chunk_ticks=1, pause_points=(), scenario="jingdian12",
+                       rounds_to_complete=2)
+        result = self.play(plan, [(2, 1), (3, 1, 2)])
+        self.assertEqual(result["outcome"], "round_handoff_required")
+        self.assertEqual((result["rounds_completed"], result["rounds_to_complete"]), (1, 2))
+        self.assertTrue(result["full_cycle"], "the at-least-one-round gate is unchanged")
+
+    def test_a_short_default_run_still_reports_the_historic_outcome(self):
+        plan = ev.Plan(tick_budget=100, chunk_ticks=1, pause_points=(), scenario="jingdian12")
+        result = self.play(plan, [(2, 0, 2)])
+        self.assertEqual(result["outcome"], "terminal_before_complete")
+        self.assertFalse(result["full_cycle"])
 
 
 class HostedScriptTests(unittest.TestCase):

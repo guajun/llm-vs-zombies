@@ -33,12 +33,14 @@ python -m llm_vs_zombies.evaluation run work/strict-plan.json --output experimen
 
 strict 默认每个种子要求 10 次冷启动：一次录制策略轨迹，九次冷启动后重算同一轨迹，**不是让 LLM 再回答九次**。另有恢复测试专用进程，不能拿它凑十次完整重放。默认上限 200000 tick，达到上限仍未完成两旗即不满足通关门槛。源未完成两旗时封存真实结果并跳过九次重放；smoke 的正常来源仍运行一次真实 cold 和恢复探针。首个 cold 失败后停止派发该种子尚未开始的重放，已运行的 cold 完成正常关闭和证据保留。这里的 baseline 是公开候选策略，命令可执行并不证明它已能赢完整两旗。
 
-`plan` 支持 `--seeds 0,1,42`、`--tick-budget`、`--cold-starts`、`--cold-workers 1|2`、`--timeout-seconds`、`--wall-budget-seconds`、`--cold-wall-budget-seconds`、`--min-free-bytes`、`--packaging-reserve-bytes`、`--disk-check-ticks`、`--b0-normalize`、过渡别名 `--app-update-count`/`--mj-clock`、`--scenario`、`--flags-to-complete 1..100` 和 `--pause-points '[[1000,1],[2500,5]]'`。strict 生成默认单请求超时600秒、源墙钟预算86400秒、每次cold墙钟预算86400秒；smoke 单请求/源默认仍为90/3600秒。已有计划保持其显式值，不自动延长。strict 不能降低十次冷启动要求。策略相对路径相对于计划文件所在目录；生成命令会保存当时解析的绝对路径。
+`plan` 支持 `--seeds 0,1,42`、`--tick-budget`、`--cold-starts`、`--cold-workers 1|2`、`--timeout-seconds`、`--wall-budget-seconds`、`--cold-wall-budget-seconds`、`--min-free-bytes`、`--packaging-reserve-bytes`、`--disk-check-ticks`、`--b0-normalize`、过渡别名 `--app-update-count`/`--mj-clock`、`--scenario`、`--rounds-to-complete 1..100`（过渡只读别名 `--flags-to-complete`）和 `--pause-points '[[1000,1],[2500,5]]'`。strict 生成默认单请求超时600秒、源墙钟预算86400秒、每次cold墙钟预算86400秒；smoke 单请求/源默认仍为90/3600秒。已有计划保持其显式值，不自动延长。strict 不能降低十次冷启动要求。策略相对路径相对于计划文件所在目录；生成命令会保存当时解析的绝对路径。
 
 计划 schema 是 `lvz.evaluation-plan.v2`。两个与场景和局长有关的字段：
 
 * `scenario`（缺省 `liangyi`）：launcher 注册表里的 scenario 名，决定使用哪个参考存档、哪份卡序、期望的 `Scene()` 以及阵型校验规则（见 `docs/launcher.md`）。未知名称在写计划时就报错，运行时也会在任何游戏进程启动前再次报错。不带该字段的旧计划一律按 `liangyi` 读，等价于今天的行为。
-* `flags_to_complete`（缺省 1，范围 1..100）：源局自己完成几面旗才停。`full_cycle` 门槛**不随它变化**，始终表示"至少完成了一面旗"（`completed_rounds` 有增长 + 实到第 20 波 + 结束时场景仍是该 scenario 的期望场景）。长局跑法 = `flags_to_complete 2` + 足够大的 `--tick-budget`：泳池无尽的十二炮脚本自带 20 波 P6 节奏，默认 `--tick-budget 1000` 在第一波前就会耗尽，两旗需要按实际波间隔放大（例如 `--tick-budget 200000`，strict 的默认值就是这个量级）并配 `--wall-budget-seconds`。
+* `rounds_to_complete`（缺省 1，范围 1..100）：源局自己完成几个 round 才停。**计数单位是 round**：游戏里 1 round = 2 flag = 20 波（`completed_rounds` 的增量就是 round 数，游戏侧没有独立的 flag 计数），所以旧名 `flags_to_complete` 从来不是"几面旗"，而是"几个 round"（见 #97）。旧名仍作为**过渡只读别名**被 `Plan.load` 读取并映射到这个字段，runner/CLI 只写新键；两个键同时出现直接报错。`full_cycle` 门槛**不随它变化**，始终表示"至少完成了一个 round（= 两面旗 = 20 波）"（`completed_rounds` 有增长 + 实到第 20 波 + 结束时场景仍是该 scenario 的期望场景）。
+
+  填大于 1 的 round 目前会被**明确拒绝**，不是静默早停：跨 round 需要运行中重新提交卡片（打完一个 round 游戏会回到下一轮的选卡界面），而当前 runtime 只在 initialization 阶段处理选卡（`runtime/runtime.cpp`），hello 里把 `capabilities.card_resubmit_mid_run` 声明为 `false`。runner 在源局第一次动作前按这个能力检查 `rounds_to_complete`，缺失时该 case 以明确错误结束并保留原因；将来若 runtime 声明支持，源循环仍会如实区分"停在 round 边界"（`round_handoff_required`）与其他终局，不混成 `terminal_before_complete`。需要跑长局时 `--tick-budget` 要按实际波间隔放大（例如 `--tick-budget 200000`，strict 的默认值就是这个量级）并配 `--wall-budget-seconds`；泳池无尽的十二炮脚本自带 20 波 P6 节奏，默认 `--tick-budget 1000` 在第一波前就会耗尽。
 
 B(0) 归一化目标仍是一张**有序表** `b0_normalization: [{field, target, reason}]`，`field` 是 B(0) 状态的 JSON Pointer，必须落在 runtime 声明的封闭字段集合内（当前为 `/sound_effects/app_update_count`（`LawnApp+0x484`）与 `/app/mj_clock`（`LawnApp+0x838`）），`target` 范围 `0..2147483647`，`reason` 是审阅文本：
 
@@ -68,7 +70,7 @@ def decide(observation, context):
     }
 ```
 
-`context` 包含固定种子、决策序号、剩余 tick、smoke/strict 等级和终点名称。动作是普通 Client 协议，例如 `{'op':'plant','type':8,'row':2,'col':5}`。预算不能超过剩余实验预算，连续 16 次没有模拟进度会停止。墙钟上限在决策前后检查；任意外部模型请求仍应在策略代码内设置自己的网络超时。
+`context` 包含固定种子、决策序号、剩余 tick、smoke/strict 等级、本计划声明的 `rounds_to_complete`（单位是 round：1 round = 2 flag = 20 波）和终点名称（strict 为 `complete_declared_rounds`，smoke 为 `tick_budget`）。动作是普通 Client 协议，例如 `{'op':'plant','type':8,'row':2,'col':5}`。预算不能超过剩余实验预算，连续 16 次没有模拟进度会停止。墙钟上限在决策前后检查；任意外部模型请求仍应在策略代码内设置自己的网络超时。
 
 执行器用 RecordedConsole 记录完整策略源码、SHA256、每次 Python cell、输出、异常、决策结果以及 Client 的请求/响应。策略代码可通过注入的 `record_exchange(provider, request, response)` 保存模型提示与回答；它不会自行调用模型。密钥应由本地环境读取，不能写进提示/响应记录。策略属于用户信任的本地 Python 代码，这个接口不是 Python 安全沙箱。
 
@@ -86,7 +88,7 @@ launcher 在进入游戏前应用 seed，源实验在真实两仪初态暂停后
 
 source及cold还按 `pause_points`，在首次达到指定tick的已完成战斗请求边界等待。默认为≥1000时1秒、≥2500时5秒；保存请求目标、实际版本和同样的模拟状态不变证明（比较范围与B0暂停探针一致）。一次请求跨过多个点就在同一实际边界逐个检查，不拆预算、不新增推进、不重试动作。末请求恰好停在B1000且仍在战斗时照常探测。报告分别列出configured、completed、已达阈值却无法执行的unexecuted_reached和尚未到达终点的not_reached。直接到终局或资源停止导致已达点无法合法探测时，coverage为unverified，不能用B0暂停通过来遮盖；超出真实终点的点明确not applicable。记录在 `pause-probes-during-play.json` 和客户端trace中。
 
-完整两旗要求同时满足：实际观察到至少第 20 波、`completed_rounds` 比初值增加、结束时场景仍是该 scenario 的期望场景（`liangyi` 为 3=雾夜，`jingdian12` 为 2=泳池；注册表是唯一来源）。默认 `flags_to_complete=1` 时源局在第一面旗就停，因此"两旗"要显式声明 2；`flags_to_complete=2` 只影响源局何时收尾，不改变这条门槛本身。正常返回选卡允许短于请求预算，GameOver则是可正常录制的策略失败。仅到第 20 波、计时器归零、僵尸短暂为空或策略自报成功都不算通过。实际零时钟终局仍是一笔原生调用，前后完整state可能变化；公开runner不把同tick当作没有执行，严格reader继续核验所有原生调用、终局和原始旁证。
+`full_cycle` 门槛（source 报告里的 `full_cycle`）要求同时满足：实际观察到至少第 20 波、`completed_rounds` 比初值增加、结束时场景仍是该 scenario 的期望场景（`liangyi` 为 3=雾夜，`jingdian12` 为 2=泳池；注册表是唯一来源）。默认 `rounds_to_complete=1` 就是这一个 round（= 两面旗 = 20 波），门槛**不随字段值变化**；字段只决定源局何时收尾。source 报告另原样记录 `rounds_completed`（自初值的 round 增量）与 `rounds_to_complete`，读者不必再从旗数反推。填大于 1 的 round 需要运行中重新提交卡片，当前 runtime 不具备，因此按上面的能力检查在源局第一次动作前明确拒绝（见 #97）。正常返回选卡允许短于请求预算，GameOver则是可正常录制的策略失败。仅到第 20 波、计时器归零、僵尸短暂为空或策略自报成功都不算通过。实际零时钟终局仍是一笔原生调用，前后完整state可能变化；公开runner不把同tick当作没有执行，严格reader继续核验所有原生调用、终局和原始旁证。
 
 录制关闭后，engine replay 会读取真实客户端轨迹和原生 audit、核验记录完整性，再在新进程执行相同动作。任何初态差异、帧数差异、动作结果差异或捕获状态分叉均保留首个失败位置。终局跨 epoch 只有在 runtime 与 replay 都提供并核验对应终局边界证据时才可通过。
 
