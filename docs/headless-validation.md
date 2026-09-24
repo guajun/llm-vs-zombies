@@ -309,3 +309,9 @@ B0实测110组历史、880个Foley槽及32个声道均为空，保留原始变�
 公开入口在本轮重新构建了产物，因此本轮 `recorder.dll` 的SHA256（`170b7456c6c0ddf6512ca7497f01db06a513415f0e50e2cd67988c90bd61f814`）与3 tick短程不同；每轮的实现与产物身份由该轮自己的构建日志、run内实现归档与宿主来源比对确定，不声称两个suite使用了完全相同的DLL。逐文件哈希、窗口明细与两轮身份见 `work/public-fp-preflight-003-review.json` 与 `work/public-fp-smoke-001-review.json`；原始归档在 `work/public-cold-integration-tree/experiments/runs/public-fp-smoke-001*`，按公开仓库规则不上传。
 
 本结果只支持该新模式、种子42、公开策略、5000 tick预算与已捕获状态的确定性与并行管线。源在5000 tick时只到第2波，未完成两旗、没有自然零时钟终局，也没有十次冷启动；`experiment_ready` 与 `strict_engine_determinism_proven` 仍为false。下一步仍是新源真实完成两旗后按strict合同重放九次。
+
+## 挂起扰动探针 A0/A1 的工具就绪（2026-09-24）
+
+[跨界耦合清单](跨界耦合清单.md) §4 的 A 组探针已落成可执行工具与离线判据：`src/llm_vs_zombies/suspend_probes.py`（live `probe` + 离线 `judge`/`assess`，18 项离线夹具），plan 侧新增 `--pause-perturbations`（缺省空 = 旧行为，探测记录同键同值），不满足的判据与缺失的证据分别记 `fail` 与 `unverified`。
+
+**本文档没有 A0/A1 真机结论**：暂停期间的时间源/焦点/光标扰动是否影响轨迹，仍待主 agent 按[挂起扰动探针 A0/A1](挂起扰动探针A0A1.md) §5 串行排产。既有 006/041/044 的 ≤5 s 暂停记录原样保留，不外推为长挂起或扰动结论。

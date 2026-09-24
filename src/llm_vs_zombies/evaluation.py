@@ -29,6 +29,7 @@ from . import fp_environment
 from .app_update_anchor import target_from_recipe
 from .mj_clock_anchor import target_from_recipe as mj_clock_target_from_recipe
 from .window_observer import LaunchWindowMonitor, launch_window_evidence, window_probe
+from . import suspend_probes
 from .evaluation_support import (BoundaryBudget, BoundaryStop, ReplayBoundaryClient,
     cleanup_passed, error_detail, finalize_run, host_sources)
 
@@ -60,6 +61,10 @@ class Plan:
     packaging_reserve_bytes: int = 1024**3
     disk_check_ticks: int = 500
     pause_points: tuple = ((1000, 1.0), (2500, 5.0))
+    # Declared host perturbations applied inside every pause of this plan
+    # (coupling list §4, probe A): "wall", "focus", "cursor". Empty = a plain
+    # wall-clock pause, exactly as before this field existed.
+    pause_perturbations: tuple = ()
     strategy: str | None = None
     audio_mode: str = "original"
     # Declared B(0) normalization table: ordered {field, target, reason}
@@ -139,6 +144,12 @@ class Plan:
                     or not isinstance(point[1], (int, float)) or not 0.05 <= point[1] <= 10):
                 raise ValueError("pause_points require increasing positive ticks and durations in .05..10")
             last = point[0]
+        if not isinstance(self.pause_perturbations, (tuple, list)):
+            raise ValueError("pause_perturbations must be an ordered sequence of declared kinds")
+        unknown = [item for item in self.pause_perturbations if item not in suspend_probes.PERTURBATIONS]
+        if unknown:
+            raise ValueError(f"unknown pause perturbation {unknown[0]!r}; "
+                             f"known kinds: {', '.join(suspend_probes.PERTURBATIONS)}")
         if self.tier == "strict" and (self.cold_starts < 10 or not self.strategy):
             raise ValueError("strict requires at least 10 cold starts per seed and an explicit strategy file")
         return self
@@ -467,19 +478,30 @@ def live_session(root: Path, name: str, plan: Plan, seed: int = 0, *, lifecycle:
         retain("cleanup_write", lambda: write_json(run / "evaluation-cleanup.json", cleanup))
 
 
-def _pause_probe(client, seconds: float) -> dict:
+def _pause_probe(client, seconds: float, *, perturbations=(), host=None) -> dict:
     if client.request("status").get("state") != "paused_at_boundary":
         raise RuntimeError("pause probe requires an already completed, paused boundary")
     before = client.request("audit_snapshot")
     observation = client.observe()
-    time.sleep(seconds)
+    # Declared perturbations (coupling list §4, probes A0/A1) advance the same
+    # wall clock while focus or the cursor is moved; an undeclared run keeps the
+    # plain wait and therefore an unchanged probe record.
+    declarations = suspend_probes.normalize_kinds(perturbations) if perturbations else ()
+    applied, wall_seconds = None, seconds
+    if declarations:
+        host = host or suspend_probes.DesktopHost()
+        applied = suspend_probes.apply_perturbations(host, declarations, seconds)
+        wall_seconds = next((item.get("wall_seconds") for item in applied if item.get("kind") == "wall"), seconds)
+    else:
+        time.sleep(seconds)
     after = client.request("audit_snapshot")
+    observation_after = client.observe()
     # The frozen subject is the captured simulation state and version. A declared
     # fixed-owner FP mode records one monitor check per snapshot read, so two
     # consecutive snapshots are never byte-identical; that bookkeeping is checked
     # through its own contract below instead of being dropped from the probe.
     if (before.get("version") != after.get("version") or before.get("state") != after.get("state")
-            or observation != client.observe()):
+            or observation != observation_after):
         raise RuntimeError("paused wall time changed the captured simulation state")
     game = (client.hello_result or {}).get("game", {})
     fp_mode = fp_environment.mode(game)
@@ -490,9 +512,15 @@ def _pause_probe(client, seconds: float) -> dict:
             raise RuntimeError("paused wall time changed the fixed FP activation receipt")
         compared += ["fixed_fp.activation", "fixed_fp.health"]
     frozen = json.dumps({"state": before["state"], "version": before["version"]}, sort_keys=True).encode()
-    return {"wall_seconds": seconds, "version": observation["version"],
-            "state_sha256": hashlib.sha256(frozen).hexdigest(),
-            "compared_snapshot_fields": compared, "fixed_fp": fp_mode or "not_declared"}
+    probe = {"wall_seconds": wall_seconds, "version": observation["version"],
+             "state_sha256": hashlib.sha256(frozen).hexdigest(),
+             "compared_snapshot_fields": compared, "fixed_fp": fp_mode or "not_declared"}
+    if applied is not None:
+        probe.update(suspend_probes.perturbation_record(
+            host, declarations, seconds, applied=applied, wall_seconds=wall_seconds,
+            before=before, after=after, observation=observation, observation_after=observation_after,
+            hello=client.hello_result))
+    return probe
 
 
 def verify_run_artifacts(items, run) -> None:
@@ -514,8 +542,9 @@ def verify_run_artifacts(items, run) -> None:
 
 
 class PauseSchedule:
-    def __init__(self, client, run, points):
+    def __init__(self, client, run, points, perturbations=()):
         self.client, self.run, self.points = client, run, list(points)
+        self.perturbations = tuple(perturbations)
         self.configured = list(points)
         self.completed = []
         self.unexecuted = []
@@ -532,7 +561,11 @@ class PauseSchedule:
                     "version": observation["version"], "reason": skip_reason or "no_completed_in_play_boundary"})
                 continue
             try:
-                probe = {"requested_tick": target, **_pause_probe(self.client, seconds)}
+                # An undeclared run calls the probe exactly as it always did, so
+                # existing probe doubles and records keep their old signature.
+                declared = {"perturbations": self.perturbations} if self.perturbations else {}
+                probe = {"requested_tick": target,
+                         **_pause_probe(self.client, seconds, **declared)}
             except Exception as error:
                 self.unexecuted.append({"requested_tick": target, "wall_seconds": seconds,
                     "version": observation["version"], "reason": "probe_failed", "error": error_detail(error)})
@@ -566,7 +599,7 @@ def _play_source(client, trace, strategy_path, plan, seed, initial_observation, 
     maximum_wave = max(initial_observation["wave"], observation["wave"])
     expected_scene = plan.expected_scene
     strategy = ScriptStrategy(client, trace, strategy_path, plan.chunk_ticks)
-    pauses = PauseSchedule(client, run, plan.pause_points)
+    pauses = PauseSchedule(client, run, plan.pause_points, plan.pause_perturbations)
     pauses.after_step(observation, skip_reason=budget.stop["reason"] if budget.stop else None)
     stalled = decisions = failed_actions = 0
     while True:
@@ -802,7 +835,7 @@ def run_cold_attempt(root, plan, output, seed, repeat, trajectory):
             probe = _pause_probe(replay_client, plan.pause_seconds)
             write_json(replay_run / "pause-probe.json", probe)
             add("pause_invariance", True, probe, replay_run / "pause-probe.json")
-            schedule = PauseSchedule(replay_client, replay_run, plan.pause_points)
+            schedule = PauseSchedule(replay_client, replay_run, plan.pause_points, plan.pause_perturbations)
             def timed_rpc(value):
                 replay_trace.emit("cold_rpc_interval", value)
                 rpc_intervals.append(value)
@@ -1116,6 +1149,9 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("--disk-check-ticks", type=int, default=500)
     sample.add_argument("--pause-points", type=json.loads, default=[[1000, 1.0], [2500, 5.0]],
                         help='JSON [[minimum_tick, wall_seconds], ...]; executed at completed boundaries')
+    sample.add_argument("--pause-perturbations", type=json.loads, default=[],
+                        help='JSON list of host perturbations applied inside every pause '
+                             '("wall", "focus", "cursor"); empty keeps the plain wait')
     run = commands.add_parser("run", help="execute the plan against owned original-game processes")
     run.add_argument("plan", type=Path)
     run.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
@@ -1143,6 +1179,7 @@ def main(argv: list[str] | None = None) -> int:
                         cold_wall_budget_seconds=args.cold_wall_budget_seconds,
                         min_free_bytes=args.min_free_bytes, packaging_reserve_bytes=args.packaging_reserve_bytes,
                         disk_check_ticks=args.disk_check_ticks, pause_points=args.pause_points,
+                        pause_perturbations=tuple(args.pause_perturbations),
                         strategy=str(Path(args.strategy).resolve()) if args.strategy else None,
                         audio_mode=args.audio_mode, b0_normalization=tuple(table),
                         scenario=args.scenario, flags_to_complete=args.flags_to_complete).validate()
