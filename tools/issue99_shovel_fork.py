@@ -397,7 +397,8 @@ def markdown_report(report: dict) -> str:
              f"| 随机状态分叉 | {'已定位：' + difference_text(verdict['first_rng_difference']) if verdict['random_state_fork_demonstrated'] else '未演示'} |",
              f"| 玩法差异 | {'已定位：' + difference_text(verdict['first_simulation_difference']) if verdict['gameplay_fork_demonstrated'] else '未演示'} |",
              f"| 适用范围 | {verdict['scope']} |", ""]
-    lines += ["## 四条轨迹", "", "| 角色 | 运行 | 结局 | 结束边界 | 最大波次 | 主机炮击 | 首个离场僵尸 |",
+    lines += ["## 四条轨迹", "",
+              "| 角色 | 运行 | 结局 | 结束边界 | 最大波次 | 托管炮击 | 僵尸槽位离场（非击杀计数） |",
               "|---|---|---|---|---|---|---|"]
     for role in ROLES:
         run = report["runs"][role]
