@@ -85,6 +85,48 @@ def normalize(record: dict) -> dict:
     return value
 
 
+SCOPED_NORMALIZATION = ("run_id", "branch_id", "session_id", "lifecycle_probes manifest",
+                        "event.object.board")
+
+
+def compare_scoped(left: str | Path, right: str | Path, *, scope: str = "both") -> dict:
+    """Scope-aware comparison for the Stage-D arms.
+
+    ``common`` compares only the shared gameplay/state/RNG/action/result
+    evidence with the narrow declared instrumentation normalization; ``lifecycle``
+    compares the exact-store stream semantically; ``both`` requires both.
+    Each stream is still validated independently first.
+    """
+    if scope not in ("common", "lifecycle", "both"):
+        raise CompareError(f"unsupported comparison scope: {scope}")
+    left, right = Path(left), Path(right)
+    left = left / "audit" if (left / "audit" / "manifest.json").is_file() else left
+    right = right / "audit" if (right / "audit" / "manifest.json").is_file() else right
+    for directory in (left, right):
+        try:
+            report = lifecycle_events.validate(directory, require_close=True)
+        except lifecycle_events.LifecycleError as exc:
+            raise CompareError(f"lifecycle evidence is unreadable: {exc}") from exc
+        if report["status"] == "failed":
+            raise CompareError("lifecycle evidence is invalid: " + "; ".join(report["problems"]))
+    report = {"schema": "lvz.lifecycle-scoped-compare.v1", "scope": scope,
+              "normalized": list(SCOPED_NORMALIZATION), "equal": False}
+    if scope in ("common", "both"):
+        try:
+            from . import audit_compare
+            report["common"] = audit_compare.compare_common_audits(
+                audit_compare.AuditLog(left, require_closed=True),
+                audit_compare.AuditLog(right, require_closed=True))
+        except (audit_compare.EvidenceError, OSError, UnicodeError, ValueError) as exc:
+            raise CompareError(f"common audit evidence is unreadable: {exc}") from exc
+    if scope in ("lifecycle", "both"):
+        report["lifecycle"] = compare_lifecycle(left, right)
+    common_equal = report.get("common", {}).get("equal", True)
+    lifecycle_equal = report.get("lifecycle", {}).get("equal", True)
+    report["equal"] = common_equal and lifecycle_equal
+    return report
+
+
 def compare_lifecycle(left: str | Path, right: str | Path) -> dict:
     left, right = Path(left), Path(right)
     left_report = _validate(left)

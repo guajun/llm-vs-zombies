@@ -114,6 +114,8 @@ std::atomic<uint32_t> protectCallCounter{0};
 struct CallsiteOverride { uint32_t address = 0; uint8_t bytes[5]{}; uint8_t length = 0; };
 std::array<CallsiteOverride, 4> callsiteOverrides{};
 std::atomic<uint32_t> callsiteOverrideCount{0};
+std::atomic<uint32_t> frameExpectedInner{0};
+std::atomic<uint32_t> frameExpectedOuter{0};
 std::atomic<uint32_t> protectFailAfter{0};
 std::atomic<bool> modulePinned{false};
 
@@ -243,6 +245,7 @@ struct Record {
     uint8_t boundaryValid = 0;
     uint8_t frameValid = 0;
     uint8_t callsiteMatch = 0;
+    uint8_t frameStatus = 0;
     uint32_t frameReturn = 0;
     uint32_t outerReturn = 0;
     uint32_t entity = 0;
@@ -286,6 +289,7 @@ struct TlsCapture {
     uint32_t outerReturn = 0;
     uint8_t frameValid = 0;
     uint8_t callsiteMatch = 0;
+    uint8_t frameStatus = 0;
 };
 thread_local TlsCapture tlsCapture;
 
@@ -593,17 +597,68 @@ bool CallsiteBytesValid() noexcept {
     return true;
 }
 
+enum FrameStatus : uint8_t {
+    kFrameMissing = 0,
+    kFrameOutOfStack = 1,
+    kFrameForeignReturn = 2,
+    kFrameReversed = 3,
+    kFrameValidated = 4,
+};
+
+uint32_t FrameExpectedInner() noexcept {
+    const uint32_t override = frameExpectedInner.load();
+    return override ? override : 0x5302FFu;
+}
+uint32_t FrameExpectedOuter() noexcept {
+    const uint32_t override = frameExpectedOuter.load();
+    return override ? override : 0x532FC7u;
+}
+
 void CaptureFrameFacts(TlsCapture& capture) noexcept {
+    // Bounded to the current thread stack and to the two known framed callers.
+    // Only the verified DieWithLoot return unlocks the second frame read; a
+    // general-purpose EBP therefore never contributes unrelated data.
+    capture.frameStatus = kFrameMissing;
     const uint32_t frame = capture.frame;
     if (!frame) return;
-    uint32_t savedFrame = 0, returnedIntoDieWithLoot = 0, returnedIntoApplyBurn = 0;
-    if (!SafeRead32(frame, savedFrame) || !savedFrame) return;
-    if (!SafeRead32(frame + 4, returnedIntoDieWithLoot)) return;
-    if (!SafeRead32(savedFrame + 4, returnedIntoApplyBurn)) return;
-    capture.frameReturn = returnedIntoDieWithLoot;
-    capture.outerReturn = returnedIntoApplyBurn;
+    const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    const uintptr_t stackBase = reinterpret_cast<uintptr_t>(tib->StackBase);
+    const uintptr_t stackLimit = reinterpret_cast<uintptr_t>(tib->StackLimit);
+    const uintptr_t ebp = frame;
+    if ((ebp & 3u) != 0 || ebp < stackLimit || ebp + 8 > stackBase) {
+        capture.frameStatus = kFrameOutOfStack;
+        return;
+    }
+    uint32_t innerReturn = 0;
+    if (!SafeRead32(ebp + 4, innerReturn)) {
+        capture.frameStatus = kFrameOutOfStack;
+        return;
+    }
+    capture.frameReturn = innerReturn;
+    if (innerReturn != FrameExpectedInner()) {
+        capture.frameStatus = kFrameForeignReturn;
+        return;
+    }
+    uint32_t savedFrame = 0;
+    if (!SafeRead32(ebp, savedFrame)) {
+        capture.frameStatus = kFrameOutOfStack;
+        return;
+    }
+    if (!savedFrame || (savedFrame & 3u) != 0 || savedFrame <= ebp || savedFrame + 4 > stackBase
+        || savedFrame - ebp > 0x10000u) {
+        capture.frameStatus = kFrameReversed;
+        return;
+    }
+    uint32_t outerReturn = 0;
+    if (!SafeRead32(savedFrame + 4, outerReturn)) {
+        capture.frameStatus = kFrameOutOfStack;
+        return;
+    }
+    capture.outerReturn = outerReturn;
     capture.frameValid = 1;
-    capture.callsiteMatch = CallsiteBytesValid() ? 1 : 0;
+    capture.frameStatus = kFrameValidated;
+    if (outerReturn == FrameExpectedOuter())
+        capture.callsiteMatch = CallsiteBytesValid() ? 1 : 0;
 }
 
 bool ApplyPatch(size_t index, std::string& error) {
@@ -752,6 +807,7 @@ extern "C" void __cdecl LvzProbeAfterPhase(uint32_t site, uint32_t zombie, uint3
     Fill(record, kSites[site].kind == 3 ? 2 : 0, static_cast<uint8_t>(site), tlsCapture.info);
     record.before = tlsCapture.before;
     record.frameValid = tlsCapture.frameValid;
+    record.frameStatus = tlsCapture.frameStatus;
     record.frameReturn = tlsCapture.frameReturn;
     record.outerReturn = tlsCapture.outerReturn;
     record.callsiteMatch = tlsCapture.callsiteMatch;
@@ -1008,6 +1064,14 @@ void LvzProbeSetCallsiteBytesForTest(uint32_t address, const uint8_t* bytes, uin
     callsiteOverrideCount.store(countNow + 1);
 }
 void LvzProbeClearCallsiteBytesForTest() noexcept { callsiteOverrideCount.store(0); }
+void LvzProbeSetFrameReturnsForTest(uint32_t inner, uint32_t outer) noexcept {
+    frameExpectedInner.store(inner);
+    frameExpectedOuter.store(outer);
+}
+void LvzProbeClearFrameReturnsForTest() noexcept {
+    frameExpectedInner.store(0);
+    frameExpectedOuter.store(0);
+}
 #endif
 
 bool RemoveLifecycleProbes(std::string& error) {
@@ -1144,16 +1208,26 @@ Json DrainLifecycleProbeBatch() {
                 base["kind"] = "zombie_phase_transition";
                 base["phase"] = {{"site", site.id}, {"before", record.before}, {"after", record.after}};
                 break;
-            case 2:
+            case 2: {
                 base["kind"] = "zombie_removal_marked";
+                const bool innerKnown = record.frameStatus == kFrameForeignReturn
+                    || record.frameStatus == kFrameReversed || record.frameStatus == kFrameValidated;
+                const bool outerKnown = record.frameStatus == kFrameValidated;
+                const char* status = "missing";
+                if (record.frameStatus == kFrameOutOfStack) status = "out_of_stack";
+                else if (record.frameStatus == kFrameForeignReturn) status = "foreign_return";
+                else if (record.frameStatus == kFrameReversed) status = "reversed";
+                else if (record.frameStatus == kFrameValidated) status = "validated";
                 base["removal"] = {{"source", "dienoloot_mdead_store"},
                                    {"before", record.before}, {"after", record.after},
-                                   {"frame", {{"return_into_diewithloot",
-                                               record.frameValid ? Json(record.frameReturn) : Json(nullptr)},
+                                   {"frame", {{"status", status},
+                                              {"return_into_diewithloot",
+                                               innerKnown ? Json(record.frameReturn) : Json(nullptr)},
                                               {"return_into_applyburn",
-                                               record.frameValid ? Json(record.outerReturn) : Json(nullptr)},
+                                               outerKnown ? Json(record.outerReturn) : Json(nullptr)},
                                               {"callsite_bytes_match", record.callsiteMatch != 0}}}};
                 break;
+            }
             case 3:
                 base["kind"] = "zombie_slot_recycle_candidate";
                 base["recycle"] = {{"state", "candidate"}, {"slot", record.slot},

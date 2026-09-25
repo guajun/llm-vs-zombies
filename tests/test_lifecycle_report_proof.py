@@ -213,6 +213,17 @@ class ReportProofTests(unittest.TestCase):
         self.assertTrue(any("probe arm" in problem
                             for problem in report["coverage"]["binding_problems"]))
 
+    def test_legitimate_preceding_boundary_is_located_by_version_and_state(self):
+        run, _, plan_path = build_run(self.base)
+        initial_path = run / "replay-initial.json"
+        initial = json.loads(initial_path.read_text(encoding="utf-8"))
+        initial["observation"]["version"] = {"epoch": 1, "tick": 1, "revision": 0}
+        initial["state"] = {"zombies": {"slots": {}}}
+        initial_path.write_text(json.dumps(initial), encoding="utf-8")
+        report = lifecycle_report.report_for_run(run, plan=plan_path)
+        self.assertTrue(report["first_kill"]["proven"], report["coverage"]["full_window_problems"])
+        self.assertEqual(report["coverage"]["window_start_index"], 1)
+
     def test_audit_directory_input_and_sealed_evidence_keep_the_proof(self):
         from llm_vs_zombies import evidence_codec
         run, _, plan_path = build_run(self.base)

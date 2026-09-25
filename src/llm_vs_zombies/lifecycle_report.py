@@ -63,6 +63,15 @@ BLOCKING_COUNTERS = ("overflow", "wrong_thread", "faults", "unmatched_commits", 
 BENIGN_COUNTERS = ("live_skips",)
 
 
+def _valid_sha256_value(document: dict, path: tuple[str, ...]) -> bool:
+    value: object = document
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return False
+        value = value[key]
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
 def _attach_predecessor(fact: dict, initialization: dict, initial_entities: dict,
                         event: dict, *, removal: bool) -> None:
     """Correlate a captured fact with an earlier initialization or residue.
@@ -163,14 +172,32 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
             state["phase_transitions"].append(transition)
             expected = DEATH_PHASE_BY_SITE.get(site)
             before, after = phase.get("before"), phase.get("after")
-            if expected is not None and after == expected and before not in DEATH_STAGES \
-                    and before != after:
-                transition["class"] = "confirmed_death_stage"
-                transition["stage"] = DEATH_STAGES.get(expected)
-                state["confirmed_death_stage"] = True
-                _attach_predecessor(transition, initialization, initial_entities, event, removal=False)
-            elif expected is not None and after == expected and before in DEATH_STAGES:
+            if scope == "gameplay" and expected is not None and after == expected \
+                    and before not in DEATH_STAGES and before != after:
+                if state.get("dying"):
+                    # The entity was already observed dying (or its onset was
+                    # missed); this later stage is not a new first kill.
+                    transition["class"] = "death_after_dying"
+                else:
+                    transition["class"] = "confirmed_death_stage"
+                    transition["stage"] = DEATH_STAGES.get(expected)
+                    state["confirmed_death_stage"] = True
+                    state["dying"] = True
+                    _attach_predecessor(transition, initialization, initial_entities, event, removal=False)
+            elif scope == "gameplay" and expected is not None and after == expected \
+                    and before in DEATH_STAGES:
                 transition["class"] = "already_dying"
+                if not state.get("dying"):
+                    residue = initial_entities.get(identifier)
+                    if isinstance(residue, dict) and (residue.get("disappeared")
+                                                      or residue.get("state") in DEATH_STAGES):
+                        transition["onset"] = "initial_residue"
+                    else:
+                        # A live initial state (or a prior initialization)
+                        # contradicts an already-dying observation with no
+                        # captured onset: the earlier onset was missed.
+                        transition["onset"] = "unknown"
+                state["dying"] = True
             elif site in NONDEATH_SITES:
                 transition["class"] = "nondeath"
             else:
@@ -190,13 +217,13 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
                            and frame.get("return_into_applyburn")
                            == APPLYBURN_CHAIN_RETURNS["return_into_applyburn"]
                            and removal["before"] == 0 and removal["after"] == 1 and scope == "gameplay")
-            if state["confirmed_death_stage"]:
+            if state["confirmed_death_stage"] or state.get("dying"):
                 removal["class"] = "removal_after_death"
             elif chain_valid:
                 removal["class"] = "confirmed_death_path"
                 removal["death_path"] = "applyburn_diewithloot_dienoloot"
-                removal["death_stage"] = "charred_animation_via_applyburn"
                 state["confirmed_death_stage"] = True
+                state["dying"] = True
             else:
                 removal["class"] = "removal_unclassified"
                 state["removal_without_death"] = True
@@ -219,7 +246,10 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
     unknown_predecessors = [fact for fact in confirmed
                             if fact.get("predecessor") in ("unknown_predecessor",
                                                            "initial_residue_doomed")]
+    unknown_onsets = [fact for fact in gameplay_facts
+                      if fact.get("class") == "already_dying" and fact.get("onset") == "unknown"]
     unknown += unknown_predecessors
+    unknown += unknown_onsets
     candidates = [fact for fact in confirmed
                   if fact.get("predecessor") in ("initialization", "initial_residue")]
     counters = counters or {}
@@ -240,6 +270,8 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
         reasons.append("a full frozen window with both endpoints is not proven")
     if coverage.get("health_clean") is not True:
         reasons.append("clean probe counters are not asserted by the evidence")
+    if unknown_onsets:
+        reasons.append("an already-dying observation has no captured onset (earlier death state missed)")
     if not confirmed:
         reasons.append("no capture fact shows a death-confirming phase store")
     else:
@@ -271,6 +303,7 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
             "initialization_facts": len(initialization),
             "same_call_lifetimes": sum(1 for fact in facts if fact.get("same_call_lifetime")),
             "unknown_predecessors": len(unknown_predecessors),
+            "unknown_onsets": len(unknown_onsets),
             "removals": sum(1 for fact in facts if fact["kind"] == "zombie_removal_marked"),
             "recycle_candidates": sum(1 for fact in facts if fact["kind"] == "zombie_slot_recycle_candidate"),
             "recycle_commits": sum(1 for fact in facts if fact["kind"] == "zombie_slot_recycle_commit"),
@@ -576,9 +609,44 @@ def _plan_binding_paths(run_directory: Path, suite_directory: Path,
     return paths
 
 
+def _initial_anchor(snapshots: list[dict], initial: dict) -> int | None:
+    """Locate the captured initial boundary inside the complete audit.
+
+    Real initialization/B0 can legitimately produce audit boundaries before the
+    captured initial state; the frozen window starts at the anchor, not
+    necessarily at frame zero. The anchor is located by version and, when the
+    captured state carries the zombie pool, by the same allocated slot ids.
+    """
+    observation = initial.get("observation") if isinstance(initial.get("observation"), dict) else initial
+    initial_version = observation.get("version") if isinstance(observation, dict) else None
+    if not isinstance(initial_version, dict):
+        return None
+    state = initial.get("state") if isinstance(initial.get("state"), dict) else {}
+    slots = ((state.get("zombies") or {}).get("slots")) or {}
+    expected_ids: dict[str, int] = {}
+    if isinstance(slots, dict):
+        for slot, entry in slots.items():
+            if not isinstance(entry, dict):
+                continue
+            identifier = entry.get("id_or_free_next")
+            if isinstance(identifier, int) and identifier >> 16 != 0:
+                expected_ids[str(slot)] = identifier
+    for index, snapshot in enumerate(snapshots):
+        coordinate = (snapshot.get("coordinate") or {}).get("version")
+        if coordinate != initial_version:
+            continue
+        if expected_ids:
+            zombies = snapshot.get("zombies") or {}
+            if not all((zombies.get(slot) or {}).get("id") == identifier
+                       for slot, identifier in expected_ids.items()):
+                continue
+        return index
+    return None
+
+
 def _full_window_evidence(run_directory: Path, audit_directory: Path, snapshots: list[dict],
                          plan: str | Path | None,
-                         plan_binding: str | Path | None = None) -> tuple[bool, list[str]]:
+                         plan_binding: str | Path | None = None) -> tuple[bool, list[str], int | None]:
     """Prove the frozen plan, the raw identity binding, the captured initial
     root and the executed endpoint all belong to the same closed run.
 
@@ -586,18 +654,18 @@ def _full_window_evidence(run_directory: Path, audit_directory: Path, snapshots:
     missing binding stays an explicit blocker.
     """
     if plan is None:
-        return False, ["no frozen plan was supplied to bind the window"]
+        return False, ["no frozen plan was supplied to bind the window"], None
     plan_path = Path(plan)
     if not plan_path.is_file():
-        return False, [f"frozen plan is unreadable: {plan_path}"]
+        return False, [f"frozen plan is unreadable: {plan_path}"], None
     try:
         plan_bytes = plan_path.read_bytes()
         plan_doc = json.loads(plan_bytes)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return False, [f"frozen plan is unreadable: {exc}"]
+        return False, [f"frozen plan is unreadable: {exc}"], None
     normalized = _normalized_plan(plan_path)
     if normalized is None:
-        return False, ["the frozen plan does not satisfy the evaluation Plan contract"]
+        return False, ["the frozen plan does not satisfy the evaluation Plan contract"], None
     name = run_directory.name
     suite_name = name.rsplit("-s", 1)[0] if "-s" in name else name
     suite_directory = run_directory.parent / suite_name if "-s" in name else run_directory
@@ -605,94 +673,100 @@ def _full_window_evidence(run_directory: Path, audit_directory: Path, snapshots:
     if not suite_plan.is_file() and (run_directory / "plan.json").is_file():
         suite_plan = run_directory / "plan.json"
     if not suite_plan.is_file():
-        return False, [f"suite plan copy is missing: {suite_plan}"]
+        return False, [f"suite plan copy is missing: {suite_plan}"], None
     try:
         suite_doc = json.loads(suite_plan.read_bytes())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return False, [f"suite plan copy is unreadable: {exc}"]
+        return False, [f"suite plan copy is unreadable: {exc}"], None
     if suite_doc != normalized:
-        return False, ["the suite plan copy does not match the normalized frozen plan"]
+        return False, ["the suite plan copy does not match the normalized frozen plan"], None
     binding: dict | None = None
     for candidate in _plan_binding_paths(run_directory, suite_directory, plan_binding):
         if candidate.is_file():
             try:
                 binding = json.loads(candidate.read_bytes())
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                return False, [f"plan identity binding is unreadable: {exc}"]
+                return False, [f"plan identity binding is unreadable: {exc}"], None
             binding["_path"] = str(candidate)
             break
     if binding is None:
-        return False, ["the raw plan identity binding is missing"]
+        return False, ["the raw plan identity binding is missing"], None
     digest = hashlib.sha256(plan_bytes).hexdigest()
+    if binding.get("schema") != "lvz.lifecycle-plan-binding.v1":
+        return False, ["the raw plan identity binding has an unsupported schema"], None
     if binding.get("raw_plan_sha256") != digest:
-        return False, ["the raw plan identity binding does not match the frozen plan bytes"]
+        return False, ["the raw plan identity binding does not match the frozen plan bytes"], None
     seed = None
     if "-s" in name:
         seed_text = name.rsplit("-s", 1)[1].split("-", 1)[0]
         try:
             seed = int(seed_text)
         except ValueError:
-            return False, [f"the child run name has no usable seed: {name}"]
+            return False, [f"the child run name has no usable seed: {name}"], None
         if normalized.get("seeds") and seed not in normalized["seeds"]:
-            return False, [f"the child run seed {seed} is not in the frozen plan"]
+            return False, [f"the child run seed {seed} is not in the frozen plan"], None
     manifest_path = run_directory / "manifest.json"
-    if manifest_path.is_file():
-        try:
-            manifest = json.loads(manifest_path.read_bytes())
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            return False, [f"run manifest is unreadable: {exc}"]
-        if manifest.get("run_id") != name:
-            return False, ["the run manifest identity does not match the child directory"]
-        pin = binding.get("recorder_sha256")
-        implementation = manifest.get("implementation")
-        build = implementation.get("recorder_sha256") if isinstance(implementation, dict) else None
-        if pin and build != pin:
-            return False, ["the run manifest recorder build does not match the pinned build"]
+    if not manifest_path.is_file():
+        return False, ["the run manifest is missing"], None
+    try:
+        manifest = json.loads(manifest_path.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, [f"run manifest is unreadable: {exc}"], None
+    if manifest.get("run_id") != name:
+        return False, ["the run manifest identity does not match the child directory"], None
+    if not _valid_sha256_value(manifest, ("implementation", "recorder_sha256")):
+        return False, ["the run manifest has no recorder build identity"], None
+    pin = binding.get("recorder_sha256")
+    implementation = manifest.get("implementation")
+    build = implementation.get("recorder_sha256") if isinstance(implementation, dict) else None
+    if pin and build != pin:
+        return False, ["the run manifest recorder build does not match the pinned build"], None
     initial_path = run_directory / "replay-initial.json"
     if not initial_path.is_file():
-        return False, ["the run has no captured initial boundary"]
+        return False, ["the run has no captured initial boundary"], None
     try:
         initial = json.loads(initial_path.read_bytes())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return False, [f"the captured initial boundary is unreadable: {exc}"]
+        return False, [f"the captured initial boundary is unreadable: {exc}"], None
     observation = initial.get("observation") if isinstance(initial.get("observation"), dict) else initial
     initial_version = observation.get("version") if isinstance(observation, dict) else None
     if not isinstance(initial_version, dict):
-        return False, ["the captured initial boundary has no version"]
+        return False, ["the captured initial boundary has no version"], None
     if not snapshots:
-        return False, ["no audited boundary exists"]
-    first_version = (snapshots[0].get("coordinate") or {}).get("version")
-    if first_version != initial_version:
-        return False, ["the audited stream does not start at the captured initial boundary"]
+        return False, ["no audited boundary exists"], None
+    anchor_index = _initial_anchor(snapshots, initial)
+    if anchor_index is None:
+        return False, ["the audited stream does not contain the captured initial boundary"], None
+    first_version = (snapshots[anchor_index].get("coordinate") or {}).get("version")
     endpoint = run_directory / "experiment-end.json"
     if not endpoint.is_file():
-        return False, ["executed endpoint evidence is missing"]
+        return False, ["executed endpoint evidence is missing"], None
     try:
         ending = json.loads(endpoint.read_bytes())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return False, [f"executed endpoint is unreadable: {exc}"]
+        return False, [f"executed endpoint is unreadable: {exc}"], None
     final_version = (ending.get("final_observation") or {}).get("version") \
         if isinstance(ending.get("final_observation"), dict) else None
     if not isinstance(final_version, dict):
-        return False, ["executed endpoint has no boundary version"]
+        return False, ["executed endpoint has no boundary version"], None
     last_version = (snapshots[-1].get("coordinate") or {}).get("version")
     if last_version != final_version:
-        return False, ["the audited boundary stream does not end at the executed endpoint"]
+        return False, ["the audited boundary stream does not end at the executed endpoint"], None
     try:
         if last_version.get("tick") < first_version.get("tick") \
                 or last_version.get("epoch") < first_version.get("epoch"):
-            return False, ["the audited interval is not ordered"]
+            return False, ["the audited interval is not ordered"], None
     except (TypeError, AttributeError):
-        return False, ["the audited boundary versions are malformed"]
+        return False, ["the audited boundary versions are malformed"], None
     budget = normalized.get("tick_budget")
     if isinstance(budget, int) and last_version.get("tick", 0) > budget:
-        return False, ["the executed endpoint exceeds the frozen tick budget"]
+        return False, ["the executed endpoint exceeds the frozen tick budget"], None
     stop = plan_doc.get("stop_when")
     if isinstance(stop, dict) and "wave_at_least" in stop:
         wave = ending.get("maximum_wave")
         if not isinstance(wave, int) or wave < stop["wave_at_least"]:
-            return False, ["the executed endpoint does not satisfy the frozen stop condition"]
-    return True, []
+            return False, ["the executed endpoint does not satisfy the frozen stop condition"], None
+    return True, [], anchor_index
 
 
 def report_for_run(run: str | Path, *, require_closed: bool = True,
@@ -745,8 +819,8 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
             capture_records = load_capture_facts(audit_directory)
         except lifecycle_events.LifecycleError as exc:
             raise ReportError(f"capture facts are unreadable: {exc}") from exc
-        full_window, window_problems = _full_window_evidence(run_directory, audit_directory, snapshots,
-                                                             plan, plan_binding)
+        full_window, window_problems, window_start_index = _full_window_evidence(
+            run_directory, audit_directory, snapshots, plan, plan_binding)
         binding_mode_problems: list[str] = []
         suite_directory = run_directory.parent / (run_directory.name.rsplit("-s", 1)[0]
                                                    if "-s" in run_directory.name else run_directory.name)
@@ -778,6 +852,7 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
                                                  "disappeared": bool(raw.get("disappeared"))}
         report["coverage"]["frozen_plan"] = str(plan) if plan is not None else None
         report["coverage"]["full_window_problems"] = window_problems
+        report["coverage"]["window_start_index"] = window_start_index
         report["capture_facts"] = analyze_capture_facts(
             capture_records,
             counters=probe_counters,

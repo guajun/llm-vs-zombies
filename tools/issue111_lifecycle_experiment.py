@@ -351,6 +351,34 @@ def _child_facts(root: Path, name: str, mode: str, child: str,
     if not run_manifest.is_file():
         return facts, [f"{child}: run manifest.json is missing"]
     facts["run_manifest_sha256"] = sha256_file(run_manifest)
+    for name, key in (("replay-initial.json", "replay_initial_sha256"),
+                      ("experiment-end.json", "experiment_end_sha256")):
+        evidence = directory / name
+        if not evidence.is_file():
+            problems.append(f"{child}: {name} is missing")
+            facts[key] = None
+            continue
+        try:
+            value = json.loads(evidence.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            problems.append(f"{child}: {name} is unreadable: {exc}")
+            facts[key] = None
+            continue
+        if not isinstance(value, dict):
+            problems.append(f"{child}: {name} is not an object")
+            facts[key] = None
+            continue
+        if name == "replay-initial.json" and not isinstance(value.get("observation"), dict):
+            problems.append(f"{child}: replay-initial.json has no observation object")
+            facts[key] = None
+            continue
+        if name == "experiment-end.json":
+            final = value.get("final_observation")
+            if not isinstance(final, dict) or not isinstance(final.get("version"), dict):
+                problems.append(f"{child}: experiment-end.json has no final boundary version")
+                facts[key] = None
+                continue
+        facts[key] = sha256_file(evidence)
     try:
         manifest = json.loads(run_manifest.read_bytes())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -423,6 +451,33 @@ def _child_facts(root: Path, name: str, mode: str, child: str,
     return facts, problems
 
 
+def _validate_binding(suite: Path, metadata: dict) -> tuple[dict | None, list[str]]:
+    """Validate the raw plan identity binding written next to the suite."""
+    path = suite / "lifecycle-plan-binding.json"
+    if not path.is_file():
+        return None, ["lifecycle-plan-binding.json is missing"]
+    try:
+        binding = json.loads(path.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, [f"lifecycle-plan-binding.json is unreadable: {exc}"]
+    problems: list[str] = []
+    if not isinstance(binding, dict) or binding.get("schema") != "lvz.lifecycle-plan-binding.v1":
+        return None, ["lifecycle-plan-binding.json schema is not lvz.lifecycle-plan-binding.v1"]
+    if binding.get("raw_plan_sha256") != metadata["plan"]["sha256"]:
+        problems.append("lifecycle-plan-binding.json does not bind the prepared raw plan")
+    if binding.get("mode") != metadata["mode"]:
+        problems.append("lifecycle-plan-binding.json mode does not match the prepared arm")
+    probes = (metadata.get("probes") or {}).get("mode")
+    if binding.get("probes") != probes:
+        problems.append("lifecycle-plan-binding.json probes do not match the prepared arm")
+    if bool(binding.get("single_cold")) is not bool(metadata.get("single_cold", False)):
+        problems.append("lifecycle-plan-binding.json single_cold does not match the prepared arm")
+    pin = metadata.get("expected_recorder_sha256")
+    if pin is not None and binding.get("recorder_sha256") != pin:
+        problems.append("lifecycle-plan-binding.json does not bind the pinned recorder build")
+    return binding, problems
+
+
 def check(root: Path, name: str) -> dict:
     """Prove suite completion, mode correctness and strict child audit health."""
     root = Path(root).resolve()
@@ -455,6 +510,10 @@ def check(root: Path, name: str) -> dict:
         problems.append("suite evaluation.json is missing")
         return report
     report["suite_report_sha256"] = sha256_file(report_file)
+    binding, binding_problems = _validate_binding(suite, metadata)
+    problems.extend(binding_problems)
+    report["plan_binding"] = {"present": binding is not None,
+                              "raw_plan_sha256": (binding or {}).get("raw_plan_sha256")}
     try:
         suite_report = json.loads(report_file.read_bytes())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -547,6 +606,9 @@ def _seal_document(root: Path, name: str, *, allow_compress: bool = False) -> di
         audit = root / "experiments" / "runs" / child["child"] / "audit"
         receipt = audit / evidence_codec.RECEIPT
         child["codec_receipt_sha256"] = sha256_file(receipt) if receipt.is_file() else None
+    binding_path = root / "experiments" / "runs" / name / "lifecycle-plan-binding.json"
+    if not binding_path.is_file():
+        raise ExperimentError(f"sealed plan binding is missing: {binding_path}")
     document = {
         "schema": SEAL_SCHEMA,
         "run": name,
@@ -554,6 +616,7 @@ def _seal_document(root: Path, name: str, *, allow_compress: bool = False) -> di
         "root": str(root),
         "plan": sealed["plan"],
         "suite_report_sha256": sealed["suite_report_sha256"],
+        "plan_binding_sha256": sha256_file(binding_path),
         "build": sealed["build"],
         "children": sealed["children"],
     }

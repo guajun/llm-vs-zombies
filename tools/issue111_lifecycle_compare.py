@@ -28,9 +28,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compare two #111 lifecycle recordings semantically")
     parser.add_argument("left", type=Path)
     parser.add_argument("right", type=Path)
+    parser.add_argument("--scope", choices=("lifecycle", "common", "both"), default="lifecycle",
+                        help="lifecycle facts only (default), common gameplay evidence only, or both")
     args = parser.parse_args(argv)
     try:
-        report = lifecycle_compare.compare_lifecycle(resolve_audit(args.left), resolve_audit(args.right))
+        if args.scope == "lifecycle":
+            report = lifecycle_compare.compare_lifecycle(resolve_audit(args.left), resolve_audit(args.right))
+        else:
+            report = lifecycle_compare.compare_scoped(resolve_audit(args.left), resolve_audit(args.right),
+                                                      scope=args.scope)
     except lifecycle_compare.CompareError as exc:
         print(json.dumps({"schema": "lvz.lifecycle-compare.v1", "ok": False, "problems": [str(exc)]},
                          ensure_ascii=False, indent=2))

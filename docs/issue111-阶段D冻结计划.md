@@ -51,7 +51,7 @@
 
 比较：
 
-1. `off-a` vs `off-b`：对照可复现；
+1. `off-a` vs `off-b`：`issue111_lifecycle_compare.py --scope both`——共同 gameplay/state/RNG/action 证据 + 同模式完整 v2 语义序列；
 2. `on-a` vs `on-b`：新模式可复现（每个子运行都须有有效回执）；
 3. `off-a` vs `on-a`：**持久化适配器**共同证据比较；用 `tools/issue111_lifecycle_compare.py` 比较
    lifecycle 流（只归一化 run_id/branch_id/session_id，不剥离事实/计数/序号），并报告首个分叉
@@ -113,3 +113,12 @@ python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-o
 2. 确认是否要求“真正无插桩构建”的 off/on 对照；若需要，安排第二种构建身份并重冻计划，而不是把
    持久化 switch 当成插桩 switch。
 3. 确认资源与排期后，由执行者在独立 session 串行运行四个 suite；本轮不运行。
+
+## 比较工具范围（评审第四轮）
+
+- 同模式复跑（off/off、on/on）使用 `--scope both`：先各自严格校验完整流，再比较共同 gameplay 证据，并单独比较
+  完整 v2 语义序列/健康。
+- OFF vs ON 安装效应使用 `--scope common`：仅做声明的窄归一化（run/branch/session、`lifecycle_probes`
+  manifest、`event.object.board` 诊断指针），不把合法的 v2 事件差异当作扰动失败；任何共同
+  state/RNG/action/结果首差异都必须如实报告。
+- 默认比较器保持严格；scoped 路径不丢宽字段。

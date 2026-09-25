@@ -93,8 +93,9 @@ _PROBE_EVENT_KEYS = {"schema", "kind", "capture_sequence", "version", "version_p
 _PROBE_OBJECT_KEYS = {"class", "on_board", "wave", "board"}
 _PROBE_PHASE_KEYS = {"site", "before", "after"}
 _PROBE_REMOVAL_KEYS = {"source", "before", "after", "frame"}
-_PROBE_REMOVAL_FRAME_KEYS = {"return_into_diewithloot", "return_into_applyburn",
+_PROBE_REMOVAL_FRAME_KEYS = {"status", "return_into_diewithloot", "return_into_applyburn",
                              "callsite_bytes_match"}
+_PROBE_FRAME_STATUSES = {"missing", "out_of_stack", "foreign_return", "reversed", "validated"}
 _PROBE_RECYCLE_CANDIDATE_KEYS = {"state", "slot", "free_head_before", "count_before"}
 _PROBE_RECYCLE_COMMIT_KEYS = {"state", "slot", "candidate_capture_sequence", "free_head_after", "count_after"}
 _PROBE_PROBE_KEYS = {"name", "schema", "sequence_domain"}
@@ -438,12 +439,27 @@ def _check_probe_event(event: dict, label: str, problems: list[str]) -> None:
             _require(removal.get("after") == 1, f"{label}: mDead store writes exactly 1", problems)
             frame = removal.get("frame")
             if _exact_keys(frame, _PROBE_REMOVAL_FRAME_KEYS, f"{label} removal.frame", problems):
-                for key in ("return_into_diewithloot", "return_into_applyburn"):
-                    value = frame.get(key)
+                status = frame.get("status")
+                _require(status in _PROBE_FRAME_STATUSES, f"{label}: frame status is not a known state", problems)
+                inner = frame.get("return_into_diewithloot")
+                outer = frame.get("return_into_applyburn")
+                for key, value in (("return_into_diewithloot", inner), ("return_into_applyburn", outer)):
                     _require(value is None or (_is_int(value) and value > 0),
                              f"{label}: frame {key} must be null or a positive address", problems)
                 _require(type(frame.get("callsite_bytes_match")) is bool,
                          f"{label}: frame callsite_bytes_match must be a boolean", problems)
+                if status == "validated":
+                    _require(_is_int(inner) and _is_int(outer),
+                             f"{label}: a validated frame must carry both returns", problems)
+                elif status == "foreign_return":
+                    _require(_is_int(inner) and outer is None,
+                             f"{label}: a foreign return carries only the bounded first return", problems)
+                elif status == "reversed":
+                    _require(inner is None and outer is None,
+                             f"{label}: a reversed frame must not publish returns", problems)
+                elif status in ("missing", "out_of_stack"):
+                    _require(inner is None and outer is None,
+                             f"{label}: an invalid frame must not publish returns", problems)
     else:
         recycle = event.get("recycle")
         expected_keys = _PROBE_RECYCLE_CANDIDATE_KEYS if kind == "zombie_slot_recycle_candidate" \

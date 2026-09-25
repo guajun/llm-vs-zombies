@@ -49,8 +49,8 @@ def event(kind, sequence, *, entity=ENTITY, site="phase-mowdown", before=0, afte
         base["phase"] = {"site": site, "before": before, "after": after}
     elif kind == "zombie_removal_marked":
         base["removal"] = {"source": "dienoloot_mdead_store", "before": 0, "after": 1,
-                           "frame": {"return_into_diewithloot": None, "return_into_applyburn": None,
-                                     "callsite_bytes_match": False}}
+                           "frame": {"status": "missing", "return_into_diewithloot": None,
+                                     "return_into_applyburn": None, "callsite_bytes_match": False}}
     else:
         base["recycle"] = {"state": "candidate", "slot": 0, "free_head_before": 0, "count_before": 1}
     return base
@@ -85,7 +85,21 @@ class CaptureAnalysisTests(unittest.TestCase):
         self.assertEqual(report["facts"][0]["class"], "nondeath")
         self.assertEqual(report["facts"][1]["class"], "phase_unclassified")
         self.assertEqual(report["facts"][2]["class"], "already_dying")
-        self.assertEqual(report["facts"][3]["class"], "removal_unclassified")
+        self.assertEqual(report["facts"][2]["onset"], "unknown")
+        self.assertEqual(report["facts"][3]["class"], "removal_after_death")
+        self.assertEqual(report["summary"]["unknown_onsets"], 1)
+
+    def test_already_dying_then_validated_chain_is_not_a_new_first_kill(self):
+        already = event("zombie_phase_transition", 1, site="phase-mowdown", before=2, after=3)
+        removal = event("zombie_removal_marked", 2)
+        removal["removal"]["frame"] = {"status": "validated",
+                                       "return_into_diewithloot": 0x5302FF,
+                                       "return_into_applyburn": 0x532FC7,
+                                       "callsite_bytes_match": True}
+        report = analyze_capture_facts([already, removal], coverage=FULL_COVERAGE)
+        self.assertFalse(report["first_kill"]["proven"], report["first_kill"])
+        self.assertEqual(report["facts"][1]["class"], "removal_after_death")
+        self.assertTrue(any("onset" in reason for reason in report["first_kill"]["reasons"]))
 
     def test_reviewer_repro_is_not_proven(self):
         report = analyze_capture_facts([{
@@ -149,7 +163,8 @@ class CaptureAnalysisTests(unittest.TestCase):
 
     def test_validated_applyburn_chain_is_a_direct_death(self):
         removal = event("zombie_removal_marked", 1)
-        removal["removal"]["frame"] = {"return_into_diewithloot": 0x5302FF,
+        removal["removal"]["frame"] = {"status": "validated",
+                                       "return_into_diewithloot": 0x5302FF,
                                        "return_into_applyburn": 0x532FC7,
                                        "callsite_bytes_match": True}
         report = analyze_capture_facts([removal], coverage=FULL_COVERAGE)
@@ -160,10 +175,10 @@ class CaptureAnalysisTests(unittest.TestCase):
     def test_unvalidated_removal_is_never_a_death(self):
         cases = [
             ("no frame", None),
-            ("foreign returns", {"return_into_diewithloot": 0x1111, "return_into_applyburn": 0x532FC7,
-                                 "callsite_bytes_match": True}),
-            ("bytes mismatch", {"return_into_diewithloot": 0x5302FF, "return_into_applyburn": 0x532FC7,
-                                "callsite_bytes_match": False}),
+            ("foreign returns", {"status": "foreign_return", "return_into_diewithloot": 0x1111,
+                                 "return_into_applyburn": None, "callsite_bytes_match": True}),
+            ("bytes mismatch", {"status": "validated", "return_into_diewithloot": 0x5302FF,
+                                "return_into_applyburn": 0x532FC7, "callsite_bytes_match": False}),
         ]
         for label, frame in cases:
             with self.subTest(case=label):

@@ -59,5 +59,7 @@ void LvzProbeSetVirtualProtectFailureAfterForTest(uint32_t callIndex) noexcept;
 bool LvzProbeHostModulePinnedForTest() noexcept;
 void LvzProbeSetCallsiteBytesForTest(uint32_t address, const uint8_t* bytes, uint32_t count) noexcept;
 void LvzProbeClearCallsiteBytesForTest() noexcept;
+void LvzProbeSetFrameReturnsForTest(uint32_t inner, uint32_t outer) noexcept;
+void LvzProbeClearFrameReturnsForTest() noexcept;
 #endif
 }

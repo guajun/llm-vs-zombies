@@ -79,11 +79,12 @@
       "left": "issue111-d-probe-off-a",
       "right": "issue111-d-probe-off-b",
       "require": "common boundary/state/RNG/action equality within the frozen window",
-      "tool": "tools/issue111_lifecycle_compare.py",
+      "tool": "tools/issue111_lifecycle_compare.py --scope both",
       "normalization": [
         "run_id",
         "branch_id",
-        "session_id only"
+        "session_id",
+        "event.object.board"
       ],
       "limits": "facts, counters and sequence values are never stripped"
     },
@@ -92,11 +93,12 @@
       "left": "issue111-d-probe-on-a",
       "right": "issue111-d-probe-on-b",
       "require": "common boundary/state/RNG/action equality plus valid v2 probe receipts and healthy counters in both on children",
-      "tool": "tools/issue111_lifecycle_compare.py",
+      "tool": "tools/issue111_lifecycle_compare.py --scope both",
       "normalization": [
         "run_id",
         "branch_id",
-        "session_id only"
+        "session_id",
+        "event.object.board"
       ],
       "limits": "raw phase/removal/recycle facts are compared by sequence, never deduplicated"
     },
@@ -104,12 +106,14 @@
       "name": "probe_installation_effect",
       "left": "issue111-d-probe-off-a",
       "right": "issue111-d-probe-on-a",
-      "require": "first divergence on common evidence located and reported with its coordinate range; not a pass/fail",
-      "tool": "tools/issue111_lifecycle_compare.py",
+      "require": "common gameplay/state/RNG/action/result equality or a located first difference; the exact-store probe streams and probe counters are compared separately",
+      "tool": "tools/issue111_lifecycle_compare.py --scope common",
       "normalization": [
         "run_id",
         "branch_id",
-        "session_id only"
+        "session_id",
+        "lifecycle_probes manifest",
+        "event.object.board"
       ],
       "limits": "v2-only facts are expected in the on arm and are reported as the intended difference"
     }
@@ -136,16 +140,16 @@
     "claiming a full-window first kill without death/removal capture and call-internal ordering"
   ],
   "required_reviews": [
-    "maintainer review of docs/issue111-原生候选证据.md before any death/removal/recycle production hook",
-    "maintainer acceptance that stage D may run with only the merged initialization probe if the candidate gate is still open; the tick-940 investigation then reports unavailable at capture level"
+    "maintainer review of the production store probes and the ApplyBurn frame-chain fact before any live launch",
+    "principal review of the four-trajectory single-cold D plan and the scoped comparison tool before execution"
   ],
   "commands": [
     "python tools/issue111_stage_d.py --root . check",
     "python tools/issue111_stage_d.py --root . doctor --require-game",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --expected-recorder-sha256 7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --expected-recorder-sha256 7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --expected-recorder-sha256 7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --expected-recorder-sha256 7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --expected-recorder-sha256 76ee20c28eee5ca3a11a05b07d726c9cafd08597b301aa00c0c8a560c165b2ff",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --expected-recorder-sha256 76ee20c28eee5ca3a11a05b07d726c9cafd08597b301aa00c0c8a560c165b2ff",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --expected-recorder-sha256 76ee20c28eee5ca3a11a05b07d726c9cafd08597b301aa00c0c8a560c165b2ff",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --expected-recorder-sha256 76ee20c28eee5ca3a11a05b07d726c9cafd08597b301aa00c0c8a560c165b2ff",
     "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-off-a",
     "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-on-a",
     "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-off-b",
@@ -157,7 +161,7 @@
     "python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-probe-off-a",
     "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-probe-off-a",
     "python tools/issue111_lifecycle_report.py experiments/runs/issue111-d-probe-on-a-s42-c0 --out work/issue111-d/probe-on-a-c0.json",
-    "python tools/issue111_lifecycle_compare.py experiments/runs/issue111-d-probe-off-a-s42-c0 experiments/runs/issue111-d-probe-on-a-s42-c0"
+    "python tools/issue111_lifecycle_compare.py --scope common experiments/runs/issue111-d-probe-off-a-s42-c0 experiments/runs/issue111-d-probe-on-a-s42-c0"
   ],
   "run_environment": {
     "issue111-d-probe-off-a": {
@@ -184,5 +188,5 @@
     "all four arms pin the same recorder build sha256 (--expected-recorder-sha256); check fails if a child audit declares a different build"
   ],
   "single_cold": true,
-  "pinned_recorder_sha256": "7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2"
+  "pinned_recorder_sha256": "76ee20c28eee5ca3a11a05b07d726c9cafd08597b301aa00c0c8a560c165b2ff"
 }

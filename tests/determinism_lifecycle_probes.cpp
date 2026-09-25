@@ -334,6 +334,8 @@ int RunTests() {
     using lvz::determinism::LvzProbeReaderHandlersRemovedForTest;
     using lvz::determinism::LvzProbeReaderProtectionInstalledForTest;
     using lvz::determinism::LvzProbeClearCallsiteBytesForTest;
+    using lvz::determinism::LvzProbeClearFrameReturnsForTest;
+    using lvz::determinism::LvzProbeSetFrameReturnsForTest;
     using lvz::determinism::LvzProbeSetCallsiteBytesForTest;
     using lvz::determinism::LvzProbeSetInFlightForTest;
     using lvz::determinism::LvzProbeSetVirtualProtectFailureAfterForTest;
@@ -463,64 +465,162 @@ int RunTests() {
                   && commit.at("recycle").at("count_after") == 2,
               "second recycle must record the slot/head/count transition from the preserved identity");
     }
-    // 9b. ApplyBurn -> DieWithLoot -> DieNoLoot bounded frame facts. Only the
-    //     locked callsite bytes plus the exact frame chain may classify this
-    //     removal as a direct death path; the store itself still runs for
-    //     every negative case.
+    // 9b. ApplyBurn -> DieWithLoot -> DieNoLoot bounded frame facts. The chain
+    //     runs on the real thread stack through production-shaped prologues;
+    //     only a stack-bounded, upward-nested frame with the verified
+    //     DieWithLoot return and matching callsite bytes is validated. Forged
+    //     heap frames, reversed frames and missing frames stay unknown.
     {
         LvzProbeClearCallsiteBytesForTest();
+        LvzProbeClearFrameReturnsForTest();
         const uint8_t applyBurnCall[5] = {0xe8, 0x29, 0xd3, 0xff, 0xff};
         const uint8_t dieNoLootCall[5] = {0xe8, 0x11, 0x02, 0x00, 0x00};
         LvzProbeSetCallsiteBytesForTest(0x532FC2, applyBurnCall, 5);
         LvzProbeSetCallsiteBytesForTest(0x5302FA, dieNoLootCall, 5);
-        const auto buildFrame = [](Machine& host, uint32_t dieWithLootReturn,
-                                   uint32_t applyBurnReturn) {
-            const uint32_t innerPoint = U32(host.scratch) + 0x40;
-            const uint32_t outerPoint = U32(host.scratch) + 0x80;
-            uint32_t value = outerPoint;
-            std::memcpy(host.scratch + 0x40, &value, 4);
-            value = dieWithLootReturn;
-            std::memcpy(host.scratch + 0x44, &value, 4);
-            value = 0;
-            std::memcpy(host.scratch + 0x80, &value, 4);
-            value = applyBurnReturn;
-            std::memcpy(host.scratch + 0x84, &value, 4);
-            return innerPoint;
-        };
-        Machine framed = machine;
-        const uint32_t inner = buildFrame(framed, 0x5302FF, 0x532FC7);
-        (void)RunOne(patched.addresses[5], framed, 0, 0, 0, inner, XmmSentinels());
+        uint8_t* chainPage = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE,
+                                                                PAGE_EXECUTE_READWRITE));
+        Check(chainPage != nullptr, "cannot allocate the nested-call page");
+        uint8_t* wrapper = chainPage;
+        uint8_t* dieWithLoot = chainPage + 0x100;
+        uint8_t* dieNoLoot = chainPage + 0x200;
+        const uint32_t dieWithLootAddress = U32(dieWithLoot);
+        const uint32_t dieNoLootAddress = U32(dieNoLoot);
+        const uint32_t mdeadAddress = static_cast<uint32_t>(patched.addresses[5]);
+        size_t offset = 0;
+        wrapper[offset++] = 0x55;                             // push ebp
+        wrapper[offset++] = 0x8b; wrapper[offset++] = 0xec;   // mov ebp,esp
+        wrapper[offset++] = 0x83; wrapper[offset++] = 0xec; wrapper[offset++] = 0x08;  // sub esp,8
+        wrapper[offset++] = 0x8b; wrapper[offset++] = 0xce;   // mov ecx,esi
+        wrapper[offset++] = 0xb8;                             // mov eax,DieWithLoot
+        std::memcpy(wrapper + offset, &dieWithLootAddress, 4);
+        offset += 4;
+        wrapper[offset++] = 0xff; wrapper[offset++] = 0xd0;   // call eax
+        const uint32_t wrapperReturn = U32(wrapper + offset);
+        wrapper[offset++] = 0x8b; wrapper[offset++] = 0xe5;   // mov esp,ebp
+        wrapper[offset++] = 0x5d;                             // pop ebp
+        wrapper[offset++] = 0xc3;                             // ret
+        offset = 0;
+        dieWithLoot[offset++] = 0x55;                         // push ebp
+        dieWithLoot[offset++] = 0x8b; dieWithLoot[offset++] = 0xec;  // mov ebp,esp
+        dieWithLoot[offset++] = 0x83; dieWithLoot[offset++] = 0xe4; dieWithLoot[offset++] = 0xf8;
+        dieWithLoot[offset++] = 0x51;                         // push ecx
+        dieWithLoot[offset++] = 0x56;                         // push esi
+        dieWithLoot[offset++] = 0x8b; dieWithLoot[offset++] = 0xf1;  // mov esi,ecx
+        dieWithLoot[offset++] = 0xb8;                         // mov eax,DieNoLoot
+        std::memcpy(dieWithLoot + offset, &dieNoLootAddress, 4);
+        offset += 4;
+        dieWithLoot[offset++] = 0xff; dieWithLoot[offset++] = 0xd0;  // call eax
+        const uint32_t dieWithLootReturn = U32(dieWithLoot + offset);
+        dieWithLoot[offset++] = 0x5e;                         // pop esi
+        dieWithLoot[offset++] = 0x8b; dieWithLoot[offset++] = 0xe5;  // mov esp,ebp
+        dieWithLoot[offset++] = 0x5d;                         // pop ebp
+        dieWithLoot[offset++] = 0xc3;                         // ret
+        offset = 0;
+        dieNoLoot[offset++] = 0x55;                           // push ebp
+        dieNoLoot[offset++] = 0x8b; dieNoLoot[offset++] = 0xec;      // mov ebp,esp
+        dieNoLoot[offset++] = 0x83; dieNoLoot[offset++] = 0xe4; dieNoLoot[offset++] = 0xf8;
+        dieNoLoot[offset++] = 0x51;                           // push ecx
+        dieNoLoot[offset++] = 0x57;                           // push edi
+        dieNoLoot[offset++] = 0x8b; dieNoLoot[offset++] = 0xf9;      // mov edi,ecx
+        dieNoLoot[offset++] = 0xc6; dieNoLoot[offset++] = 0x87;
+        dieNoLoot[offset++] = 0x2d; dieNoLoot[offset++] = 0x00; dieNoLoot[offset++] = 0x00;
+        dieNoLoot[offset++] = 0x00; dieNoLoot[offset++] = 0x5a;       // movb $0x5a,0x2d(%edi)
+        dieNoLoot[offset++] = 0xb8;                           // mov eax,mdead window
+        std::memcpy(dieNoLoot + offset, &mdeadAddress, 4);
+        offset += 4;
+        dieNoLoot[offset++] = 0xff; dieNoLoot[offset++] = 0xd0;      // call eax
+        dieNoLoot[offset++] = 0x5f;                           // pop edi
+        dieNoLoot[offset++] = 0x59;                           // pop ecx
+        dieNoLoot[offset++] = 0x8b; dieNoLoot[offset++] = 0xe5;      // mov esp,ebp
+        dieNoLoot[offset++] = 0x5d;                           // pop ebp
+        dieNoLoot[offset++] = 0xc3;                           // ret
+        LvzProbeSetFrameReturnsForTest(dieWithLootReturn, wrapperReturn);
+        Machine chained = machine;
+        const uint32_t chainedZombie = U32(chained.zombie(0));
+        (void)RunOne(U32(wrapper), chained, 0, chainedZombie, 0, 0, XmmSentinels());
+        Check(chained.zombie(0)[0x2d] == 0x5a, "the fake DieWithLoot must execute before the mdead store");
         auto batch = DrainLifecycleProbeBatch();
         const auto removal = EventOfKind(batch, "zombie_removal_marked");
-        Check(removal.at("removal").at("frame").at("return_into_diewithloot") == 0x5302FF
-                  && removal.at("removal").at("frame").at("return_into_applyburn") == 0x532FC7
+        Check(removal.at("removal").at("frame").at("status") == "validated"
+                  && removal.at("removal").at("frame").at("return_into_diewithloot") == dieWithLootReturn
+                  && removal.at("removal").at("frame").at("return_into_applyburn") == wrapperReturn
                   && removal.at("removal").at("frame").at("callsite_bytes_match") == true,
-              "the locked ApplyBurn chain must be recorded as a validated frame fact");
-        // Foreign frame returns are recorded raw but never validated.
+              "a real nested stack chain must be bounded, nested and validated");
+
+        // A mismatching expected DieWithLoot return leaves the raw first return
+        // and no outer frame.
+        LvzProbeSetFrameReturnsForTest(dieWithLootReturn + 1u, wrapperReturn);
         Machine foreign = machine;
-        const uint32_t foreignInner = buildFrame(foreign, 0x11111111, 0x532FC7);
-        (void)RunOne(patched.addresses[5], foreign, 0, 0, 0, foreignInner, XmmSentinels());
+        (void)RunOne(U32(wrapper), foreign, 0, U32(foreign.zombie(0)), 0, 0, XmmSentinels());
         batch = DrainLifecycleProbeBatch();
-        Check(EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame").at(
-                  "return_into_diewithloot") == 0x11111111,
-              "foreign frame returns must be preserved raw");
-        // Missing frame: no frame facts are fabricated.
-        (void)RunOne(patched.addresses[5], machine, 0, 0, 0, 0, XmmSentinels());
+        {
+            const auto frame = EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame");
+            Check(frame.at("status") == "foreign_return"
+                      && frame.at("return_into_diewithloot") == dieWithLootReturn
+                      && frame.at("return_into_applyburn").is_null(),
+                  "a foreign first return must keep only the bounded raw fact");
+        }
+
+        // A forged frame placed on the heap is outside the thread stack.
+        LvzProbeSetFrameReturnsForTest(dieWithLootReturn, wrapperReturn);
+        uint8_t* forgedPage = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x400, MEM_COMMIT | MEM_RESERVE,
+                                                                 PAGE_READWRITE));
+        Check(forgedPage != nullptr, "cannot allocate the forged frame page");
+        const uint32_t forgedInner = U32(forgedPage) + 0x40;
+        const uint32_t forgedOuter = U32(forgedPage) + 0x80;
+        uint32_t value = forgedOuter;
+        std::memcpy(forgedPage + 0x40, &value, 4);
+        value = dieWithLootReturn;
+        std::memcpy(forgedPage + 0x44, &value, 4);
+        value = 0;
+        std::memcpy(forgedPage + 0x80, &value, 4);
+        value = wrapperReturn;
+        std::memcpy(forgedPage + 0x84, &value, 4);
+        Machine forged = machine;
+        (void)RunOne(patched.addresses[5], forged, 0, 0, 0, forgedInner, XmmSentinels());
+        VirtualFree(forgedPage, 0, MEM_RELEASE);
         batch = DrainLifecycleProbeBatch();
-        Check(EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame").at(
-                  "return_into_diewithloot").is_null(),
-              "a missing frame must stay null");
-        // Wrong callsite bytes invalidate the chain fact.
+        {
+            const auto frame = EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame");
+            Check(frame.at("status") == "out_of_stack" && frame.at("return_into_diewithloot").is_null(),
+                  "a forged heap frame must stay out of stack and null");
+        }
+
+        // A real stack address whose saved frame does not point upward is
+        // reversed, not a chain.
+        uint32_t stackProbe[2] = {0, 0};
+        const uint32_t probeBase = U32(&stackProbe[0]);
+        stackProbe[0] = probeBase;
+        stackProbe[1] = dieWithLootReturn;
+        Machine reversed = machine;
+        (void)RunOne(patched.addresses[5], reversed, 0, 0, 0, probeBase, XmmSentinels());
+        batch = DrainLifecycleProbeBatch();
+        {
+            const auto frame = EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame");
+            Check(frame.at("status") == "reversed" && frame.at("return_into_applyburn").is_null(),
+                  "a reversed frame must not produce an outer return");
+        }
+
+        // Missing frame.
+        Machine missingFrame = machine;
+        (void)RunOne(patched.addresses[5], missingFrame, 0, 0, 0, 0, XmmSentinels());
+        batch = DrainLifecycleProbeBatch();
+        Check(EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame").at("status")
+                  == "missing",
+              "a missing frame must be recorded as missing");
+
+        // Wrong callsite bytes invalidate the validated chain fact.
         const uint8_t wrongCall[5] = {0x90, 0x90, 0x90, 0x90, 0x90};
         LvzProbeSetCallsiteBytesForTest(0x532FC2, wrongCall, 5);
         Machine wrongBytes = machine;
-        const uint32_t wrongInner = buildFrame(wrongBytes, 0x5302FF, 0x532FC7);
-        (void)RunOne(patched.addresses[5], wrongBytes, 0, 0, 0, wrongInner, XmmSentinels());
+        (void)RunOne(U32(wrapper), wrongBytes, 0, U32(wrongBytes.zombie(0)), 0, 0, XmmSentinels());
         batch = DrainLifecycleProbeBatch();
         Check(EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame").at(
                   "callsite_bytes_match") == false,
               "a mismatching pinned callsite must invalidate the chain fact");
         LvzProbeClearCallsiteBytesForTest();
+        LvzProbeClearFrameReturnsForTest();
+        VirtualFree(chainPage, 0, MEM_RELEASE);
     }
 
     Check(LifecycleProbeStatus().at("healthy").get<bool>(), "capture must be healthy after the normal cases");

@@ -351,12 +351,22 @@
             "frame": {
               "type": "object",
               "required": [
+                "status",
                 "return_into_diewithloot",
                 "return_into_applyburn",
                 "callsite_bytes_match"
               ],
               "additionalProperties": false,
               "properties": {
+                "status": {
+                  "enum": [
+                    "missing",
+                    "out_of_stack",
+                    "foreign_return",
+                    "reversed",
+                    "validated"
+                  ]
+                },
                 "return_into_diewithloot": {
                   "type": [
                     "integer",
