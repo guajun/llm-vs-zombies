@@ -450,7 +450,7 @@ def _load_plan_from_report(suite_report: dict):
                    for key, item in value.items()}).validate()
 
 
-def _seal_document(root: Path, name: str) -> dict:
+def _seal_document(root: Path, name: str, *, allow_compress: bool = False) -> dict:
     report = seal_check(root, name)
     if not report.get("ok"):
         raise ExperimentError("run is not sealable: " + "; ".join(report["problems"]))
@@ -458,6 +458,8 @@ def _seal_document(root: Path, name: str) -> dict:
     for child in metadata["expected_children"]:
         audit = root / "experiments" / "runs" / child / "audit"
         if not (audit / evidence_codec.RECEIPT).is_file():
+            if not allow_compress:
+                raise ExperimentError(f"sealed codec receipt is missing: {audit}")
             evidence_codec.compress_evidence(audit)
     # Re-run the proof against the compressed evidence (strict read + digest).
     sealed = check(root, name)
@@ -493,14 +495,14 @@ def seal(root: Path, name: str) -> dict:
     the stored seal is never silently replaced by a different document.
     """
     root = Path(root).resolve()
-    document = _seal_document(root, name)
     target = seal_path(root, name)
+    document = _seal_document(root, name, allow_compress=not target.exists())
     if target.is_file():
         try:
             existing = json.loads(target.read_bytes())
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ExperimentError(f"existing seal is unreadable: {exc}") from exc
-        if existing.get("seal_id") != document["seal_id"]:
+        if existing != document:
             raise ExperimentError("existing seal does not match the current evidence; refusing to replace it")
         return existing
     target.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -518,7 +520,7 @@ def verify_seal(root: Path, name: str) -> dict:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ExperimentError(f"seal is unreadable: {exc}") from exc
     document = _seal_document(root, name)
-    if existing.get("seal_id") != document["seal_id"]:
+    if existing != document:
         raise ExperimentError("existing seal does not match the current evidence")
     return {"schema": SEAL_SCHEMA, "run": name, "ok": True, "seal_id": existing["seal_id"]}
 

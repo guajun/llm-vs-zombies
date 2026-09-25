@@ -307,6 +307,21 @@ class ExperimentEntryTests(unittest.TestCase):
         with self.assertRaises(experiment.ExperimentError):
             experiment.verify_seal(self.root, "issue111-d-on-i")
 
+    def test_seal_verifies_document_content_and_never_compresses_on_verify(self):
+        name = "issue111-d-on-seal-content"
+        self._complete_suite(name=name)
+        original = experiment.seal(self.root, name)
+        target = experiment.seal_path(self.root, name)
+        modified = dict(original, mode="off")  # keep the old seal_id
+        target.write_text(json.dumps(modified), encoding="utf-8")
+        for operation in (experiment.verify_seal, experiment.seal):
+            with self.assertRaises(experiment.ExperimentError):
+                operation(self.root, name)
+        target.write_text(json.dumps(original), encoding="utf-8")
+        with mock.patch.object(experiment.evidence_codec, "compress_evidence",
+                               side_effect=AssertionError("verification must be read-only")):
+            self.assertTrue(experiment.verify_seal(self.root, name)["ok"])
+
     # --- CLI --------------------------------------------------------------
 
     def test_cli_prepare_and_invalid_root_order(self):
