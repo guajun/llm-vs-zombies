@@ -136,8 +136,9 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 
 - 现有信封、`state-deltas.jsonl`、`checksums.jsonl` 的 `seq` 是**唯一写者的写盘顺序**，保持原义不重定义；
   旧轨迹继续可读。
-- 新字段 `capture_sequence` 表示**捕获顺序**：在捕获点内、进入队列前分配的进程内单调 `uint64`；
-  同一游戏线程上的所有捕获点共享同一顺序域；drain、边界与 epoch 都不重置。
+- 新字段 `capture_sequence` 表示**捕获顺序**：在实际捕获点出口、进入队列前分配的进程内单调 `uint64`；
+  同一游戏线程上的所有捕获点共享同一顺序域；drain、边界与 epoch 都不重置。调用身份
+  （`invocation_id`/`parent_invocation_id`）在入口分配，与事件序号分离，不冒充捕获顺序。
 - 需要捕获顺序的分析只读 `capture_sequence`；缺少该字段的旧轨迹标 `unavailable`，不得用 `seq` 近似，
   也不得按零处理。现有出生探针的 `ordinal` 只是单探针局部序号（Install 时重置），不得直接当作
   全进程 `capture_sequence`；阶段 B 必须由宿主提供共享分配器，出生探针接入同一顺序域，并用
@@ -147,7 +148,7 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 
 `schema`、`kind`、`capture_sequence`、`version{epoch,tick,revision}`、`version_phase`
 （`controlled_boundary`/`initialization`/`unknown`）、`engine_call_id`（受控调用内为真实 ID，否则必须
-为 null，禁止伪造）、`invocation{depth,parent_capture_sequence}`、`entity{id,slot,generation}`、
+为 null，禁止伪造）、`invocation{depth,invocation_id,parent_invocation_id}`、`entity{id,slot,generation}`、
 `before_after`（`before`/`after` 子对象）原始字段子集、`classification{class,cause}`（无证据时 `unknown`）、`probe`、`complete`。
 每个捕获点只复制自己声明的最小字段；浮点保存原始 32 位；指针不作为跨运行身份。
 

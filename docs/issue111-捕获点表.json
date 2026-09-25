@@ -186,7 +186,7 @@
       },
       "ordering": {
         "capture_sequence": "实现时必须接入宿主提供的进程内共享捕获顺序域（出生探针接入同一分配器）；drain、边界与 epoch 都不重置。",
-        "nesting": "如发生在嵌套调用内，保留 invocation{depth,parent_capture_sequence}。",
+        "nesting": "如发生在嵌套调用内，保留 invocation{depth,invocation_id,parent_invocation_id}。",
         "boundary_label": "只在受控调用内绑定真实 engine_call_id；调用外为 null 并标 unknown。"
       },
       "required_payload": [
@@ -241,7 +241,7 @@
       },
       "ordering": {
         "capture_sequence": "实现时必须接入宿主提供的进程内共享捕获顺序域（出生探针接入同一分配器）；drain、边界与 epoch 都不重置。",
-        "nesting": "如发生在嵌套调用内，保留 invocation{depth,parent_capture_sequence}。",
+        "nesting": "如发生在嵌套调用内，保留 invocation{depth,invocation_id,parent_invocation_id}。",
         "boundary_label": "只在受控调用内绑定真实 engine_call_id；调用外为 null 并标 unknown。"
       },
       "required_payload": [
@@ -294,7 +294,7 @@
       },
       "ordering": {
         "capture_sequence": "实现时必须接入宿主提供的进程内共享捕获顺序域（出生探针接入同一分配器）；drain、边界与 epoch 都不重置。",
-        "nesting": "如发生在嵌套调用内，保留 invocation{depth,parent_capture_sequence}。",
+        "nesting": "如发生在嵌套调用内，保留 invocation{depth,invocation_id,parent_invocation_id}。",
         "boundary_label": "只在受控调用内绑定真实 engine_call_id；调用外为 null 并标 unknown。"
       },
       "required_payload": [
@@ -390,7 +390,7 @@
       {"name": "version", "type": "object|null", "required": true, "semantics": "{epoch,tick,revision}；调用外事件不得回填旧版本"},
       {"name": "version_phase", "type": "enum", "required": true, "values": ["controlled_boundary", "initialization", "unknown"]},
       {"name": "engine_call_id", "type": "uint64|null", "required": true, "semantics": "只写受控调用的真实 ID；不在受控调用内必须为 null，禁止伪造"},
-      {"name": "invocation", "type": "object", "required": true, "semantics": "{depth,parent_capture_sequence}；嵌套调用才要求配对"},
+      {"name": "invocation", "type": "object", "required": true, "semantics": "{depth,invocation_id,parent_invocation_id}；嵌套调用才要求配对；invocation_id 入口分配、与出口 capture_sequence 分离"},
       {"name": "entity", "type": "object", "required": true, "semantics": "{id,slot,generation}；id 低 16 位槽位、高 16 位代次；不序列化指针作为身份"},
       {"name": "before_after", "type": "object", "required": true, "semantics": "每个捕获点声明的最小原始字段子集；未知或不可读显式 null 并置 complete=false"},
       {"name": "classification", "type": "object", "required": true, "semantics": "{class,cause}；class 取事实类别，cause 无独立证据时为 unknown；未观测到死亡阶段的移除一律 removal_unclassified，只有独立路径证据确认后才允许 non_death_removal"},

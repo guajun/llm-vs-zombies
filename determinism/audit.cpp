@@ -8,6 +8,7 @@
 #include "model.hpp"
 #include "json_diff.hpp"
 #include "memory.hpp"
+#include "measurement.hpp"
 #include "spawn_hook.hpp"
 #include "reanimation_audit.hpp"
 #include "particle_shake.hpp"
@@ -79,7 +80,8 @@ void Write(std::ofstream& stream, const Json& value) {
 void DrainAndCheckSpawns() {
     const auto health=SpawnHookStatus();
     if(health.value("active_initializers",size_t(0))==0) {
-        for(auto& spawn:DrainSpawnEvents()) {
+        auto batch=DrainSpawnBatch();
+        for(auto& spawn:batch.legacy) {
             const auto& boundary=spawn.at("boundary");
             const bool controlled=boundary.is_object();
             Json version=nullptr;
@@ -90,6 +92,7 @@ void DrainAndCheckSpawns() {
                 {"native_phase","zombie_initialize_exit"},{"version",version},
                 {"payload",std::move(spawn)}});
         }
+        lvz::measurement::Host().OnPersisted(batch.count);
     }
     if(!health.value("healthy",false)) {
         Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_fault"},
@@ -319,14 +322,17 @@ void Initialize(const std::filesystem::path& runDir) {
     fpMonitor=std::make_unique<fpenv::Monitor>(ownerThread);fpFaultWritten=false;
     previous=nullptr; previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
-    bool hookInstalled=false;
+    bool hookInstalled=false, measurementOpened=false;
     try {
         silentaudio::Initialize(runDir);
         if(silentaudio::Enabled()){
             soundCounterRaw.open(directory/"sound-counter-raw.jsonl",std::ios::out|std::ios::binary);
             if(!soundCounterRaw)throw std::runtime_error("Cannot open sound counter raw evidence");
         }
-        std::string error;
+        std::string error, measureError;
+        if(!lvz::measurement::Host().Open(ownerThread, &measureError))
+            throw std::runtime_error(measureError);
+        measurementOpened=true;
         if(!InstallSpawnHook(error)) throw std::runtime_error(error);
         hookInstalled=true;
         if(!InstallParticleShakeHook(error)) throw std::runtime_error(error);
@@ -343,6 +349,10 @@ void Initialize(const std::filesystem::path& runDir) {
             std::string removeError;
             if(!RemoveSpawnHook(removeError))
                 throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
+        }
+        if(measurementOpened) {
+            std::string closeError;
+            lvz::measurement::Host().Close(&closeError);
         }
         checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();fpRaw.close();initialized=false;
         throw;
@@ -599,6 +609,11 @@ void Shutdown() {
         {"version",lastObservationVersion},{"payload",lvz::recording::DrawGateStatus()}});
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_closed"},
         {"version",lastObservationVersion},{"payload",ParticleShakeStatus()}});
+    std::string measureCloseError;
+    if(!lvz::measurement::Host().Close(&measureCloseError)) {
+        Flush();
+        throw std::runtime_error("Measurement session close failed: "+measureCloseError);
+    }
     const auto finalHealth=SpawnHookStatus();
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},
         {"version",lastObservationVersion},{"payload",finalHealth}});

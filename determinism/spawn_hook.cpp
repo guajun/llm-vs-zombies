@@ -51,7 +51,7 @@ struct EntryData {
     uint8_t variant=0;
     bool parentPresent=false, parentReadable=false, readable=false;
     uint32_t gameClock=0;
-    uint64_t captureSequence=0, parentCaptureSequence=0;
+    uint64_t invocationId=0, parentInvocationId=0;
     uint32_t depth=0;
     MtState mt{};
     Boundary boundary{};
@@ -62,11 +62,12 @@ struct Record {
     MtState mtAfter{};
     uint32_t gameClockAfter=0;
     uint64_t ordinal=0;
+    uint64_t captureSequence=0;
 };
 std::array<EntryData,kDepthLimit> stack;
 std::array<Record,kCapacity> queue;
 size_t depth=0, count=0;
-uint64_t ordinal=0, captured=0;
+uint64_t ordinal=0, captured=0, invocationId=0;
 std::atomic<uint64_t> wrongThread{0}, faults{0}, overflow{0};
 DWORD gameThread=0;
 bool installed=false;
@@ -100,12 +101,11 @@ void Enter(SavedRegisters* frame) noexcept {
     const uint32_t enterDepth=depth;
     auto& item=stack[depth++];
     item=EntryData{};
-    // Shared order domain: allocate before the record is enqueued at exit, so
-    // nested initializers keep parent-before-child order and the parent link
-    // below is well defined. Faults later may leave gaps; monotonicity holds.
-    item.captureSequence=lvz::measurement::Host().NextSequence();
+    // Invocation identity is entry-order and is separate from the event's
+    // capture_sequence, which is allocated at the actual exit capture point.
+    item.invocationId=invocationId++;
     item.depth=enterDepth;
-    item.parentCaptureSequence=enterDepth?stack[enterDepth-1].captureSequence:0;
+    item.parentInvocationId=enterDepth?stack[enterDepth-1].invocationId:0;
     const auto* args=reinterpret_cast<const uint32_t*>(frame+1);
     // Original ABI: row in EAX; return address, this, type, variant, parent, wave on stack.
     item.zombie=args[1]; item.row=static_cast<int32_t>(frame->eax);
@@ -128,6 +128,10 @@ void Leave(SavedRegisters* frame) noexcept {
     if(count==kCapacity) { ++overflow; lvz::measurement::Host().OnOverflow(); return; }
     auto& record=queue[count];
     record.entry=item; record.ordinal=ordinal++;
+    // Event order is allocated at the actual exit capture point, so nested
+    // exits are ordered by what was really observed first (child, then parent).
+    record.captureSequence=lvz::measurement::Host().NextSequence();
+    if(!record.captureSequence) { ++faults; return; }
     record.gameClockAfter=GameClock(item.zombie);
     if(!Copy(item.zombie,record.zombie) || !Copy(mtAddress,record.mtAfter)
         || record.mtAfter.cursor>625 || Word(record.zombie,0x158)!=item.generationId) {
@@ -166,6 +170,12 @@ bool Install(uintptr_t entry,uintptr_t epilogue,uintptr_t mt,std::string& error,
         || !Accessible(mt,sizeof(MtState))) {
         error="Unsupported ZombieInitialize bytes/MT layout";return false;
     }
+    // The probe binds to an already-open measurement session; it never opens or
+    // resets the shared host, so installing/removing one probe cannot wipe the
+    // ledger or sequence of any other probe on the same domain.
+    if(!lvz::measurement::Host().BoundTo(GetCurrentThreadId())) {
+        error="Measurement session is not open on the game thread";return false;
+    }
     // MinHook is shared with AvZ; this module never globally disables or uninitializes it.
     auto status=MH_Initialize();
     if(status!=MH_OK&&status!=MH_ERROR_ALREADY_INITIALIZED) {
@@ -180,8 +190,7 @@ bool Install(uintptr_t entry,uintptr_t epilogue,uintptr_t mt,std::string& error,
     }
     if(status==MH_OK) {
         gameThread=GetCurrentThreadId();entryAddress=entry;exitAddress=epilogue;mtAddress=mt;
-        lvz::measurement::Host().Open(gameThread);
-        depth=count=0;ordinal=captured=0;wrongThread=0;faults=0;overflow=0;currentBoundary={};
+        depth=count=0;ordinal=captured=0;invocationId=0;wrongThread=0;faults=0;overflow=0;currentBoundary={};
         status=MH_EnableHook(reinterpret_cast<void*>(epilogue));
         if(status==MH_OK) status=MH_EnableHook(reinterpret_cast<void*>(entry));
     }
@@ -221,9 +230,9 @@ Json LifecycleEvent(const Record& record) {
         engineCallId=input.boundary.engineCallId;
     }
     Json invocation=nullptr;
-    if(input.depth) invocation={{"depth",input.depth},{"parent_capture_sequence",input.parentCaptureSequence}};
+    if(input.depth) invocation={{"depth",input.depth},{"invocation_id",input.invocationId},{"parent_invocation_id",input.parentInvocationId}};
     return {{"schema","lvz.lifecycle-event.v1"},{"kind","zombie_initialized"},
-        {"capture_sequence",input.captureSequence},
+        {"capture_sequence",record.captureSequence},
         {"version",version},
         {"version_phase",input.boundary.valid?"controlled_boundary":"initialization"},
         {"engine_call_id",input.boundary.valid&&engineCallId?Json(engineCallId):Json(nullptr)},
