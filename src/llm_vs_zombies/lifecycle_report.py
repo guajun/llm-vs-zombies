@@ -747,6 +747,26 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
             raise ReportError(f"capture facts are unreadable: {exc}") from exc
         full_window, window_problems = _full_window_evidence(run_directory, audit_directory, snapshots,
                                                              plan, plan_binding)
+        binding_mode_problems: list[str] = []
+        for candidate in _plan_binding_paths(run_directory, audit_directory.parent
+                                             / (run_directory.name.rsplit("-s", 1)[0]
+                                                if "-s" in run_directory.name else run_directory.name),
+                                             plan_binding):
+            if not candidate.is_file():
+                continue
+            try:
+                bound = json.loads(candidate.read_bytes())
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                break
+            expected_probes = bound.get("probes")
+            if expected_probes in ("off", "on") and probes_enabled != (expected_probes == "on"):
+                binding_mode_problems.append("the probe capability does not match the prepared probe arm")
+            expected_mode = bound.get("mode")
+            lifecycle_mode = lifecycle_events.mode(manifest)
+            if expected_mode in ("off", "on") and lifecycle_mode != ("enabled" if expected_mode == "on"
+                                                                     else "disabled"):
+                binding_mode_problems.append("the lifecycle capability does not match the prepared mode arm")
+            break
         initial_entities: dict[int, dict] = {}
         if snapshots:
             for entry in (snapshots[0].get("zombies") or {}).values():
@@ -770,6 +790,14 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
                 "health_clean": probes_healthy,
                 "initial_entities": initial_entities,
             })
+        if binding_mode_problems:
+            report["coverage"]["binding_problems"] = binding_mode_problems
+            report["problems"].extend(f"binding: {problem}" for problem in binding_mode_problems)
+            report["capture_facts"]["first_kill"]["proven"] = False
+            report["first_kill"] = {"proven": False, "source": "exact-store capture facts",
+                                    "reasons": binding_mode_problems,
+                                    "prerequisites": report["capture_facts"]["first_kill"]["prerequisites"],
+                                    "boundary_gate": report.get("first_kill")}
         if window_problems:
             report["coverage"]["full_window_limit"] = window_problems
         capture_first_kill = report["capture_facts"]["first_kill"]
