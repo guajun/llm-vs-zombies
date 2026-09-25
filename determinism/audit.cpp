@@ -9,6 +9,7 @@
 #include "json_diff.hpp"
 #include "memory.hpp"
 #include "measurement.hpp"
+#include "stream_close.hpp"
 #include "spawn_hook.hpp"
 #include "reanimation_audit.hpp"
 #include "particle_shake.hpp"
@@ -627,9 +628,9 @@ void Shutdown() {
             if(!RemoveSpawnHook(error)) note("Keep runtime DLL loaded: "+error);
             try { Flush(); } catch(const std::exception& exception) { note(exception.what()); }
             checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();fpRaw.close();
-            if(soundCounterRaw.is_open()){soundCounterRaw.close();}
+            const std::string soundCloseError = CloseOptionalStream(soundCounterRaw, "Sound counter raw evidence");
+            if(!soundCloseError.empty()) note(soundCloseError);
             if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()||fpRaw.fail()) note("Audit output close failed");
-            if(soundCounterRaw.is_open()&&soundCounterRaw.fail()) note("Sound counter raw evidence close failed");
             initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
             reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT

@@ -1,7 +1,10 @@
 #include "determinism/measurement.hpp"
+#include "determinism/stream_close.hpp"
 #include <Windows.h>
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -169,6 +172,21 @@ int main() {
         Check(cleanupRan, "cleanup must have run before the failure propagated");
         Check(Host().Failed() && !Host().CloseReceiptPresent(),
               "cleanup failure must downgrade to failed without a success receipt");
+
+        // --- Optional output-stream close failure must be detected even though
+        //     is_open() becomes false after close() ---
+        {
+            const auto path = std::filesystem::temp_directory_path() / "lvz-optional-stream-close.bin";
+            std::ofstream stream(path, std::ios::out | std::ios::binary);
+            Check(stream.is_open(), "open the optional close-check stream");
+            stream.setstate(std::ios::failbit);  // simulate a failed close/finalization
+            const std::string closeError = lvz::determinism::CloseOptionalStream(stream, "Sound counter raw evidence");
+            Check(closeError == "Sound counter raw evidence close failed",
+                  "optional stream close failure must be reported");
+            Check(!stream.is_open(), "the stream must still be closed");
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
 
         std::cout << "measurement: shared capture_sequence, fault counters, session/close/commit/abort/shutdown lifecycle passed\n";
         return 0;
