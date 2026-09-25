@@ -36,7 +36,40 @@ def analyze(items):
                       {"epoch": 3, "tick": len(items) // 2, "revision": 0})
 
 
+def render_report(runs):
+    """Supply report metadata while preserving real scanner results."""
+    return {"delivery_status": "complete" if all(r["status"] == "analyzed" for r in runs.values()) else "failed",
+            "tree_id": "fixture-tree", "rules": [], "pairs": {}, "minimum_capture": [],
+            "source_unchanged": True, "seal_after": {"matches": True}, "analyzer": {},
+            "runs": {role: {**result, "source": f"fixture/{role}/state-deltas.jsonl",
+                            "trajectory_id": role} for role, result in runs.items()}}
+
+
 class DeathBehaviorTests(unittest.TestCase):
+    def test_markdown_reports_real_scan_failures_with_reasons_and_coordinates(self):
+        items = stream(zombie(), zombie(2))
+        del items[0]["state"]["zombies"]["slots"]["0"]["fields"][death.FIELDS["hp"]]
+        failed = analyze(items)
+        self.assertEqual(failed["status"], "failed")
+        report = render_report({"control-a": failed, "intervention-a": analyze(stream(zombie())),
+                                "control-b": analyze(stream(zombie(), zombie(2)))})
+        rendered = death.markdown(report)
+        summary = rendered.split("| 轨迹 |")[0]
+        self.assertIn("离线分析失败", summary)
+        self.assertNotIn("离线分析交付完成", rendered)
+        self.assertIn("全窗口首次击杀门槛 **未验证**", summary)
+        self.assertIn("- control-a：`missing_or_invalid_field`", summary)
+        self.assertIn('"line":1', summary)
+        self.assertIn("- intervention-a：`incomplete_declared_window`", summary)
+        self.assertNotIn("- control-b：", summary)
+
+    def test_markdown_complete_scan_keeps_success_summary(self):
+        report = render_report({"control-a": analyze(stream(zombie(), zombie(2)))})
+        rendered = death.markdown(report)
+        self.assertIn("离线分析交付完成；全窗口首次击杀门槛 **未验证**。", rendered)
+        self.assertNotIn("离线分析失败", rendered)
+        self.assertNotIn("失败轨迹及原因", rendered)
+
     def test_death_positive_hp_then_delayed_release(self):
         result = analyze(stream(zombie(), zombie(2), zombie(2), None))
         self.assertEqual(len(result["confirmed_entries"]), 1)

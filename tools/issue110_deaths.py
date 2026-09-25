@@ -222,9 +222,21 @@ def event_signature(result):
 
 
 def markdown(report):
+    delivery = "离线分析交付完成" if report["delivery_status"] == "complete" else "离线分析失败"
     lines = ["# Issue #110 离线死亡阶段派生报告", "",
-             "离线分析交付完成；全窗口首次击杀门槛 **未验证**。死亡阶段和伤害来源分开判定。", "",
-             f"规则 `{RULE}`；输入 tree_id `{report['tree_id']}`。", "",
+             f"{delivery}；全窗口首次击杀门槛 **未验证**。死亡阶段和伤害来源分开判定。", ""]
+    if report["delivery_status"] != "complete":
+        lines += ["失败轨迹及原因：", ""]
+        for role, run in report["runs"].items():
+            if run["status"] != "failed":
+                continue
+            for problem in run["problems"] or [{"reason": "未提供具体原因"}]:
+                coord = (problem.get("coordinate") or problem.get("fact", {}).get("coordinate")
+                         or problem.get("actual"))
+                location = f"；证据坐标 `{canonical(coord)}`" if coord is not None else ""
+                lines.append(f"- {role}：`{problem['reason']}`{location}")
+        lines.append("")
+    lines += [f"规则 `{RULE}`；输入 tree_id `{report['tree_id']}`。", "",
              "| 轨迹 | 完整边界数 | 首次确认进入死亡阶段 | 同边界实体数 | 状态 |", "|---|---:|---|---:|---|"]
     for role, run in report["runs"].items():
         first = run["first_confirmed_entries"]
