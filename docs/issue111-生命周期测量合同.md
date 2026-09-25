@@ -9,7 +9,7 @@
 schema 兼容办法。机器可读表在 [`docs/issue111-捕获点表.json`](issue111-捕获点表.json)，由
 `tools/issue111_capture_points.py` 与 `tests/test_issue111_capture_points.py` 校验。
 
-**Junior 执行关卡状态：死亡、非死亡移除、槽位回收三个候选捕获点缺少可靠的地址、ABI 与调用路径
+**Junior 执行关卡状态：死亡、未分类移除、槽位回收三个候选捕获点缺少可靠的地址、ABI 与调用路径
 依据，等待熟悉引擎的维护者审查；审查通过前不实现未经确认的生产 hook、不跑游戏。**
 本文档通过只表示合同与已有路径证据成立，不代表任何原生语义已经真机验收。
 
@@ -18,7 +18,7 @@ schema 兼容办法。机器可读表在 [`docs/issue111-捕获点表.json`](iss
 本 PR：
 
 - 只读复核 #110 的报告与来源身份，不修改原报告、seal、tree 或旧结论。
-- 把初始化、确认死亡、非死亡移除、槽位回收四类事实分开定义，没有依据的原因显式标 `unknown`。
+- 把初始化、确认死亡、未分类移除、槽位回收四类事实分开定义，没有依据的原因显式标 `unknown`。
 - 登记全部候选捕获点：事件名、入口/出口相位、原始字段、版本/目标字节、ABI、调用者/分支依据、
   已覆盖与未知路径。
 - 写出最小数据合同与失败语义、模块依赖方向、schema 兼容与迁移办法。
@@ -76,11 +76,12 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 |---|---|---|---|
 | 初始化 `initialization` | ZombieInitialize 在共享 epilogue 返回调用者之前完成的对象创建；不声称调用者完成最终放置 | 已有出口探针（`zombie_initialized`） | 无（复用） |
 | 确认死亡路径 `confirmed_death_stage` | 同一完整 ID 从已识别非死亡前态进入 AvZ State 1/2/3；只表示进入死亡阶段 | 只有 pre/post 边界观测 | `zombie-death-stage-enter`（未定位） |
-| 非死亡移除 `non_death_removal` | 没有观测到死亡阶段的对象消失/槽位移除；原因保持 unknown | 只有边界观测 | `zombie-non-death-removal`（未定位） |
-| 回收事实 `slot_recycle` | 槽位释放与空闲链更新；可与死亡或非死亡移除配对，但不等于原因 | 只有边界观测 | `zombie-slot-recycled`（未定位） |
+| 未分类移除 `removal_unclassified` | 没有观测到死亡阶段的对象消失/槽位移除；中性记录，不声称对象未死亡，原因保持 unknown；只有独立路径证据确认后才允许 `non_death_removal` | 只有边界观测 | `zombie-removal-unclassified`（未定位） |
+| 回收事实 `slot_recycle` | 槽位释放与空闲链更新；可与死亡或未分类移除配对，但不等于原因 | 只有边界观测 | `zombie-slot-recycled`（未定位） |
 
 要点：`ZombieInitialize` 出口不能命名为调用者完成最终放置；没有依据的原因显式 `unknown`；
-槽位释放不是击杀计数；初态残留不是窗口内事件。机器可读的 `fact_classes` 另含
+没有观测到死亡阶段不等于已确认非死亡，移除默认 `removal_unclassified`；槽位释放不是击杀计数；
+初态残留不是窗口内事件。机器可读的 `fact_classes` 另含
 `boundary_observation`，表示既有 pre/post 采样通道而不是生命周期事实类别。
 
 ## 4. 捕获点表
@@ -89,19 +90,20 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 
 | 捕获点 | 事件 | 相位 | 状态 | 地址/ABI 依据 |
 |---|---|---|---|---|
-| `zombie-initialize-exit` | `zombie_initialized` | exit（共享 epilogue 前） | established | 入口 `0x522580`、出口 `0x524035`，锁定字节 + MinHook |
+| `zombie-initialize-exit` | `zombie_initialized` | exit（共享 epilogue 前） | established | 入口/出口 VA `0x522580`/`0x524035`（基址 `0x400000`），锁定字节 + MinHook |
 | `zombie-death-stage-enter` | `zombie_death_stage_enter` | internal_write | review_required | 未定位，无地址 |
-| `zombie-non-death-removal` | `zombie_removed_non_death` | internal_write | review_required | 未定位，无地址 |
+| `zombie-removal-unclassified` | `zombie_removed` | internal_write | review_required | 未定位，无地址 |
 | `zombie-slot-recycled` | `zombie_slot_recycled` | internal_write | review_required | 未定位，无地址 |
 | `boundary-state-sample` | `pre_step`/`post_step` 快照 + `zombie_first_boundary_observed` | boundary_sample | established | 不安装 hook；`determinism/audit.cpp` 只读采样 |
 
 已建立捕获点（`zombie-initialize-exit`）的关键事实：
 
 - ABI：row 在 EAX，栈上依次为返回地址、this、type、variant、parent、wave；入口与共享 epilogue
-  两处精确字节校验，`0x522580..0x524040` 内唯一正常返回 `ret 0x14`。
+  两处精确字节校验（VA，基址 `0x400000`），`0x522580..0x524040` 内唯一正常返回 `ret 0x14`。
 - hook 内预算：固定 1024 条队列、32 层嵌套，只做定长复制；无堆分配、无序列化、无文件 I/O。
 - 状态保存：GPR、EFLAGS、对齐 512 字节 FXSAVE（x87、MXCSR、XMM）、DF、LastError；不调用 RNG、不改游戏字段。
-- 顺序：记录 `ordinal` 在捕获时分配、drain 不重置；受控边界标签在 hook 进入时快照，调用外为 null。
+- 顺序：当前记录的 `ordinal` 是探针局部序号（在捕获时分配、drain 不重置，但 Install 时重置），
+  不得直接当作全进程 `capture_sequence`；受控边界标签在 hook 进入时快照，调用外为 null。
 - 未知路径：调用者返回后的位置/属性调整；两次采样之间创建并销毁的对象；尚未逐类核验的真机类别；
   异常展开/longjmp 不属于受支持轨迹。
 
@@ -122,7 +124,7 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 
 - 攻击者/投射物/伤害类别归因；State=3 只证明小推车死亡阶段，State=2 不能唯一归因于炮击。
 - 累计击杀统计、通用伤害来源链。
-- 33 个未知消失的死亡判定；它们保持 `unknown`。
+- 33 个未知消失的死亡判定；它们保持 `unknown`，不因 cause=unknown 或分类字段改称已确认非死亡。
 - 旧轨迹与旧报告的重新解释；旧结论保持不变。
 
 ## 6. 最小数据合同与失败语义
@@ -137,7 +139,9 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 - 新字段 `capture_sequence` 表示**捕获顺序**：在捕获点内、进入队列前分配的进程内单调 `uint64`；
   同一游戏线程上的所有捕获点共享同一顺序域；drain、边界与 epoch 都不重置。
 - 需要捕获顺序的分析只读 `capture_sequence`；缺少该字段的旧轨迹标 `unavailable`，不得用 `seq` 近似，
-  也不得按零处理。现有出生探针的 `ordinal` 已满足该语义，可直接作为首批 `capture_sequence` 值。
+  也不得按零处理。现有出生探针的 `ordinal` 只是单探针局部序号（Install 时重置），不得直接当作
+  全进程 `capture_sequence`；阶段 B 必须由宿主提供共享分配器，出生探针接入同一顺序域，并用
+  不同事件类型交错发生的夹具验证。
 
 **6.2 事件字段（最小集）**
 
@@ -202,8 +206,9 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 
 1. 死亡路径：State 1/2/3 的写入点对应哪些原始函数/RVA？是否存在唯一死亡入口，还是多个分支？
    调用是否总在受控 update 内部？
-2. 非死亡移除：`+0xEC` 在哪些函数写入？是否总是伴随槽位释放？与死亡后的回收是否共用实现？
-3. 回收路径：槽位释放的函数/分支、ABI 与唯一签名是什么？如何与死亡/非死亡移除配对？
+2. 未分类移除：`+0xEC` 在哪些函数写入？是否总是伴随槽位释放？与死亡后的回收是否共用实现？
+   独立路径证据确认非死亡后如何分层输出 `non_death_removal`？
+3. 回收路径：槽位释放的函数/分支、ABI 与唯一签名是什么？如何与死亡/未分类移除配对？
 4. 受控边界外的事件如何标注 `version`/`engine_call_id` 与 `capture_sequence` 顺序域而不伪造身份？
 5. 同调用内多事件顺序以什么顺序域表达？嵌套调用如何配对？
 6. 旧轨迹缺少 `capture_sequence` 时，哪些结论必须拒绝或标 `unavailable`？
@@ -213,7 +218,8 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 ## 10. 后续阶段接入位置
 
 - **阶段 B**：维护者审查通过后，复用出生探针与现有 runtime 宿主，抽出实际需要的公共部分；
-  实验入口独立完成 `enable → 推进 → drain/记录 → 最后 drain → 健康检查/关闭 → 封存`。
+  宿主提供共享顺序分配器（出生探针接入，旧 `ordinal` 保持单探针历史语义），用不同事件类型
+  交错发生的夹具验证跨类型顺序；实验入口独立完成 `enable → 推进 → drain/记录 → 最后 drain → 健康检查/关闭 → 封存`。
   没有 Agent 服务、消费者或训练包仍正常工作。
 - **阶段 C**：无游戏夹具覆盖同槽不同代次、同调用创建后移除、同 tick 多调用、死亡后延迟回收、
   未知移除、初态残留、嵌套调用与事件顺序；纯实验记录消费者跑全链路；输出单一离线命令。
@@ -232,12 +238,14 @@ python -m unittest tests.test_issue111_capture_points tests.test_issue99_shovel_
 校验器做两类检查：
 
 1. 表内合同：schema/必填键、status 词表、`established` 行必须有存在证据与已覆盖路径、
-   `review_required` 行必须无地址且带开放问题、四类事实齐全、`capture_sequence` 与 `seq` 分离、
+   `review_required` 行必须无地址（含整数与数组形式）、必须带开放问题、四类事实齐全、
+   `capture_sequence` 与 `seq` 分离且出生探针 `ordinal` 不得冒充共享序号、
    `delivery.hooks_added=0` 且 `delivery.game_runs=0`。
 2. 锚点复核：`determinism/spawn_hook.cpp` 的 `kEntry/kExit` 与入口/出口字节、
    `docs/determinism-spawn-hook.md` 的 RVA、`determinism/audit.cpp` 的 `exact_spawn_hook=false`、
    `logger/schemas/event.schema.json` 仍要求 `seq`。任一锚点变化都会让校验失败，提醒复核合同。
 
-行为夹具覆盖：合法表通过；`established` 缺证据、`review_required` 带地址、`seq` 冒充
-`capture_sequence`、重复 id、事实类别缺失、hooks_added/game_runs 非零、CLI 失败退出等负例。
-这些都是无游戏、无 AvZ 的离线性测试，不替代真机验收。
+行为夹具覆盖：合法表通过；`established` 缺证据、`review_required` 带字符串/整数/数组地址、
+`seq` 或出生探针 `ordinal` 冒充 `capture_sequence`、重复 id、事实类别缺失、
+hooks_added/game_runs 非零、CLI 失败退出等负例。这些都是无游戏、无 AvZ 的离线性测试，
+不替代真机验收。

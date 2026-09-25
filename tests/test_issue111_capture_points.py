@@ -53,7 +53,19 @@ class CapturePointContractTests(unittest.TestCase):
     def test_review_required_row_rejects_address_claims(self):
         table = copy.deepcopy(self.table)
         row = next(item for item in table["capture_points"] if item["status"] == "review_required")
-        row["abi"]["entry_rva"] = "0x123456"
+        row["abi"]["entry_va"] = "0x123456"
+        self.assertProblem(self.problems(table), "claims addresses")
+
+    def test_review_required_row_rejects_integer_address(self):
+        table = copy.deepcopy(self.table)
+        row = next(item for item in table["capture_points"] if item["status"] == "review_required")
+        row["abi"]["entry_va"] = 0x123456
+        self.assertProblem(self.problems(table), "claims addresses")
+
+    def test_review_required_row_rejects_byte_array_address(self):
+        table = copy.deepcopy(self.table)
+        row = next(item for item in table["capture_points"] if item["status"] == "review_required")
+        row["abi"]["bytes"] = [0x55, 0x8B, 0xEC]
         self.assertProblem(self.problems(table), "claims addresses")
 
     def test_review_required_row_requires_open_questions(self):
@@ -77,6 +89,22 @@ class CapturePointContractTests(unittest.TestCase):
         table = copy.deepcopy(self.table)
         table["data_contract"]["seq_policy"]["capture_sequence_reset_on_drain"] = True
         self.assertProblem(self.problems(table), "survive drain")
+
+    def test_spawn_ordinal_cannot_be_presented_as_shared_capture_sequence(self):
+        table = copy.deepcopy(self.table)
+        table["data_contract"]["seq_policy"]["spawn_ordinal_is_shared_capture_sequence"] = True
+        self.assertProblem(self.problems(table), "ordinal")
+
+    def test_shared_allocator_must_be_named(self):
+        table = copy.deepcopy(self.table)
+        table["data_contract"]["seq_policy"]["shared_allocator"] = ""
+        self.assertProblem(self.problems(table), "shared_allocator")
+
+    def test_va_fields_require_image_base(self):
+        table = copy.deepcopy(self.table)
+        row = next(item for item in table["capture_points"] if item["id"] == "zombie-initialize-exit")
+        row["abi"].pop("image_base")
+        self.assertProblem(self.problems(table), "image_base")
 
     def test_missing_capture_sequence_marks_unavailable(self):
         table = copy.deepcopy(self.table)
@@ -104,7 +132,7 @@ class CapturePointContractTests(unittest.TestCase):
     def test_anchor_mismatch_between_table_and_spawn_hook_is_caught(self):
         table = copy.deepcopy(self.table)
         row = next(item for item in table["capture_points"] if item["id"] == "zombie-initialize-exit")
-        row["abi"]["entry_rva"] = "0x522581"
+        row["abi"]["entry_va"] = "0x522581"
         self.assertProblem(capture.check_sources(table, ROOT), "spawn_hook")
 
     def test_cli_passes_on_repository_table_and_fails_on_broken_copy(self):

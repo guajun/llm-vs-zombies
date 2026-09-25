@@ -74,7 +74,7 @@
       "not_covered": "明确不在本期覆盖范围。"
     },
     "phase": ["entry", "exit", "internal_write", "boundary_sample"],
-    "facts": ["initialization", "confirmed_death_stage", "non_death_removal", "slot_recycle", "boundary_observation"]
+    "facts": ["initialization", "confirmed_death_stage", "removal_unclassified", "slot_recycle", "boundary_observation"]
   },
   "fact_classes": {
     "initialization": {
@@ -89,10 +89,10 @@
       "needed_capture": ["zombie-death-stage-enter"],
       "status": "boundary_observation_only"
     },
-    "non_death_removal": {
-      "definition": "没有观测到死亡阶段的对象消失或槽位移除；原因保持 unknown，不因消失、HP、时机或回收函数判为击杀。",
+    "removal_unclassified": {
+      "definition": "没有观测到死亡阶段的对象消失或槽位移除；中性记录，不声称对象未死亡，原因保持 unknown。只有独立路径证据确认后才允许输出 non_death_removal。",
       "current_capture": ["boundary-state-sample"],
-      "needed_capture": ["zombie-non-death-removal"],
+      "needed_capture": ["zombie-removal-unclassified"],
       "status": "boundary_observation_only"
     },
     "slot_recycle": {
@@ -119,8 +119,10 @@
       "caller_branch_basis": "共享 epilogue 覆盖全部种类分支；caller_rva 记录实际调用点 RVA；不复用回调返回地址。",
       "abi": {
         "kind": "x86_cdecl_frame",
-        "entry_rva": "0x522580",
-        "exit_epilogue_rva": "0x524035",
+        "image_base": "0x400000",
+        "entry_va": "0x522580",
+        "exit_epilogue_va": "0x524035",
+        "va_semantics": "表中 *_va 是绝对虚拟地址（VA = image_base + RVA）；安装与字节校验按 VA 使用。",
         "entry_bytes": "55 8b ec 83 e4 f8 83 ec 14 53 56 8b f0 8b 45 18 57 8b 7d 08",
         "epilogue_bytes": "5f 5e 5b 8b e5 5d c2 14 00",
         "unique_normal_return": "0x522580..0x524040 内唯一正常返回 ret 0x14；共享 epilogue 覆盖全部种类分支。",
@@ -142,7 +144,7 @@
         "hook_budget": "只做定长复制到预分配队列：最多 1024 条未 drain 记录、32 层嵌套；无堆分配、无序列化、无文件 I/O。"
       },
       "ordering": {
-        "capture_sequence": "记录的 ordinal 在 hook 内 captured 时分配，队列 FIFO 保持捕获顺序，drain 不重置。",
+        "capture_sequence": "当前记录字段是探针局部 ordinal：在 hook 内 captured 时分配、队列 FIFO 保持单探针捕获顺序、drain 不重置；但它在 Install 时重置，是单探针历史序号，不得直接当作全进程 capture_sequence。阶段 B 由宿主提供共享分配器，出生探针必须接入同一顺序域。",
         "nesting": "按 depth 配对 entry/exit；退出时 EDI 必须仍指向同一对象，否则记 fault 且不产出记录。",
         "boundary_label": "进入 hook 时快照 tick/revision/segment(=epoch)/engine_call_id；受控调用外为 null 且 phase=initialization，不伪造 call id、不回填旧版本。"
       },
@@ -176,14 +178,14 @@
       "caller_branch_basis": "unknown；需要维护者确认唯一/完整分支与调用上下文（受控调用内/外）。",
       "abi": {
         "kind": "unknown",
-        "entry_rva": null,
-        "exit_rva": null,
+        "entry_va": null,
+        "exit_va": null,
         "bytes": null,
         "arguments": null,
         "note": "没有地址、字节或调用路径证据；本表不猜地址。实现前必须由熟悉引擎的维护者提供或复核签名。"
       },
       "ordering": {
-        "capture_sequence": "实现时必须使用与出生探针相同的进程内捕获顺序域；drain、边界与 epoch 都不重置。",
+        "capture_sequence": "实现时必须接入宿主提供的进程内共享捕获顺序域（出生探针接入同一分配器）；drain、边界与 epoch 都不重置。",
         "nesting": "如发生在嵌套调用内，保留 invocation{depth,parent_capture_sequence}。",
         "boundary_label": "只在受控调用内绑定真实 engine_call_id；调用外为 null 并标 unknown。"
       },
@@ -222,23 +224,23 @@
       "verification_status": "未定位、未实现、未真机验证。"
     },
     {
-      "id": "zombie-non-death-removal",
-      "event": "zombie_removed_non_death",
-      "fact": "non_death_removal",
+      "id": "zombie-removal-unclassified",
+      "event": "zombie_removed",
+      "fact": "removal_unclassified",
       "status": "review_required",
       "phase": "internal_write",
-      "phase_note": "对象在未观测到死亡阶段的情况下消失（+0xEC 置位或直接从活跃集合移除）的写入点未定位。",
+      "phase_note": "对象在未观测到死亡阶段的情况下消失（+0xEC 置位或直接从活跃集合移除）的写入点未定位；本捕获点不判断对象是否死亡。",
       "caller_branch_basis": "unknown；需要维护者确认 +0xEC 写入点与是否存在独立移除函数。",
       "abi": {
         "kind": "unknown",
-        "entry_rva": null,
-        "exit_rva": null,
+        "entry_va": null,
+        "exit_va": null,
         "bytes": null,
         "arguments": null,
         "note": "没有地址、字节或调用路径证据；本表不猜地址。"
       },
       "ordering": {
-        "capture_sequence": "实现时必须使用与出生探针相同的进程内捕获顺序域；drain、边界与 epoch 都不重置。",
+        "capture_sequence": "实现时必须接入宿主提供的进程内共享捕获顺序域（出生探针接入同一分配器）；drain、边界与 epoch 都不重置。",
         "nesting": "如发生在嵌套调用内，保留 invocation{depth,parent_capture_sequence}。",
         "boundary_label": "只在受控调用内绑定真实 engine_call_id；调用外为 null 并标 unknown。"
       },
@@ -247,7 +249,7 @@
         "前后 state/hp/armor/disappeared/at_wave/type",
         "发生位置（调用内/边界）",
         "capture_sequence、version、engine_call_id 规则同死亡捕获点",
-        "classification=non_death_removal；cause=unknown，不得用 HP<=0、消失标记、回收函数或炮击时间接近直接判定击杀"
+        "classification=removal_unclassified；cause=unknown，不得用 HP<=0、消失标记、回收函数或炮击时间接近直接判定击杀；只有独立路径证据确认后才允许输出 non_death_removal"
       ],
       "current_evidence": [
         "#110：tick 940 四条轨迹同边界 33 个实体 disappeared 0->1，未观测死亡阶段；tick 941 槽位释放；四条轨迹一致。",
@@ -255,13 +257,13 @@
       ],
       "unknown_paths": [
         "+0xEC 的写入函数与分支",
-        "非伤害移除与死亡回收是否共用路径",
+        "未分类移除与死亡回收是否共用路径",
         "同 tick 33 个对象的调用内顺序与原因",
         "创建后未进入采样窗口即移除的对象"
       ],
       "open_questions": [
         "+0xEC 在哪些函数写入？是否总是伴随槽位释放？",
-        "是否存在独立的无伤害移除函数，与死亡后的回收是否为同一实现？",
+        "是否存在独立的未分类移除函数，与死亡后的回收是否为同一实现？独立路径证据确认非死亡后如何分层输出 non_death_removal？",
         "从初态残留清理进入该路径时如何标注来源（初始化/关卡切换）而不冒充窗口内事件？"
       ],
       "coverage": {
@@ -281,17 +283,17 @@
       "status": "review_required",
       "phase": "internal_write",
       "phase_note": "对象池槽位释放与空闲链更新（id_or_free_next 高位清零、free_head/used/count 变化）的写入点未定位；边界采样只能看到后果。",
-      "caller_branch_basis": "unknown；需要维护者确认释放函数/分支及与死亡、非死亡移除的共用关系。",
+      "caller_branch_basis": "unknown；需要维护者确认释放函数/分支及与死亡、未分类移除的共用关系。",
       "abi": {
         "kind": "unknown",
-        "entry_rva": null,
-        "exit_rva": null,
+        "entry_va": null,
+        "exit_va": null,
         "bytes": null,
         "arguments": null,
         "note": "没有地址、字节或调用路径证据；本表不猜地址。"
       },
       "ordering": {
-        "capture_sequence": "实现时必须使用与出生探针相同的进程内捕获顺序域；drain、边界与 epoch 都不重置。",
+        "capture_sequence": "实现时必须接入宿主提供的进程内共享捕获顺序域（出生探针接入同一分配器）；drain、边界与 epoch 都不重置。",
         "nesting": "如发生在嵌套调用内，保留 invocation{depth,parent_capture_sequence}。",
         "boundary_label": "只在受控调用内绑定真实 engine_call_id；调用外为 null 并标 unknown。"
       },
@@ -299,7 +301,7 @@
         "slot、移除前完整 ID/代次",
         "free-list 下一项、used/capacity/count/free_head/next_key 前后值",
         "capture_sequence/version/engine_call_id",
-        "该次释放是否伴随同 ID 的死亡阶段或非死亡消失（配对依据；缺一即 unknown）"
+        "该次释放是否伴随同 ID 的死亡阶段或未分类消失（配对依据；缺一即 unknown）"
       ],
       "current_evidence": [
         "#110：四条轨迹各 44 次槽位释放（11 初态残留 + 33 未知原因），不能与 5 次确认死亡阶段相加当击杀数。",
@@ -307,13 +309,13 @@
       ],
       "unknown_paths": [
         "释放函数与调用路径",
-        "死亡回收与非死亡移除是否共用",
+        "死亡回收与未分类移除是否共用",
         "同调用内多槽释放顺序",
         "释放后同槽新代次出生与旧身份的边界"
       ],
       "open_questions": [
         "槽位释放的写入点是什么函数/分支？ABI 与签名如何？",
-        "释放事实是否足以与死亡/非死亡移除配对，还是需要额外调用内序号？",
+        "释放事实是否足以与死亡/未分类移除配对，还是需要额外调用内序号？",
         "如何在捕获层防止同槽新代次继承旧实体生命史？"
       ],
       "coverage": {
@@ -336,8 +338,8 @@
       "caller_branch_basis": "不适用：由既有 runtime 受控边界采样，不安装新 hook、不区分调用内分支。",
       "abi": {
         "kind": "in_process_reads",
-        "entry_rva": null,
-        "exit_rva": null,
+        "entry_va": null,
+        "exit_va": null,
         "bytes": null,
         "arguments": null,
         "evidence": [
@@ -383,7 +385,7 @@
     "note": "阶段 A 只定义合同；阶段 B 实现时按此字段与失败语义落盘。公共批次接口可以是小型内部 C++ 接口，不要求稳定跨 DLL ABI。",
     "fields": [
       {"name": "schema", "type": "string", "required": true, "semantics": "固定 lvz.lifecycle-event.v1"},
-      {"name": "kind", "type": "enum", "required": true, "values": ["zombie_initialized", "zombie_death_stage_enter", "zombie_removed_non_death", "zombie_slot_recycled"]},
+      {"name": "kind", "type": "enum", "required": true, "values": ["zombie_initialized", "zombie_death_stage_enter", "zombie_removed", "zombie_slot_recycled"]},
       {"name": "capture_sequence", "type": "uint64", "required": true, "semantics": "在捕获点内、进入队列前分配的进程内单调序号；同一游戏线程上的所有捕获点共享同一顺序域；drain、边界与 epoch 都不重置"},
       {"name": "version", "type": "object|null", "required": true, "semantics": "{epoch,tick,revision}；调用外事件不得回填旧版本"},
       {"name": "version_phase", "type": "enum", "required": true, "values": ["controlled_boundary", "initialization", "unknown"]},
@@ -391,7 +393,7 @@
       {"name": "invocation", "type": "object", "required": true, "semantics": "{depth,parent_capture_sequence}；嵌套调用才要求配对"},
       {"name": "entity", "type": "object", "required": true, "semantics": "{id,slot,generation}；id 低 16 位槽位、高 16 位代次；不序列化指针作为身份"},
       {"name": "before_after", "type": "object", "required": true, "semantics": "每个捕获点声明的最小原始字段子集；未知或不可读显式 null 并置 complete=false"},
-      {"name": "classification", "type": "object", "required": true, "semantics": "{class,cause}；class 取事实类别，cause 无独立证据时为 unknown"},
+      {"name": "classification", "type": "object", "required": true, "semantics": "{class,cause}；class 取事实类别，cause 无独立证据时为 unknown；未观测到死亡阶段的移除一律 removal_unclassified，只有独立路径证据确认后才允许 non_death_removal"},
       {"name": "probe", "type": "object", "required": true, "semantics": "{name,schema,sequence_domain}；记录来源，便于多探针合并读取"},
       {"name": "complete", "type": "boolean", "required": true, "semantics": "该记录是否完整；false 记录不得被当作合格证据"}
     ],
@@ -402,6 +404,8 @@
       "new_capture_sequence": "新字段独立于 seq；需要捕获顺序的分析只读 capture_sequence。",
       "capture_sequence_is_write_order": false,
       "capture_sequence_reset_on_drain": false,
+      "spawn_ordinal_is_shared_capture_sequence": false,
+      "shared_allocator": "阶段 B 由宿主提供进程内共享分配器；出生探针接入同一顺序域，旧探针局部 ordinal 保持单探针历史语义（Install 重置）。跨事件类型交错发生的顺序由共享分配器回答。",
       "missing": "缺少 capture_sequence 的旧轨迹标记为 unavailable，不得用 seq 近似，也不得按零处理。"
     },
     "batch_ownership": {
@@ -427,22 +431,23 @@
   },
   "open_questions": [
     "死亡路径：State 1/2/3 的写入点、ABI 与唯一签名是什么？是否存在共同出口？",
-    "非死亡移除：+0xEC 的写入点与槽位释放是否共用实现？调用路径有哪些？",
-    "回收路径：槽位释放函数/分支与调用上下文是什么？如何与非死亡移除配对？",
+    "未分类移除：+0xEC 的写入点与槽位释放是否共用实现？调用路径有哪些？独立证据确认非死亡后如何分层输出？",
+    "回收路径：槽位释放函数/分支与调用上下文是什么？如何与未分类移除配对？",
     "受控边界外的事件如何标注 version/engine_call_id(null) 与 capture_sequence 顺序域？",
     "同调用内多事件顺序以什么顺序域表达？嵌套调用如何配对？",
     "旧轨迹缺少 capture_sequence 时，哪些结论必须拒绝或标 unavailable？"
   ],
   "review_checklist": [
-    "维护者逐项确认/否认：死亡、非死亡移除、回收三个捕获点的函数、RVA、ABI 与唯一签名。",
+    "维护者逐项确认/否认：死亡、未分类移除、回收三个捕获点的函数、VA/RVA、ABI 与唯一签名。",
     "确认声明窗口外的最小补录方案是否仍按 #110 建议（完整 ID/代次、调用内递增序号、前后 state/HP/disappeared、原因、创建/回收）。",
-    "确认 capture_sequence 顺序域的共享方式（单游戏线程单计数器）是否满足后续在线消费者。",
+    "确认共享 capture_sequence 顺序域的宿主分配器设计（出生探针接入、跨类型交错）是否满足后续在线消费者。",
+    "确认未分类移除与 non_death_removal 的分层输出：只有独立路径证据确认后才允许后者。",
     "确认阶段 B 是否可以在未完成真机 D 的情况下先实现公共批次与记录层（gate 的边界）。",
     "确认阶段 A 文档通过是否仅表示合同与路径证据成立，并不提升任何原生能力。"
   ],
   "phase_plan": {
     "A_this_pr": "捕获点表 + 最小数据合同 + 失败语义 + 模块依赖 + schema 兼容；无新 hook、无游戏运行。",
-    "B": "经维护者审查捕获点后：复用出生探针与 runtime 宿主，抽公共批次/顺序域/健康层；实验入口独立完成 enable -> 推进 -> drain/记录 -> 最后 drain -> 健康检查/关闭 -> 封存。",
+    "B": "经维护者审查捕获点后：复用出生探针与 runtime 宿主，抽公共批次/顺序域/健康层；宿主提供共享顺序分配器并以跨类型交错事件夹具验证；实验入口独立完成 enable -> 推进 -> drain/记录 -> 最后 drain -> 健康检查/关闭 -> 封存。",
     "C": "无游戏夹具 + 纯实验记录消费者 + 单一离线命令；不加载 Agent/在线模块。",
     "D": "短程真机验收：先冻结计划与排期，做新增插桩开/关对照，再做两次独立冷启动 A/B 与报告封存。",
     "gate": "阶段 B/C 的地址证据未通过维护者审查前：不实现未经确认的生产 hook、不跑游戏；合同、缓冲夹具与离线验证可以先行。"

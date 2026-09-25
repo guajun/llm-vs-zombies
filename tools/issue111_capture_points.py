@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "docs" / "issue111-捕获点表.json"
 SCHEMA = "lvz.capture-points.v1"
 STATUSES = ("established", "review_required", "not_covered")
-FACTS = ("initialization", "confirmed_death_stage", "non_death_removal", "slot_recycle")
+FACTS = ("initialization", "confirmed_death_stage", "removal_unclassified", "slot_recycle")
 CONTRACT_FIELDS = ("schema", "kind", "capture_sequence", "version", "version_phase",
                    "engine_call_id", "invocation", "entity", "before_after",
                    "classification", "probe", "complete")
@@ -61,20 +61,48 @@ def _find(table: dict, point_id: str) -> dict:
     return {}
 
 
+def _address_key(name: str) -> bool:
+    lowered = name.lower()
+    return (lowered.endswith("rva") or lowered.endswith("_va")
+            or "address" in lowered or "bytes" in lowered)
+
+
+def _has_value(value) -> bool:
+    """Any value, including 0, a byte array or an empty object, is a claim."""
+    return value is not None
+
+
 def _address_claims(value, path: str) -> list[str]:
-    """Any non-null RVA/address/bytes under ``abi`` is an unconfirmed claim."""
+    """Any non-null RVA/VA/address/bytes under ``abi`` is an unconfirmed claim.
+
+    Integers and arrays count too: a review_required row must not smuggle an
+    address through JSON numbers or byte-array literals.
+    """
     found: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
-            if isinstance(item, str) and ("rva" in key.lower() or "address" in key.lower()
-                                          or "bytes" in key.lower()):
-                found.append(f"{path}.{key}")
+            child = f"{path}.{key}"
+            if _address_key(key):
+                if _has_value(item):
+                    found.append(child)
             else:
-                found.extend(_address_claims(item, f"{path}.{key}"))
+                found.extend(_address_claims(item, child))
     elif isinstance(value, list):
         for index, item in enumerate(value):
             found.extend(_address_claims(item, f"{path}[{index}]"))
     return found
+
+
+def _has_va_value(value) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _address_key(key) and key.lower().endswith(("rva", "_va")) and _has_value(item):
+                return True
+            if _has_va_value(item):
+                return True
+    elif isinstance(value, list):
+        return any(_has_va_value(item) for item in value)
+    return False
 
 
 def problems(table: dict, root: Path = ROOT) -> list[str]:
@@ -148,6 +176,8 @@ def problems(table: dict, root: Path = ROOT) -> list[str]:
                         continue
                     if not (Path(root) / item["path"]).exists():
                         out.append(f"{point_id}: evidence path does not exist: {item['path']}")
+            if _has_va_value(abi) and not abi.get("image_base"):
+                out.append(f"{point_id}: VA fields require abi.image_base")
             if not coverage.get("covered_paths"):
                 out.append(f"{point_id}: established row needs covered_paths")
         elif status == "review_required":
@@ -188,6 +218,10 @@ def problems(table: dict, root: Path = ROOT) -> list[str]:
         out.append("capture_sequence must not be a write-order alias")
     if policy.get("capture_sequence_reset_on_drain") is not False:
         out.append("capture_sequence must survive drain")
+    if policy.get("spawn_ordinal_is_shared_capture_sequence") is not False:
+        out.append("spawn probe ordinal must not be presented as the shared capture_sequence")
+    if not policy.get("shared_allocator"):
+        out.append("data_contract.seq_policy.shared_allocator must name the host-owned allocator")
     if "unavailable" not in str(policy.get("missing", "")):
         out.append("data_contract.seq_policy.missing must mark missing capture_sequence unavailable")
     if not (contract.get("batch_ownership") or {}).get("no_second_drain"):
@@ -238,10 +272,13 @@ def check_sources(table: dict, root: Path = ROOT) -> list[str]:
     else:
         entry = f"0x{match.group(1).lower()}"
         exit_ = f"0x{match.group(2).lower()}"
-        if row.get("abi", {}).get("entry_rva") != entry:
-            out.append(f"table entry_rva {row.get('abi', {}).get('entry_rva')!r} != spawn_hook {entry}")
-        if row.get("abi", {}).get("exit_epilogue_rva") != exit_:
-            out.append(f"table exit_epilogue_rva {row.get('abi', {}).get('exit_epilogue_rva')!r} != spawn_hook {exit_}")
+        # kEntry/kExit are absolute VAs in the module's own load address space.
+        if row.get("abi", {}).get("entry_va") != entry:
+            out.append(f"table entry_va {row.get('abi', {}).get('entry_va')!r} != spawn_hook VA {entry}")
+        if row.get("abi", {}).get("exit_epilogue_va") != exit_:
+            out.append(f"table exit_epilogue_va {row.get('abi', {}).get('exit_epilogue_va')!r} != spawn_hook VA {exit_}")
+        if row.get("abi", {}).get("image_base") != "0x400000":
+            out.append("established row must record image_base 0x400000 for its VA fields")
     entry_match = re.search(r"originalStart\[\]\s*=\s*\{([^}]*)\}", source)
     end_match = re.search(r"uint8_t end\[\]\s*=\s*\{([^}]*)\}", source)
     if not entry_match or _hex_pairs(entry_match.group(1)) != _table_bytes(row, "entry_bytes"):
