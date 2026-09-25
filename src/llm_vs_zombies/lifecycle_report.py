@@ -1,0 +1,321 @@
+"""Offline boundary-observation report for issue #111 stage C.
+
+This module consumes an already-audited run (``audit/checksums.jsonl`` +
+``audit/state-deltas.jsonl`` through the strict :class:`AuditLog` reader, and
+optionally the lifecycle recording) and derives the facts a single offline
+command must expose:
+
+* first confirmed death-stage observation (same full slot+generation id, a
+  valid live predecessor, then State in {1,2,3});
+* first removal observation (disappeared 0->1 or slot disappearance/reuse);
+* unknown removals (no death stage observed first) and their coordinates;
+* whether a full-window first kill is provable.
+
+The death/removal classification follows the conservative rule registered in
+issue #110 (``lvz.issue110-death-stage.v2``): HP<=0, a disappeared flag, a
+recycle function or a nearby cannon shot never prove a kill by themselves.
+Every derived fact is labelled a **boundary observation**, not production
+capture evidence: the three capture points remain ``review_required`` in
+``docs/issue111-捕获点表.json``, so ``capture_level`` is always
+``unavailable`` in this delivery and ``first_kill.proven`` is always false.
+
+No game, no Win32 and no Agent import: the reader contract lives in
+``audit_compare``; this module only interprets reconstructed states.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+ANALYSIS_SCHEMA = "lvz.lifecycle-analysis.v1"
+# Same conservative predecessor set and stage names as issue #110's rule v2.
+FIELDS = {"type": "00000024", "state": "00000028", "hp": "000000c8",
+          "armor1": "000000d0", "armor2": "000000dc", "disappeared": "000000ec",
+          "at_wave": "0000006c"}
+DEAD_STAGES = {1: "falling", 2: "ash", 3: "mower_death_stage"}
+KNOWN_NONDEAD = {0, 11, 15, 20, 69, 70, 71, 73, 76}
+UNIMPLEMENTED_FACT_CLASSES = ("confirmed_death_stage", "removal_unclassified", "slot_recycle")
+# The exact spawn hook is not installed across arbitrary callers, and calls
+# inside one boundary are not ordered, so a full-window first kill cannot be
+# proven from boundary samples.
+FIRST_KILL_REASONS = [
+    "coverage.exact_spawn_hook=false: objects created and destroyed between two boundary samples are not excluded",
+    "no call-internal ordering: multiple changes inside one boundary cannot be ordered",
+    "death/removal/recycle capture points are review_required and not installed",
+    "boundary observations only prove what was sampled, not the absence of earlier unobserved events",
+]
+
+
+class ReportError(ValueError):
+    """The audit evidence cannot be read for a report."""
+
+
+def signed(word: int) -> int:
+    return word - 2**32 if word >= 2**31 else word
+
+
+def snapshot_from_frame(frame, line: int) -> dict:
+    """Turn one AuditFrame into a compact snapshot the analyzer understands."""
+    state = frame.state if isinstance(frame.state, dict) else {}
+    pool = state.get("zombies") if isinstance(state, dict) else None
+    slots = pool.get("slots") if isinstance(pool, dict) else None
+    zombies: dict[str, dict] = {}
+    problems: list[str] = []
+    if not isinstance(slots, dict):
+        problems.append("missing_zombie_pool")
+    else:
+        for slot, entry in sorted(slots.items(), key=lambda pair: int(pair[0])):
+            if not isinstance(entry, dict):
+                problems.append("invalid_slot_entry")
+                continue
+            identity = entry.get("id_or_free_next")
+            fields = entry.get("fields")
+            allocated = type(identity) is int and identity >> 16 != 0
+            if not allocated:
+                continue
+            if not isinstance(fields, dict) or identity & 0xFFFF != int(slot):
+                problems.append("invalid_identity_or_missing_fields")
+                continue
+            raw = {name: fields.get(offset) for name, offset in FIELDS.items()}
+            zombies[str(slot)] = {"id": identity, "slot": int(slot), "generation": identity >> 16,
+                                  "raw": raw, "pointer": f"/zombies/slots/{slot}"}
+    payload = frame.payload if isinstance(frame.payload, dict) else {}
+    call = payload.get("engine_call") if isinstance(payload.get("engine_call"), dict) else {}
+    coordinate = {"line": line, "seq": frame.seq, "kind": frame.kind, "version": frame.version,
+                  "request_id": payload.get("request_id"),
+                  "engine_call_id": call.get("engine_call_id"),
+                  "native_clock_before": call.get("native_clock_before"),
+                  "native_clock_after": call.get("native_clock_after")}
+    return {"coordinate": coordinate, "zombies": zombies, "problems": problems}
+
+
+def snapshots_from_audit(directory: str | Path, *, require_closed: bool = True):
+    """Strictly read an audit directory and produce ordered snapshots."""
+    from . import audit_compare
+    directory = Path(directory)
+    try:
+        audit = audit_compare.AuditLog(directory, require_closed=require_closed)
+    except (audit_compare.EvidenceError, OSError, UnicodeError, ValueError) as exc:
+        raise ReportError(f"audit evidence is not readable: {exc}") from exc
+    snapshots = [snapshot_from_frame(frame, index + 1) for index, frame in enumerate(audit.frames)]
+    return audit.manifest, snapshots
+
+
+def _fact(entity: dict, coordinate: dict, before: dict | None, after: dict | None, **extra) -> dict:
+    value = {"kind": "boundary_observation", "entity": {"id": entity["id"], "slot": entity["slot"],
+                                                        "generation": entity["generation"]},
+             "coordinates": [coordinate], "before": before, "after": after}
+    value.update(extra)
+    return value
+
+
+def _state(entry: dict | None):
+    if not isinstance(entry, dict):
+        return None
+    raw = entry.get("raw")
+    if not isinstance(raw, dict) or any(type(value) is not int for value in raw.values()):
+        return None
+    if raw["disappeared"] not in (0, 1):
+        return None
+    return raw
+
+
+def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) -> dict:
+    """Derive first-death/first-removal/unknown facts from ordered snapshots.
+
+    One pass, no retention of full states: only the previous boundary's entity
+    facts are kept. Coordinates are the audit envelope coordinates of the
+    boundary where the change was observed.
+    """
+    if not isinstance(snapshots, list):
+        raise ReportError("snapshots must be a list")
+    previous: dict[int, dict] = {}
+    retired: set[int] = set()
+    confirmed: set[int] = set()
+    initial_ids: set[int] = set()
+    deaths: list[dict] = []
+    confirmed_deaths: list[dict] = []
+    removals: list[dict] = []
+    unknown_removals: list[dict] = []
+    disappearance_flags: list[dict] = []
+    slot_reuse: list[dict] = []
+    initial_residue: list[dict] = []
+    problems: list[str] = []
+    phase_counts: dict[str, int] = {}
+    first_coordinate = None
+    last_coordinate = None
+    for index, snapshot in enumerate(snapshots):
+        if not isinstance(snapshot, dict):
+            problems.append("snapshot must be an object")
+            continue
+        coordinate = snapshot.get("coordinate") if isinstance(snapshot.get("coordinate"), dict) else {}
+        if first_coordinate is None:
+            first_coordinate = coordinate
+        last_coordinate = coordinate
+        for problem in snapshot.get("problems") or []:
+            problems.append(f"boundary {index + 1}: {problem}")
+        zombies = snapshot.get("zombies") if isinstance(snapshot.get("zombies"), dict) else {}
+        current: dict[int, dict] = {}
+        for entry in zombies.values():
+            if not isinstance(entry, dict) or type(entry.get("id")) is not int:
+                continue
+            identity = entry["id"]
+            raw = _state(entry)
+            current[identity] = entry
+            if raw is None:
+                problems.append(f"boundary {index + 1}: invalid raw fields for entity {identity}")
+                continue
+            phase_counts[str(raw["state"])] = phase_counts.get(str(raw["state"]), 0) + 1
+            prior = previous.get(identity)
+            prior_raw = _state(prior) if prior else None
+            if identity in retired:
+                problems.append(f"boundary {index + 1}: retired entity {identity} reappeared")
+            if index == 0:
+                classification = ("preexisting_disappeared" if raw["disappeared"]
+                                  else "preexisting_death" if raw["state"] in DEAD_STAGES
+                                  else "initial_live_or_unknown")
+                if raw["disappeared"] or raw["state"] in DEAD_STAGES or signed(raw["at_wave"]) < 0:
+                    initial_ids.add(identity)
+                    initial_residue.append(_fact(entry, coordinate, None, raw,
+                                                 classification=classification,
+                                                 reason="present at the first sampled boundary; not a window event"))
+            if raw["state"] in DEAD_STAGES and (prior_raw is None or prior_raw["state"] not in DEAD_STAGES):
+                fact = _fact(entry, coordinate, prior_raw, raw, stage=DEAD_STAGES[raw["state"]],
+                             cause="unverified")
+                deaths.append(fact)
+                if (prior_raw is not None and prior_raw["state"] in KNOWN_NONDEAD and prior_raw["disappeared"] == 0
+                        and signed(prior_raw["at_wave"]) >= 0 and signed(raw["at_wave"]) >= 0):
+                    fact["confirmed"] = True
+                    confirmed_deaths.append(fact)
+                    confirmed.add(identity)
+                else:
+                    fact["confirmed"] = False
+                    fact["reason"] = "death stage observed without a verified live predecessor"
+            if (prior_raw is not None and prior_raw["disappeared"] == 0 and raw["disappeared"] == 1
+                    and identity not in confirmed):
+                fact = _fact(entry, coordinate, prior_raw, raw,
+                             classification="disappeared_without_confirmed_death",
+                             reason="disappeared flag set without a prior death-stage observation")
+                disappearance_flags.append(fact)
+        for identity, before in previous.items():
+            if identity in current:
+                continue
+            retired.add(identity)
+            before_raw = _state(before)
+            if identity in initial_ids:
+                initial_residue.append(_fact(before, coordinate, before_raw, None,
+                                             classification="initial_residue_release",
+                                             reason="cold-start residue leaving the pool; not a window removal"))
+                continue
+            classification = "release_after_confirmed_death" if identity in confirmed else "unknown_removal"
+            fact = _fact(before, coordinate, before_raw, None, classification=classification,
+                         reason="slot no longer held this full identity at the boundary")
+            removals.append(fact)
+            if classification == "unknown_removal":
+                unknown_removals.append(fact)
+        # Same slot with a different full id is a reuse we did not observe end-to-end.
+        previous_by_slot = {entry["slot"]: entry for entry in previous.values()}
+        for entry in current.values():
+            prior = previous_by_slot.get(entry["slot"])
+            if prior is not None and prior["id"] != entry["id"]:
+                slot_reuse.append(_fact(entry, coordinate,
+                                        _state(prior), _state(entry),
+                                        classification="unobserved_reuse",
+                                        previous_identity=prior["id"],
+                                        reason="slot changed generation between sampled boundaries"))
+        previous = current
+    first_confirmed = confirmed_deaths[0] if confirmed_deaths else None
+    first_removal = removals[0] if removals else None
+    first_unknown = unknown_removals[0] if unknown_removals else None
+    return {
+        "schema": ANALYSIS_SCHEMA,
+        "window": {"boundaries": len(snapshots), "first_coordinate": first_coordinate,
+                   "last_coordinate": last_coordinate},
+        "facts": {
+            "first_confirmed_death": first_confirmed or {"available": False,
+                                                         "reason": "no confirmed death-stage observation in the sampled window"},
+            "first_removal": first_removal or {"available": False,
+                                               "reason": "no removal observed in the sampled window"},
+            "unknown_removals": {"count": len(unknown_removals), "first": first_unknown,
+                                 "rule": "slot release without a prior confirmed death-stage observation"},
+            "disappeared_without_confirmed_death": {
+                "count": len(disappearance_flags), "first": disappearance_flags[0] if disappearance_flags else None,
+                "rule": "disappeared 0->1 without a prior death-stage observation"},
+            "death_stage_observations": deaths,
+            "removals": removals,
+            "slot_reuse": {"count": len(slot_reuse), "first": slot_reuse[0] if slot_reuse else None},
+            "initial_residue": initial_residue,
+        },
+        "capture_level": {
+            "death": "unavailable", "removal": "unavailable", "recycle": "unavailable",
+            "reason": "zombie-death-stage-enter / zombie-removal-unclassified / zombie-slot-recycled "
+                      "are review_required in docs/issue111-捕获点表.json; this report is boundary observation only",
+            "unimplemented_fact_classes": list(UNIMPLEMENTED_FACT_CLASSES),
+        },
+        "first_kill": {"gate": "unverified", "proven": False, "reasons": list(FIRST_KILL_REASONS)},
+        "coverage": coverage or {},
+        "state_phase_counts": phase_counts,
+        "problems": problems,
+    }
+
+
+def report_for_run(run: str | Path, *, require_closed: bool = True,
+                   lifecycle: bool = True) -> dict:
+    """Read a run (or audit) directory and return the full report."""
+    run = Path(run)
+    audit_directory = run / "audit" if (run / "audit" / "manifest.json").is_file() else run
+    manifest, snapshots = snapshots_from_audit(audit_directory, require_closed=require_closed)
+    report = analyze_snapshots(snapshots, coverage={"audit_manifest_target": manifest.get("target"),
+                                                    "source": "boundary samples"})
+    report["source"] = {"directory": str(audit_directory), "target": manifest.get("target"),
+                        "boundaries": len(snapshots)}
+    if lifecycle:
+        from . import lifecycle_events
+        try:
+            lifecycle_report = lifecycle_events.validate(audit_directory, manifest=manifest,
+                                                         require_close=False)
+        except lifecycle_events.LifecycleError as exc:
+            lifecycle_report = {"schema": lifecycle_events.VALIDATION_SCHEMA, "status": "invalid",
+                                "problems": [str(exc)]}
+        report["lifecycle"] = {"schema": lifecycle_report.get("schema"),
+                               "status": lifecycle_report.get("status"),
+                               "records": (lifecycle_report.get("records") or {}).get("count"),
+                               "close_receipt_present": (lifecycle_report.get("close_receipt") or {}).get("present"),
+                               "problems": lifecycle_report.get("problems") or []}
+        if lifecycle_report.get("status") == "failed":
+            report["problems"].extend(f"lifecycle: {problem}" for problem in lifecycle_report["problems"])
+    return report
+
+
+def markdown_report(report: dict) -> str:
+    """Render the derived report for review; numbers are copied, not summarized away."""
+    facts = report.get("facts") or {}
+    death = facts.get("first_confirmed_death") or {}
+    removal = facts.get("first_removal") or {}
+    unknown = facts.get("unknown_removals") or {}
+    first_kill = report.get("first_kill") or {}
+    lines = ["# #111 lifecycle boundary report", "",
+             f"- schema: `{report.get('schema')}`",
+             f"- source: `{(report.get('source') or {}).get('directory')}`",
+             f"- boundaries: {(report.get('window') or {}).get('boundaries')}",
+             f"- first confirmed death: {json.dumps(death, ensure_ascii=False, sort_keys=True)}",
+             f"- first removal: {json.dumps(removal, ensure_ascii=False, sort_keys=True)}",
+             f"- unknown removals: count={unknown.get('count')}",
+             f"- first kill proven: {first_kill.get('proven')}",
+             f"- capture level: {json.dumps(report.get('capture_level'), ensure_ascii=False, sort_keys=True)}",
+             f"- lifecycle: {json.dumps(report.get('lifecycle'), ensure_ascii=False, sort_keys=True)}", ""]
+    if report.get("problems"):
+        lines.append("## Problems")
+        lines.extend(f"- {problem}" for problem in report["problems"])
+        lines.append("")
+    lines.append("All facts are boundary observations; death/removal/recycle capture points remain "
+                 "review_required and first_kill remains unverified.")
+    return "\n".join(lines) + "\n"
+
+
+def write_report(report: dict, *, json_path: str | Path | None = None,
+                 markdown_path: str | Path | None = None) -> None:
+    if json_path is not None:
+        Path(json_path).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if markdown_path is not None:
+        Path(markdown_path).write_text(markdown_report(report), encoding="utf-8")

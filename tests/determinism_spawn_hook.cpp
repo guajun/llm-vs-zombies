@@ -31,8 +31,9 @@ __attribute__((naked)) void SpawnFixture() {
         "movl $0x3f000001, 0x34(%edi)\n\t"
         "incl _fixtureMt+2496\n\tcmpl $624, _fixtureMt+2496\n\tjbe 1f\n\t"
         "movl $0, _fixtureMt+2496\n\t1:\n\t"
-        "cmpl $2, %eax\n\tje 2f\n\tcmpl $1, %eax\n\tje 3f\n\t"
+        "cmpl $2, %eax\n\tje 2f\n\tcmpl $1, %eax\n\tje 3f\n\tcmpl $3, %eax\n\tje 4f\n\t"
         "movl $0x11112222, %eax\n\tjmp _SpawnFixtureEpilogue\n\t"
+        "4:\n\tmovl $0xdeadbeef, %edi\n\tjmp _SpawnFixtureEpilogue\n\t"
         "3:\n\tmovl $0x33334444, %eax\n\tstc\n\tjmp _SpawnFixtureEpilogue\n\t"
         "2:\n\tpushl $3\n\tpushl %edi\n\tpushl $1\n\tpushl $0\n\t"
         "pushl $_fixtureChild\n\tmovl $5, %eax\n\tcall _SpawnFixture\n\t"
@@ -60,6 +61,10 @@ __attribute__((naked)) void CallFixture() {
         "fxsave _fixtureResult+48\n\tpopal\n\tpopfl\n\t"
         "fxrstor _fixtureCallerFx\n\tpopal\n\tpopfl\n\tretl\n\t");
 }
+}
+extern "C" {
+void __cdecl LvzSpawnEnter(void* frame) noexcept;
+void __cdecl LvzSpawnLeave(void* frame) noexcept;
 }
 namespace {
 void Check(bool condition,const char* message) {if(!condition) throw std::runtime_error(message);}
@@ -212,6 +217,41 @@ int main() {
             Check(initialization.size()==1&&initialization[0]["boundary"].is_null(),
                 "Initialization spawn retained a stale controlled boundary");
             Check(initialization[0]["engine_call_id"].is_null(),"Initialization spawn retained original call ID");
+            Check(RemoveSpawnHook(error),error.c_str());
+        }
+        // --- #111 stage C: partial/unreadable initialization and an incomplete call ---
+        Check(InstallSpawnHookForTest(reinterpret_cast<uintptr_t>(&SpawnFixture),
+            reinterpret_cast<uintptr_t>(&SpawnFixtureEpilogue),reinterpret_cast<uintptr_t>(&fixtureMt),error),error.c_str());
+        Reset(3);CallFixture();
+        Check(SpawnHookStatus()["faults"]>=1&&SpawnHookStatus()["healthy"]==false,
+            "An unreadable exit must mark the probe unhealthy");
+        Check(DrainSpawnEvents().empty(),"An unreadable exit must not be queued");
+        Check(SpawnHookStatus()["measurement"]["incomplete_events"]>=1,
+            "An unreadable exit must be counted as an incomplete event");
+        Check(RemoveSpawnHook(error),error.c_str());
+        Check(InstallSpawnHookForTest(reinterpret_cast<uintptr_t>(&SpawnFixture),
+            reinterpret_cast<uintptr_t>(&SpawnFixtureEpilogue),reinterpret_cast<uintptr_t>(&fixtureMt),error),error.c_str());
+        {
+            alignas(16) uint8_t frame[36+24]{};
+            auto write32=[&](size_t offset,uint32_t value){std::memcpy(frame+offset,&value,4);};
+            Reset(0);
+            write32(0,reinterpret_cast<uint32_t>(fixtureZombie));    // saved EDI = this
+            write32(7*4,7);                                          // saved EAX = row0
+            write32(36+0,0x401234);                                  // caller return address
+            write32(36+4,reinterpret_cast<uint32_t>(fixtureZombie)); // this
+            write32(36+8,16);                                        // type
+            LvzSpawnEnter(frame);
+            Check(SpawnHookStatus()["active_initializers"]==1&&SpawnHookStatus()["healthy"]==false,
+                "An entry without its exit must stay visible as an active initializer");
+            bool drainRefused=false;
+            try { DrainSpawnBatch(); } catch(const std::exception&) { drainRefused=true; }
+            Check(drainRefused,"Draining must be refused while an initializer is incomplete");
+            Check(!RemoveSpawnHook(error),"Removal must be refused while an initializer is active");
+            LvzSpawnLeave(frame);
+            Check(SpawnHookStatus()["active_initializers"]==0,"The late exit must close the invocation");
+            auto batch=DrainSpawnBatch();
+            Check(batch.count==1&&batch.lifecycle[0]["complete"]==true,
+                "A late exit must produce one complete lifecycle record");
             Check(RemoveSpawnHook(error),error.c_str());
         }
         Check(InstallSpawnHookForTest(reinterpret_cast<uintptr_t>(&SpawnFixture),

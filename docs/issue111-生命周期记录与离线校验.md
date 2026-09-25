@@ -129,6 +129,28 @@ healthy=true，captured=records）、`completed=true`。
 
 ## 5. 离线校验命令
 
+校验（完整性/回执）：
+
+```powershell
+$env:PYTHONPATH='src'
+python tools/issue111_lifecycle_check.py <run-or-audit-dir>
+python tools/issue111_lifecycle_check.py <run-or-audit-dir> --recorder build/recorder.dll --json
+```
+
+边界观测报告（首次死亡阶段/首次移除/未知移除/首次击杀可证性）：
+
+```powershell
+python tools/issue111_lifecycle_report.py <run-or-audit-dir> --out work/report.json --markdown work/report.md
+```
+
+报告把派生事实标注为 `boundary_observation`；三个捕获点未安装时 `capture_level` 恒为
+`unavailable`、`first_kill.proven` 恒为 false。实验入口与封存：
+
+```powershell
+python tools/issue111_lifecycle_experiment.py prepare --name <new-run> --plan experiments/plans/<plan>.json --mode on
+python tools/issue111_lifecycle_experiment.py seal --run experiments/runs/<new-run>
+```
+
 ```powershell
 $env:PYTHONPATH='src'
 python tools/issue111_lifecycle_check.py <run-or-audit-dir>
