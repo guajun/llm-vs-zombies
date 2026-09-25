@@ -60,7 +60,8 @@ Json Event(uint64_t sequence, uint64_t invocation, uint32_t depth, Json parent) 
         {"invocation", {{"invocation_id", invocation}, {"depth", depth}, {"parent_invocation_id", parent}}},
         {"entity", {{"id", 0x00010001}, {"slot", 1}, {"generation", 1}}},
         {"before_after", {{"before", nullptr},
-                          {"after", {{"id", 0x00010001}, {"slot", 1}, {"generation", 1}}}}},
+                          {"after", {{"id", 0x00010001}, {"slot", 1}, {"generation", 1},
+                                      {"row0", 0}, {"type", 16}, {"game_clock", 42}}}}},
         {"classification", {{"class", "initialization"}, {"cause", "unknown"}}},
         {"probe", {{"name", "zombie-initialize-exit"}, {"schema", "lvz.spawn.v1"},
                    {"sequence_domain", "lvz.measurement.capture-sequence"}}},
@@ -107,9 +108,9 @@ void CleanProtocol() {
         Check(recorder.Opened(), "recorder must be open");
         Check(!std::filesystem::exists(audit / "lifecycle-close-receipt.jsonl"),
               "no receipt may exist before Finish");
-        recorder.Write(Event(1, 1, 0, nullptr));
-        recorder.Write(Event(3, 2, 0, nullptr));   // a legitimate gap: no contiguity requirement
-        recorder.Write(Event(4, 3, 1, 2));
+        recorder.Write(Event(1, 2, 1, 1));   // nested child exits first: a legitimate gap follows
+        recorder.Write(Event(3, 1, 0, nullptr));
+        recorder.Write(Event(4, 3, 0, nullptr));
         Check(recorder.Count() == 3 && recorder.Bytes() > 0, "writer counters must track records");
         Check(recorder.FirstSequence() == 1 && recorder.LastSequence() == 4, "writer sequence bounds");
         events = recorder.EventsPath();
@@ -144,7 +145,7 @@ void CleanProtocol() {
               "envelope identity");
         const auto& event = envelope.at("event");
         Check(event.at("capture_sequence") == expectedSequences[index], "events must stay in capture order");
-        if (index == 2) Check(event.at("invocation").at("parent_invocation_id") == 2, "nested parent binding");
+        if (index == 0) Check(event.at("invocation").at("parent_invocation_id") == 1, "nested parent binding");
         ++index;
     }
     Check(index == 3, "events file must contain exactly the written records");

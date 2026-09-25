@@ -22,7 +22,7 @@
       "additionalProperties": false,
       "properties": {
         "schema": {"const": "lvz.lifecycle-event.v1"},
-        "kind": {"type": "string", "minLength": 1},
+        "kind": {"const": "zombie_initialized"},
         "capture_sequence": {"type": "integer", "minimum": 1},
         "version": {
           "oneOf": [
@@ -39,7 +39,7 @@
             }
           ]
         },
-        "version_phase": {"enum": ["initialization", "controlled_boundary", "unknown"]},
+        "version_phase": {"enum": ["initialization", "controlled_boundary"]},
         "engine_call_id": {"type": ["integer", "null"], "minimum": 1},
         "invocation": {
           "type": "object",
@@ -57,8 +57,8 @@
           "additionalProperties": false,
           "properties": {
             "id": {"type": "integer", "minimum": 1},
-            "slot": {"type": "integer", "minimum": 0},
-            "generation": {"type": "integer", "minimum": 0}
+            "slot": {"type": "integer", "minimum": 0, "maximum": 65535},
+            "generation": {"type": "integer", "minimum": 0, "maximum": 65535}
           }
         },
         "before_after": {
@@ -66,8 +66,8 @@
           "required": ["before", "after"],
           "additionalProperties": false,
           "properties": {
-            "before": {"type": ["object", "null"]},
-            "after": {"type": ["object", "null"]}
+            "before": {"type": "null"},
+            "after": {"$ref": "#/$defs/snapshot"}
           }
         },
         "classification": {
@@ -75,8 +75,8 @@
           "required": ["class", "cause"],
           "additionalProperties": false,
           "properties": {
-            "class": {"type": "string", "minLength": 1},
-            "cause": {"type": "string", "minLength": 1}
+            "class": {"const": "initialization"},
+            "cause": {"const": "unknown"}
           }
         },
         "probe": {
@@ -90,6 +90,29 @@
           }
         },
         "complete": {"const": true}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"version_phase": {"const": "initialization"}}, "required": ["version_phase"]},
+          "then": {"properties": {"version": {"type": "null"}, "engine_call_id": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"version_phase": {"const": "controlled_boundary"}}, "required": ["version_phase"]},
+          "then": {"properties": {"version": {"type": "object"}}}
+        }
+      ]
+    },
+    "snapshot": {
+      "type": "object",
+      "required": ["id", "slot", "generation", "row0", "type", "game_clock"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "slot": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "generation": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "row0": {"type": "integer"},
+        "type": {"type": "integer", "minimum": 0},
+        "game_clock": {"type": "integer", "minimum": 0}
       }
     }
   }

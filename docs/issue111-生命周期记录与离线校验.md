@@ -115,8 +115,11 @@
 
 因此磁盘上的成功证据是“events 字节 + receipt 摘要”而不是任何内存标志：`spawn_hook_closed` 的
 measurement health 即使在 closing 状态下也如实记录，判断成功与否只看 receipt 是否成立。离线
-校验器与 `AuditLog(require_closed=True)` 对启用轨迹要求 receipt；`AuditTail` 对进行中的录制不要求
-（events 流在初始化时已存在），seal/轨迹打包会连同 receipt 一起复制。
+校验器与 `AuditLog(require_closed=True)`、`AuditTail.verify_closed()` 通过**同一个**完整文件合同校验
+（事件最小契约、精确键集与整数类型、LIFO 调用嵌套、序号规则、receipt 摘要/manifest/身份/计数/
+persistence 断言、审计流探针故障），任何不合法都返回 `EvidenceError`；两者都支持 seal 后的 gzip
+容器。`AuditLog(require_closed=False)` 与进行中的 `AuditTail` 允许 receipt 尚未出现的 `open`
+状态，但已出现记录仍需满足同一合同；seal/轨迹打包会连同 receipt 一起复制。
 
 receipt 关键字段：`records`、`bytes`、`sha256`（events 原文）、`manifest_sha256`
 （`audit/manifest.json` 原文）、`run_id`/`branch_id`/`session_id`/`sequence_domain`、
@@ -134,9 +137,18 @@ python tools/issue111_lifecycle_check.py <run-or-audit-dir> --recorder build/rec
 
 - 接受实验运行目录（自动取 `<run>/audit`）或 audit 目录本身；使用现有 `EvidenceStore`，兼容
   seal 后的 gzip 容器，不引入 Win32 依赖。
-- 退出码：`0` = valid/unavailable/disabled；`1` = failed；`2` = 合同不可读。
+- 退出码：`0` = valid/unavailable/disabled/open；`1` = failed；`2` = 合同不可读（含声明为 null/
+  非对象的 capability）。
 - 报告包含 `status`、`records{count,kinds,identities,first/last,gaps,rule}`、`close_receipt`、
-  `probe_events`、`problems` 与 `claims`。
+  `probe_events{present,scanned,fault_events,closed_unhealthy,problems}`、`problems` 与 `claims`。
+- 语义检查：事件/信封/receipt 的精确键集（禁止缺失、多余键），`kind=zombie_initialized`，
+  `before_after.before=null` 且 `after` 为原生快照字段子集并与 `entity` 身份一致，
+  `classification{class=initialization,cause=unknown}`，初始化事件的 `version`/`engine_call_id`
+  显式 null，受控边界事件为版本对象；bool/float/字符串不得冒充整数。
+- 嵌套检查：`invocation_id` 必须为连续会话计数且不重复；按出口顺序重建 LIFO 栈，逐条验证
+  declared depth、parent 及“父先于子退出”不可能性（合法的先子后父退出与序号间隙保留）。
+- 探针故障：`audit/events.jsonl` 出现 `spawn_hook_fault` 或 `spawn_hook_closed.healthy!=true`，
+  或该文件不可读/不完整，均 disqualify success；不会静默忽略。
 - `claims.first_kill_proven` 恒为 false，`first_kill_gate=unverified`，并列出尚未实现的
   `confirmed_death_stage`/`removal_unclassified`/`slot_recycle` 三类事实——本 PR 只提供初始化事实，
   不声称任何全窗口首次击杀结论。
@@ -164,8 +176,13 @@ python -m unittest discover -s tests -q
   打开失败、重复/递减序号拒绝、析构句柄释放；
 - `RunMeasurementShutdown`：clean 时 receipt 先于 Commit，lifecycle 失败降级 Failed 且无 receipt，
   body 异常时不产生 receipt；
-- Python 读取器：valid/unavailable/disabled、截断、重复/乱序、坏父引用、计数/摘要/manifest 绑定
-  失配、错误 session/run/branch、探针故障事件、gzip seal 往返、CLI 退出码。
+- Python 读取器：valid/unavailable/disabled/open、截断与残缺尾、重复/乱序、事件契约各字段的
+  dict/list/null/bool/float 类型表（不崩溃）、LIFO 嵌套的重复 ID/深度失配/父先退/交叉嵌套、
+  receipt 计数/摘要/manifest/身份/计数/健康/persistence 失配、run/branch/recorder 绑定、探针故障与
+  审计流不可读、gzip seal 往返、CLI 退出码 0/1/2；
+- 严格读取器集成：同一条 lifecycle stream 分别用 `AuditLog(require_closed=True)`、
+  `AuditTail.verify_closed()` 验证合法（含压缩）、语义非法事件、摘要损坏、腐败 receipt 与探针故障
+  都必须报 `EvidenceError`，而进行中的录制在 receipt 出现前保持可读。
 
 ## 7. 仍待完成
 

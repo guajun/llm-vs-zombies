@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -6,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch as mock_patch
 
-from llm_vs_zombies import lifecycle_events
+from llm_vs_zombies import evidence_codec, lifecycle_events
 from llm_vs_zombies.audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA, digests,
     _FrameDecoder, _fnv, _python_fnv, audit_files, canonical, compare_audits, digest, first_difference, patch,
     PARTICLE_SHAKE_MODE, _tokens, _cached_tokens, _POINTER_CACHE_SIZE, _POINTER_CACHE_MAX_CHARS, decode,
@@ -148,46 +149,135 @@ def particle_audit(directory, pointer=0x10000140, identity=65538, *, age=5, site
 
 
 class AuditTests(unittest.TestCase):
-    def test_closed_lifecycle_recording_requires_its_receipt_but_live_tail_does_not(self):
-        def capability():
-            return {
-                "mode": lifecycle_events.MODE, "enabled": True,
-                "event_schema": lifecycle_events.EVENT_SCHEMA,
-                "envelope_schema": lifecycle_events.ENVELOPE_SCHEMA,
-                "receipt_schema": lifecycle_events.RECEIPT_SCHEMA,
-                "sequence_domain": lifecycle_events.SEQUENCE_DOMAIN, "session_id": 1,
-                "probe": {"name": lifecycle_events.PROBE_NAME, "schema": lifecycle_events.PROBE_SCHEMA,
-                          "event_kind": lifecycle_events.KIND_INITIALIZATION},
-                "build": {"module": "recorder.dll", "sha256": "a" * 64},
-                "files": {"events": lifecycle_events.EVENTS_FILE,
-                          "close_receipt": lifecycle_events.RECEIPT_FILE},
-            }
-        with tempfile.TemporaryDirectory() as temp:
+    def _lifecycle_helpers(self):
+        from tests.test_lifecycle_events import (BRANCH_ID, RUN_ID, capability, envelope, envelopes_bytes,
+                                                 event, receipt_for)
+        return BRANCH_ID, RUN_ID, capability, envelope, envelopes_bytes, event, receipt_for
+
+    def _enable_lifecycle(self, directory, capability, items=(), *, receipt=True,
+                          receipt_for=None, envelopes_bytes=None):
+        manifest = json.loads((directory / "manifest.json").read_text())
+        manifest["lifecycle_recording"] = capability
+        manifest_bytes = (json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+        (directory / "manifest.json").write_bytes(manifest_bytes)
+        events_bytes = envelopes_bytes(items)
+        (directory / lifecycle_events.EVENTS_FILE).write_bytes(events_bytes)
+        if receipt:
+            value = receipt_for(events_bytes, manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest())
+            (directory / lifecycle_events.RECEIPT_FILE).write_text(
+                json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8")
+            return manifest, value
+        return manifest, None
+
+    def test_lifecycle_strict_readers_validate_semantics(self):
+        BRANCH_ID, RUN_ID, capability, envelope, envelopes_bytes, event, receipt_for = self._lifecycle_helpers()
+
+        def prepared(temp):
             directory = Path(temp) / "audit"
             animation_audit(directory)
-            manifest = json.loads((directory / "manifest.json").read_text())
-            manifest["lifecycle_recording"] = capability()
-            (directory / "manifest.json").write_text(json.dumps(manifest))
-            (directory / lifecycle_events.EVENTS_FILE).write_text("")
-            # A live tail may follow the recording before the receipt exists.
-            # Lifecycle evidence is not engine-frame evidence, so its bytes
-            # must not show up as unconsumed frame bytes at close.
+            manifest, _ = self._enable_lifecycle(directory, capability(), receipt_for=receipt_for,
+                                                 envelopes_bytes=envelopes_bytes)
+            return directory, manifest
+
+        # 1. A valid lifecycle stream passes both strict entrypoints, plain and
+        #    sealed; lifecycle bytes are not engine-frame bytes for the tail.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
             tail = AuditTail(directory)
             self.assertIn(lifecycle_events.EVENTS_FILE, audit_files(directory, manifest))
-            self.assertIn(lifecycle_events.EVENTS_FILE, tail.evidence_files)
             self.assertNotIn(lifecycle_events.EVENTS_FILE, tail._positions)
             self.assertNotIn(lifecycle_events.RECEIPT_FILE, tail._positions)
             list(tail.read_request("a"))
-            with self.assertRaisesRegex(EvidenceError, "missing its close receipt"):
-                tail.verify_closed()
-            with self.assertRaisesRegex(EvidenceError, "missing its close receipt"):
-                AuditLog(directory, require_closed=True)
-            (directory / lifecycle_events.RECEIPT_FILE).write_text('{"schema":"' + lifecycle_events.RECEIPT_SCHEMA + '"}\n')
+            tail.verify_closed()
             audit = AuditLog(directory, require_closed=True)
             self.assertIn(lifecycle_events.RECEIPT_FILE, audit.evidence_files)
+            evidence_codec.compress_evidence(directory)
+            AuditLog(directory, require_closed=True)
+
+        # 2. A live reader may see no receipt (open, not success), but a closed
+        #    reader must refuse it.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
+            (directory / lifecycle_events.RECEIPT_FILE).unlink()
+            AuditLog(directory)  # require_closed=False accepts the live prefix
             tail = AuditTail(directory)
             list(tail.read_request("a"))
-            tail.verify_closed()
+            with self.assertRaises(EvidenceError):
+                tail.verify_closed()
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory, require_closed=True)
+
+        # 3. A semantically invalid event with an internally consistent receipt
+        #    must be refused by both readers, not just by hash checks.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
+            item = envelope(0, event(1, 1))
+            item["event"]["kind"] = "confirmed_death_stage"
+            self._enable_lifecycle(directory, capability(), [item], receipt_for=receipt_for,
+                                   envelopes_bytes=envelopes_bytes)
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory, require_closed=True)
+            tail = AuditTail(directory)
+            list(tail.read_request("a"))
+            with self.assertRaises(EvidenceError):
+                tail.verify_closed()
+
+        # 4. Corrupted event bytes (digest mismatch) must be refused.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
+            self._enable_lifecycle(directory, capability(), [envelope(0, event(1, 1))],
+                                   receipt_for=receipt_for, envelopes_bytes=envelopes_bytes)
+            data = bytearray((directory / lifecycle_events.EVENTS_FILE).read_bytes())
+            data[-2] ^= 0x01
+            (directory / lifecycle_events.EVENTS_FILE).write_bytes(bytes(data))
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory, require_closed=True)
+            tail = AuditTail(directory)
+            list(tail.read_request("a"))
+            with self.assertRaises(EvidenceError):
+                tail.verify_closed()
+
+        # 5. An invalid receipt (count mismatch) must be refused.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
+            _, receipt = self._enable_lifecycle(directory, capability(), receipt_for=receipt_for,
+                                                envelopes_bytes=envelopes_bytes,
+                                                items=[envelope(0, event(1, 1))])
+            receipt["records"] = 7
+            (directory / lifecycle_events.RECEIPT_FILE).write_text(
+                json.dumps(receipt, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8")
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory, require_closed=True)
+            tail = AuditTail(directory)
+            list(tail.read_request("a"))
+            with self.assertRaises(EvidenceError):
+                tail.verify_closed()
+
+        # 6. Malformed JSON shapes must surface as EvidenceError, not a crash.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
+            item = envelope(0, event(1, 1))
+            item["event"]["capture_sequence"] = []
+            self._enable_lifecycle(directory, capability(), [item], receipt_for=receipt_for,
+                                   envelopes_bytes=envelopes_bytes)
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory, require_closed=True)
+            tail = AuditTail(directory)
+            list(tail.read_request("a"))
+            with self.assertRaises(EvidenceError):
+                tail.verify_closed()
+
+        # 7. An explicit probe fault in the audit stream disqualifies success.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
+            (directory / "events.jsonl").write_text(
+                json.dumps({"schema": SCHEMA, "seq": 0, "kind": "spawn_hook_fault", "payload": {}}) + "\n",
+                encoding="utf-8")
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory, require_closed=True)
+            tail = AuditTail(directory)
+            with self.assertRaises(EvidenceError):
+                tail.verify_closed()
 
     def test_controlled_births_bind_to_update_or_next_action_boundary(self):
         for phase, expected in (("update", [0, 1]), ("action", [1, 0])):

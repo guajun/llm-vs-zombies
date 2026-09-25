@@ -12,12 +12,17 @@ Deliberate separation of meanings:
   ``unavailable``. That is not zero events and must never be read as success.
 * A trajectory whose capability is explicitly disabled is ``disabled``; a
   lifecycle file that exists without an enabled capability is refused.
-* An enabled trajectory is only ``valid`` when the close receipt exists, the
-  events digest and byte count match the receipt, every record carries the
-  receipt's run/session/branch identity, and the capture sequences are
-  strictly increasing with no duplicates. Gaps are legitimate (nested
-  initialization exists child-first, future capture points share the domain)
-  and are reported, never required to be contiguous.
+* An enabled trajectory with a receipt is only ``valid`` when the receipt
+  exists, the events digest and byte count match the receipt, every record
+  carries the receipt's run/session/branch identity, the initialization
+  contract and formal schema hold, invocation nesting is LIFO-consistent, the
+  capture sequences are strictly increasing with no duplicates, and the audit
+  events stream records no probe fault. Gaps are legitimate (nested
+  initialization exists child-first) and are reported, never required to be
+  contiguous.
+* With ``require_close=False`` (a live reader) a missing receipt yields
+  ``open`` instead of a failure, but the records that are present must still
+  satisfy the same contract.
 * The receipt is written only after the events stream was flushed, closed and
   checked, so its absence is the fail-closed answer for a crash, a failed
   write or a failed close. An in-memory ``closed`` flag is not evidence.
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from . import evidence_codec
@@ -47,6 +53,39 @@ PROBE_SCHEMA = "lvz.spawn.v1"
 KIND_INITIALIZATION = "zombie_initialized"
 CAPABILITY_KEY = "lifecycle_recording"
 _MAX_RECORD_BYTES = 32 << 20
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+_ENVELOPE_KEYS = {"schema", "file_seq", "run_id", "branch_id", "session_id", "sequence_domain", "event"}
+_EVENT_KEYS = {"schema", "kind", "capture_sequence", "version", "version_phase", "engine_call_id",
+               "invocation", "entity", "before_after", "classification", "probe", "complete"}
+_VERSION_KEYS = {"epoch", "tick", "revision"}
+_INVOCATION_KEYS = {"invocation_id", "depth", "parent_invocation_id"}
+_ENTITY_KEYS = {"id", "slot", "generation"}
+_BEFORE_AFTER_KEYS = {"before", "after"}
+_AFTER_KEYS = {"id", "slot", "generation", "row0", "type", "game_clock"}
+_CLASSIFICATION_KEYS = {"class", "cause"}
+_EVENT_PROBE_KEYS = {"name", "schema", "sequence_domain"}
+_CAPABILITY_KEYS = {"mode", "enabled", "event_schema", "envelope_schema", "receipt_schema",
+                    "sequence_domain", "session_id", "probe", "build", "files", "live_validated"}
+_CAPABILITY_PROBE_KEYS = {"name", "schema", "event_kind"}
+_BUILD_KEYS = {"module", "sha256"}
+_FILES_KEYS = {"events", "close_receipt"}
+_RECEIPT_KEYS = {"schema", "run_id", "branch_id", "session_id", "sequence_domain", "envelope_schema",
+                 "event_schema", "probe", "build", "manifest_sha256", "records",
+                 "first_capture_sequence", "last_capture_sequence", "bytes", "sha256",
+                 "counters", "probe_health", "completed", "persistence"}
+_RECEIPT_PROBE_KEYS = {"name", "schema"}
+_COUNTER_KEYS = {"captured", "delivered", "persisted", "overflow", "wrong_thread",
+                 "nesting_mismatch", "incomplete_events"}
+_HEALTH_KEYS = {"captured", "queued", "wrong_thread_calls", "faults", "overflow",
+                "active_initializers", "healthy"}
+_PERSISTENCE_KEYS = {"method", "receipt_written_after_close"}
+
+# Probe-fault kinds that disqualify a lifecycle run even when its own file set
+# is structurally complete: the audit stream is the authoritative statement
+# that the capture probe was healthy.
+_PROBE_FAULT_KIND = "spawn_hook_fault"
+_PROBE_CLOSE_KIND = "spawn_hook_closed"
 
 # The three capture points that would be needed to conclude anything about
 # deaths, removals or recycling are still review_required in the phase-A
@@ -62,53 +101,85 @@ def mode(manifest: dict) -> str:
     """Classify one audit manifest: enabled, disabled or unavailable.
 
     ``unavailable`` means the trajectory predates the capability and says
-    nothing about event counts. A malformed declaration is an error: it must
-    not be silently downgraded to unavailable.
+    nothing about event counts. A declared but malformed declaration (including
+    an explicit null) is an error, not unavailable.
     """
     if not isinstance(manifest, dict):
         raise LifecycleError("audit manifest must be an object")
-    block = manifest.get(CAPABILITY_KEY)
-    if block is None:
+    if CAPABILITY_KEY not in manifest:
         return "unavailable"
+    block = manifest[CAPABILITY_KEY]
     if not isinstance(block, dict):
-        raise LifecycleError("lifecycle_recording capability must be an object")
+        raise LifecycleError("lifecycle_recording capability must be an object when declared")
     if block.get("mode") != MODE:
         raise LifecycleError("unsupported lifecycle recording mode")
     enabled = block.get("enabled")
     if type(enabled) is not bool:
         raise LifecycleError("lifecycle_recording.enabled must be a boolean")
     if not enabled:
+        if set(block) != {"mode", "enabled"}:
+            raise LifecycleError("a disabled lifecycle declaration must contain only mode and enabled")
         return "disabled"
-    if block.get("event_schema") != EVENT_SCHEMA or block.get("envelope_schema") != ENVELOPE_SCHEMA:
-        raise LifecycleError("lifecycle recording schema declaration mismatch")
-    if block.get("receipt_schema") != RECEIPT_SCHEMA:
-        raise LifecycleError("lifecycle close-receipt schema declaration mismatch")
-    if block.get("sequence_domain") != SEQUENCE_DOMAIN:
-        raise LifecycleError("unsupported lifecycle sequence domain")
+    problems: list[str] = []
+    _exact_keys(block, _CAPABILITY_KEYS, "capability", problems)
+    _require(block.get("event_schema") == EVENT_SCHEMA
+             and block.get("envelope_schema") == ENVELOPE_SCHEMA, "lifecycle schema declaration mismatch", problems)
+    _require(block.get("receipt_schema") == RECEIPT_SCHEMA,
+             "lifecycle close-receipt schema declaration mismatch", problems)
+    _require(block.get("sequence_domain") == SEQUENCE_DOMAIN, "unsupported lifecycle sequence domain", problems)
     session = block.get("session_id")
-    if type(session) is not int or session <= 0:
-        raise LifecycleError("lifecycle session identity must be a positive integer")
+    _require(type(session) is int and session > 0, "lifecycle session identity must be a positive integer", problems)
     probe = block.get("probe")
-    if (not isinstance(probe, dict) or probe.get("name") != PROBE_NAME or probe.get("schema") != PROBE_SCHEMA
-            or probe.get("event_kind") != KIND_INITIALIZATION):
-        raise LifecycleError("lifecycle probe declaration mismatch")
+    _require(isinstance(probe, dict) and _exact_keys(probe, _CAPABILITY_PROBE_KEYS, "capability.probe", problems)
+             and probe.get("name") == PROBE_NAME and probe.get("schema") == PROBE_SCHEMA
+             and probe.get("event_kind") == KIND_INITIALIZATION, "lifecycle probe declaration mismatch", problems)
     files = block.get("files")
-    if (not isinstance(files, dict) or files.get("events") != EVENTS_FILE
-            or files.get("close_receipt") != RECEIPT_FILE):
-        raise LifecycleError("lifecycle evidence file declaration mismatch")
-    build = block.get("build")
-    if not _valid_build(build):
-        raise LifecycleError("lifecycle build identity declaration mismatch")
+    _require(isinstance(files, dict) and _exact_keys(files, _FILES_KEYS, "capability.files", problems)
+             and files.get("events") == EVENTS_FILE and files.get("close_receipt") == RECEIPT_FILE,
+             "lifecycle evidence file declaration mismatch", problems)
+    _require(_valid_build(block.get("build")), "lifecycle build identity declaration mismatch", problems)
+    _require(type(block.get("live_validated")) is bool, "lifecycle live_validated must be a boolean", problems)
+    if problems:
+        raise LifecycleError("; ".join(problems))
     return "enabled"
 
 
 def _valid_build(build) -> bool:
-    return (isinstance(build, dict) and isinstance(build.get("module"), str) and build["module"]
+    return (isinstance(build, dict) and set(build) == _BUILD_KEYS
+            and isinstance(build.get("module"), str) and bool(build["module"])
             and _valid_sha256(build.get("sha256")))
 
 
 def _valid_sha256(value) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+
+
+def _require(condition: bool, message: str, problems: list[str]) -> bool:
+    if not condition:
+        problems.append(message)
+    return condition
+
+
+def _exact_keys(value, expected: set[str], label: str, problems: list[str]) -> bool:
+    if not isinstance(value, dict):
+        problems.append(f"{label} must be an object")
+        return False
+    actual = set(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if extra:
+            detail.append("unexpected " + ", ".join(extra))
+        problems.append(f"{label} keys differ: " + "; ".join(detail))
+        return False
+    return True
+
+
+def _is_int(value) -> bool:
+    return type(value) is int
 
 
 def _present(store: evidence_codec.EvidenceStore, name: str) -> bool:
@@ -122,44 +193,61 @@ def _read_plain(store: evidence_codec.EvidenceStore, name: str) -> bytes:
         return stream.read()
 
 
-def _scan_probe_events(store: evidence_codec.EvidenceStore) -> dict:
-    """Best-effort scan of the existing audit events for explicit probe faults.
+def _record_event(record) -> dict | None:
+    if not isinstance(record, dict):
+        return None
+    event = record.get("event")
+    return event if isinstance(event, dict) else None
 
-    The scan only reads the envelope ``kind`` and, for a closed hook, whether
-    its payload was healthy. It is diagnosis, not a second authority: the
-    lifecycle receipt remains the success barrier.
+
+def _scan_probe_events(store: evidence_codec.EvidenceStore) -> dict:
+    """Scan the audit events stream for explicit probe faults.
+
+    The lifecycle receipt remains the success barrier; this scan proves the
+    capture probe itself was healthy. A present but unreadable stream is
+    reported as a problem instead of being silently ignored.
     """
-    report = {"scanned": False, "fault_events": 0, "closed_unhealthy": False}
+    report = {"present": False, "scanned": False, "fault_events": 0, "closed_unhealthy": False,
+              "problems": []}
     if not _present(store, "events.jsonl"):
         return report
+    report["present"] = True
     try:
         with store.open("events.jsonl") as stream:
             while line := stream.readline(_MAX_RECORD_BYTES + 1):
                 if len(line) > _MAX_RECORD_BYTES or not line.endswith(b"\n"):
+                    report["problems"].append("audit events.jsonl is not a complete JSONL stream")
                     break
                 try:
                     value = json.loads(line)
                 except (UnicodeDecodeError, json.JSONDecodeError):
+                    report["problems"].append("audit events.jsonl has an unreadable record")
                     break
                 if not isinstance(value, dict):
+                    report["problems"].append("audit events.jsonl contains a non-object record")
                     break
                 kind = value.get("kind")
-                if kind in {"spawn_hook_fault", "particle_shake_fault"}:
+                if kind == _PROBE_FAULT_KIND:
                     report["fault_events"] += 1
-                elif kind == "spawn_hook_closed" and isinstance(value.get("payload"), dict):
-                    if value["payload"].get("healthy") is not True:
+                elif kind == _PROBE_CLOSE_KIND:
+                    payload = value.get("payload")
+                    if not isinstance(payload, dict) or payload.get("healthy") is not True:
                         report["closed_unhealthy"] = True
         report["scanned"] = True
-    except (OSError, LifecycleError, evidence_codec.CodecError):
-        return report
+    except (OSError, LifecycleError, evidence_codec.CodecError) as exc:
+        report["problems"].append(f"audit events.jsonl is unreadable: {exc}")
     return report
 
 
-def _decode_records(data: bytes) -> tuple[list[dict], list[str]]:
+def _decode_records(data: bytes, *, allow_partial_tail: bool) -> tuple[list[dict], list[str]]:
     problems: list[str] = []
-    records: list[dict] = []
     if data and not data.endswith(b"\n"):
-        problems.append("lifecycle events file is truncated: the last record has no trailing newline")
+        if allow_partial_tail:
+            boundary = data.rfind(b"\n")
+            data = data[:boundary + 1] if boundary >= 0 else b""
+        else:
+            problems.append("lifecycle events file is truncated: the last record has no trailing newline")
+    records: list[dict] = []
     for number, line in enumerate(data.splitlines(), 1):
         if not line.strip():
             problems.append(f"line {number}: empty lifecycle record")
@@ -179,18 +267,18 @@ def _decode_records(data: bytes) -> tuple[list[dict], list[str]]:
 def _check_envelope(record: dict, index: int, capability: dict) -> list[str]:
     problems: list[str] = []
     label = f"line {index + 1}"
-    if record.get("schema") != ENVELOPE_SCHEMA:
-        problems.append(f"{label}: envelope schema is not {ENVELOPE_SCHEMA}")
-    if type(record.get("file_seq")) is not int or record["file_seq"] != index:
-        problems.append(f"{label}: file_seq must be the written record index {index}")
+    _exact_keys(record, _ENVELOPE_KEYS, label, problems)
+    _require(record.get("schema") == ENVELOPE_SCHEMA,
+             f"{label}: envelope schema is not {ENVELOPE_SCHEMA}", problems)
+    _require(_is_int(record.get("file_seq")) and record["file_seq"] == index,
+             f"{label}: file_seq must be the written record index {index}", problems)
     for key in ("run_id", "branch_id"):
         value = record.get(key)
-        if not isinstance(value, str) or not value:
-            problems.append(f"{label}: {key} must identify this run")
-    if record.get("session_id") != capability.get("session_id"):
-        problems.append(f"{label}: session_id does not match the declared session identity")
-    if record.get("sequence_domain") != SEQUENCE_DOMAIN:
-        problems.append(f"{label}: sequence_domain does not match the declared session identity")
+        _require(isinstance(value, str) and bool(value), f"{label}: {key} must be a non-empty string", problems)
+    _require(_is_int(record.get("session_id")) and record["session_id"] == capability.get("session_id"),
+             f"{label}: session_id does not match the declared session identity", problems)
+    _require(record.get("sequence_domain") == SEQUENCE_DOMAIN,
+             f"{label}: sequence_domain does not match the declared session identity", problems)
     event = record.get("event")
     if not isinstance(event, dict):
         problems.append(f"{label}: event must be an object")
@@ -200,90 +288,231 @@ def _check_envelope(record: dict, index: int, capability: dict) -> list[str]:
 
 
 def _check_event(event: dict, label: str, problems: list[str]) -> None:
-    if event.get("schema") != EVENT_SCHEMA:
-        problems.append(f"{label}: event schema is not {EVENT_SCHEMA}")
-    if type(event.get("kind")) is not str or not event["kind"]:
-        problems.append(f"{label}: event kind must be a non-empty string")
-    sequence = event.get("capture_sequence")
-    if type(sequence) is not int or sequence <= 0:
-        problems.append(f"{label}: capture_sequence must be a positive integer")
-    if event.get("complete") is not True:
-        problems.append(f"{label}: event is not marked complete")
+    if not _exact_keys(event, _EVENT_KEYS, f"{label} event", problems):
+        return
+    _require(event.get("schema") == EVENT_SCHEMA, f"{label}: event schema is not {EVENT_SCHEMA}", problems)
+    _require(event.get("kind") == KIND_INITIALIZATION,
+             f"{label}: this delivery only records {KIND_INITIALIZATION}", problems)
+    _require(_is_int(event.get("capture_sequence")) and event["capture_sequence"] > 0,
+             f"{label}: capture_sequence must be a positive integer", problems)
+    _require(event.get("complete") is True, f"{label}: event is not marked complete", problems)
     probe = event.get("probe")
-    if (not isinstance(probe, dict) or probe.get("name") != PROBE_NAME or probe.get("schema") != PROBE_SCHEMA
-            or probe.get("sequence_domain") != SEQUENCE_DOMAIN):
-        problems.append(f"{label}: event probe declaration does not match the capability")
+    _require(isinstance(probe, dict) and _exact_keys(probe, _EVENT_PROBE_KEYS, f"{label} event.probe", problems)
+             and probe.get("name") == PROBE_NAME and probe.get("schema") == PROBE_SCHEMA
+             and probe.get("sequence_domain") == SEQUENCE_DOMAIN,
+             f"{label}: event probe declaration does not match the capability", problems)
+    _check_classification(event.get("classification"), label, problems)
+    _check_version(event, label, problems)
+    _check_invocation(event.get("invocation"), label, problems)
+    _check_entity(event, event.get("entity"), label, problems)
+    _check_before_after(event, label, problems)
+
+
+def _check_classification(classification, label: str, problems: list[str]) -> None:
+    if not _exact_keys(classification, _CLASSIFICATION_KEYS, f"{label} event.classification", problems):
+        return
+    _require(classification.get("class") == "initialization",
+             f"{label}: classification class must be initialization", problems)
+    _require(classification.get("cause") == "unknown",
+             f"{label}: classification cause must be unknown for an initialization observation", problems)
+
+
+def _check_version(event: dict, label: str, problems: list[str]) -> None:
     phase = event.get("version_phase")
     version = event.get("version")
     call_id = event.get("engine_call_id")
     if phase == "initialization":
-        if version is not None or call_id is not None:
-            problems.append(f"{label}: initialization event must carry an explicitly unassigned version and engine_call_id")
+        _require(version is None, f"{label}: initialization event must carry an explicit null version", problems)
+        _require(call_id is None,
+                 f"{label}: initialization event must carry an explicit null engine_call_id", problems)
     elif phase == "controlled_boundary":
-        if (not isinstance(version, dict)
-                or any(type(version.get(key)) is not int or version[key] < 0 for key in ("epoch", "tick", "revision"))):
-            problems.append(f"{label}: controlled event must carry a non-negative version object")
-        if call_id is not None and (type(call_id) is not int or call_id <= 0):
-            problems.append(f"{label}: engine_call_id must be null or a positive integer")
+        if _exact_keys(version, _VERSION_KEYS, f"{label} event.version", problems):
+            for key in ("epoch", "tick", "revision"):
+                _require(_is_int(version.get(key)) and version[key] >= 0,
+                         f"{label}: event.version.{key} must be a non-negative integer", problems)
+        _require(call_id is None or (_is_int(call_id) and call_id > 0),
+                 f"{label}: engine_call_id must be null or a positive integer", problems)
     else:
-        problems.append(f"{label}: unsupported version_phase {phase!r}")
-    invocation = event.get("invocation")
-    if not isinstance(invocation, dict):
-        problems.append(f"{label}: invocation must be an object")
+        problems.append(f"{label}: version_phase must be initialization or controlled_boundary")
+
+
+def _check_invocation(invocation, label: str, problems: list[str]) -> None:
+    if not _exact_keys(invocation, _INVOCATION_KEYS, f"{label} event.invocation", problems):
+        return
+    invocation_id = invocation.get("invocation_id")
+    depth = invocation.get("depth")
+    parent = invocation.get("parent_invocation_id")
+    _require(_is_int(invocation_id) and invocation_id > 0,
+             f"{label}: invocation_id must be a positive integer", problems)
+    if not _require(_is_int(depth) and depth >= 0, f"{label}: invocation depth must be a non-negative integer",
+                    problems):
+        return
+    if depth == 0:
+        _require(parent is None, f"{label}: a top-level invocation must have a null parent_invocation_id", problems)
     else:
+        _require(_is_int(parent) and parent > 0, f"{label}: a nested invocation must reference its parent", problems)
+        if _is_int(parent) and _is_int(invocation_id):
+            _require(parent < invocation_id, f"{label}: parent_invocation_id must be allocated before its child",
+                     problems)
+
+
+def _check_entity(event: dict, entity, label: str, problems: list[str]) -> None:
+    if not _exact_keys(entity, _ENTITY_KEYS, f"{label} event.entity", problems):
+        return
+    identifier = entity.get("id")
+    if not _require(_is_int(identifier) and identifier > 0,
+                    f"{label}: entity id must be a positive integer", problems):
+        return
+    _require(_is_int(entity.get("slot")) and entity.get("slot") == (identifier & 0xFFFF),
+             f"{label}: entity slot must be the low 16 bits of its id", problems)
+    _require(_is_int(entity.get("generation")) and entity.get("generation") == (identifier >> 16),
+             f"{label}: entity generation must be the high 16 bits of its id", problems)
+
+
+def _check_before_after(event: dict, label: str, problems: list[str]) -> None:
+    before_after = event.get("before_after")
+    if not _exact_keys(before_after, _BEFORE_AFTER_KEYS, f"{label} event.before_after", problems):
+        return
+    _require(before_after.get("before") is None,
+             f"{label}: initialization event must carry an explicit null before snapshot", problems)
+    after = before_after.get("after")
+    if not _exact_keys(after, _AFTER_KEYS, f"{label} event.before_after.after", problems):
+        return
+    identifier = after.get("id")
+    if _require(_is_int(identifier) and identifier > 0,
+                f"{label}: after.id must be a positive integer", problems):
+        _require(_is_int(after.get("slot")) and after.get("slot") == (identifier & 0xFFFF),
+                 f"{label}: after.slot must be the low 16 bits of its id", problems)
+        _require(_is_int(after.get("generation")) and after.get("generation") == (identifier >> 16),
+                 f"{label}: after.generation must be the high 16 bits of its id", problems)
+        entity = event.get("entity") if isinstance(event.get("entity"), dict) else {}
+        _require(entity.get("id") == identifier and entity.get("slot") == after.get("slot")
+                 and entity.get("generation") == after.get("generation"),
+                 f"{label}: after snapshot identity must match the event entity", problems)
+    _require(_is_int(after.get("row0")), f"{label}: after.row0 must be an integer", problems)
+    _require(_is_int(after.get("type")) and after["type"] >= 0,
+             f"{label}: after.type must be a non-negative integer", problems)
+    _require(_is_int(after.get("game_clock")) and after["game_clock"] >= 0,
+             f"{label}: after.game_clock must be a non-negative integer", problems)
+
+
+def _sequence_problems(records: list[dict]) -> tuple[list[str], dict]:
+    problems: list[str] = []
+    previous: int | None = None
+    previous_index: int | None = None
+    first = last = None
+    sequences: list[int] = []
+    for index, record in enumerate(records):
+        event = _record_event(record)
+        sequence = event.get("capture_sequence") if event else None
+        if not _is_int(sequence):
+            continue
+        sequences.append(sequence)
+        if first is None:
+            first = sequence
+        last = sequence
+        if previous is not None and sequence <= previous:
+            reason = "duplicated" if sequence == previous else "out of order"
+            problems.append(f"line {index + 1}: capture_sequence {sequence} is {reason} "
+                            f"(after {previous} on line {previous_index + 1})")
+        previous, previous_index = sequence, index
+    gaps = None if first is None else (last - first + 1) - len(sequences)
+    return problems, {"first_capture_sequence": first, "last_capture_sequence": last,
+                      "unique_sequences": len(set(sequences)), "gaps": gaps,
+                      "rule": "strictly increasing within one run/session/sequence_domain; gaps allowed, "
+                              "duplicates and decreases are refused"}
+
+
+def _nesting_problems(records: list[dict]) -> list[str]:
+    """Prove the invocation forest is LIFO-consistent.
+
+    Invocation ids are allocated at call entry and every record is written at
+    its exit, so a valid session's exits form a stack-pop sequence over the
+    contiguous entry counter 1..N. Reconstructing that stack strictly checks
+    duplicates, depth, the declared parent, parent-before-child order and
+    crossed/impossible nesting at once.
+    """
+    problems: list[str] = []
+    invocations: list[tuple[int, int, object, object]] = []
+    seen: dict[int, int] = {}
+    for index, record in enumerate(records):
+        event = _record_event(record)
+        invocation = event.get("invocation") if event else None
+        if not isinstance(invocation, dict):
+            continue
         invocation_id = invocation.get("invocation_id")
-        depth = invocation.get("depth")
-        parent = invocation.get("parent_invocation_id")
-        if type(invocation_id) is not int or invocation_id <= 0:
-            problems.append(f"{label}: invocation_id must be a positive integer")
-        if type(depth) is not int or depth < 0:
-            problems.append(f"{label}: invocation depth must be a non-negative integer")
-        elif depth == 0:
-            if parent is not None:
-                problems.append(f"{label}: a top-level invocation must have a null parent_invocation_id")
-        else:
-            if type(parent) is not int or parent <= 0:
-                problems.append(f"{label}: a nested invocation must reference its parent")
-            elif type(invocation_id) is int and parent >= invocation_id:
-                problems.append(f"{label}: parent_invocation_id must be allocated before its child")
-    entity = event.get("entity")
-    if not isinstance(entity, dict) or type(entity.get("id")) is not int or entity["id"] <= 0:
-        problems.append(f"{label}: entity id must be a positive integer")
-    else:
-        identifier = entity["id"]
-        if entity.get("slot") != (identifier & 0xFFFF) or entity.get("generation") != (identifier >> 16):
-            problems.append(f"{label}: entity slot/generation do not decompose its id")
-    classification = event.get("classification")
-    if (not isinstance(classification, dict) or classification.get("class") != "initialization"
-            or classification.get("cause") != "unknown"):
-        problems.append(f"{label}: this delivery only records initialization facts with cause=unknown")
+        if not _is_int(invocation_id) or invocation_id <= 0:
+            continue
+        if invocation_id in seen:
+            problems.append(f"line {index + 1}: duplicate invocation_id {invocation_id} "
+                            f"(first at line {seen[invocation_id] + 1})")
+            continue
+        seen[invocation_id] = index
+        invocations.append((index, invocation_id, invocation.get("depth"),
+                            invocation.get("parent_invocation_id")))
+    if not invocations:
+        return problems
+    expected_ids = list(range(1, len(invocations) + 1))
+    if sorted(seen) != expected_ids:
+        problems.append("invocation ids must be the contiguous session counter starting at 1; "
+                        f"found {sorted(seen)}")
+        return problems
+    stack: list[int] = []
+    next_id = 1
+    for index, invocation_id, depth, parent in invocations:
+        if invocation_id >= next_id:
+            stack.extend(range(next_id, invocation_id + 1))
+            next_id = invocation_id + 1
+        if not stack or stack[-1] != invocation_id:
+            problems.append(f"line {index + 1}: invocation {invocation_id} exits outside its nesting order")
+            return problems
+        ancestors = stack[:-1]
+        expected_parent = ancestors[-1] if ancestors else None
+        if depth is not None and depth != len(ancestors):
+            problems.append(f"line {index + 1}: invocation {invocation_id} depth {depth!r} does not match "
+                            f"its nesting depth {len(ancestors)}")
+        if parent != expected_parent:
+            problems.append(f"line {index + 1}: invocation {invocation_id} parent {parent!r} does not match "
+                            f"the LIFO parent {expected_parent!r}")
+        stack.pop()
+    if stack:
+        problems.append(f"invocation nesting is still open at end of stream: {stack}")
+    return problems
 
 
-def _cross_check_receipt(receipt: dict, capability: dict, records: list[dict], events_bytes: bytes,
+def _cross_check_receipt(receipt, capability: dict, records: list[dict], events_bytes: bytes,
                          manifest_bytes: bytes | None, problems: list[str]) -> None:
+    if not _exact_keys(receipt, _RECEIPT_KEYS, "close receipt", problems):
+        return
     def require(condition: bool, message: str) -> None:
-        if not condition:
-            problems.append(message)
+        _require(condition, message, problems)
 
     require(receipt.get("schema") == RECEIPT_SCHEMA, f"close receipt schema is not {RECEIPT_SCHEMA}")
     require(receipt.get("completed") is True, "close receipt is not marked completed")
     require(receipt.get("envelope_schema") == ENVELOPE_SCHEMA, "close receipt envelope schema mismatch")
     require(receipt.get("event_schema") == EVENT_SCHEMA, "close receipt event schema mismatch")
     require(receipt.get("sequence_domain") == SEQUENCE_DOMAIN, "close receipt sequence domain mismatch")
-    require(receipt.get("session_id") == capability.get("session_id"),
+    for key in ("run_id", "branch_id"):
+        value = receipt.get(key)
+        require(isinstance(value, str) and bool(value), f"close receipt {key} must be a non-empty string")
+    require(_is_int(receipt.get("session_id")) and receipt.get("session_id") == capability.get("session_id"),
             "close receipt session identity does not match the capability")
     build = receipt.get("build")
     require(_valid_build(build) and build == capability.get("build"),
             "close receipt build identity does not match the capability")
     receipt_probe = receipt.get("probe")
-    require(isinstance(receipt_probe, dict) and receipt_probe.get("name") == PROBE_NAME
-            and receipt_probe.get("schema") == PROBE_SCHEMA,
+    require(isinstance(receipt_probe, dict)
+            and _exact_keys(receipt_probe, _RECEIPT_PROBE_KEYS, "close receipt.probe", problems)
+            and receipt_probe.get("name") == PROBE_NAME and receipt_probe.get("schema") == PROBE_SCHEMA,
             "close receipt probe declaration mismatch")
-    require(receipt.get("records") == len(records),
+    require(_is_int(receipt.get("records")) and receipt.get("records") >= 0
+            and receipt.get("records") == len(records),
             f"close receipt records={receipt.get('records')!r} does not match {len(records)} parsed records")
-    require(receipt.get("bytes") == len(events_bytes), "close receipt byte count does not match the events file")
+    require(_is_int(receipt.get("bytes")) and receipt.get("bytes") == len(events_bytes),
+            "close receipt byte count does not match the events file")
     digest = hashlib.sha256(events_bytes).hexdigest()
-    require(receipt.get("sha256") == digest, "close receipt SHA-256 does not match the events file bytes")
+    require(_valid_sha256(receipt.get("sha256")) and receipt.get("sha256") == digest,
+            "close receipt SHA-256 does not match the events file bytes")
     if manifest_bytes is not None:
         manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
         require(receipt.get("manifest_sha256") == manifest_digest,
@@ -291,30 +520,51 @@ def _cross_check_receipt(receipt: dict, capability: dict, records: list[dict], e
     else:
         require(_valid_sha256(receipt.get("manifest_sha256")), "close receipt must bind the audit manifest digest")
 
-    sequences = [record.get("event", {}).get("capture_sequence") for record in records]
+    sequences: list[int] = []
+    for record in records:
+        event = _record_event(record)
+        if isinstance(event, dict):
+            value = event.get("capture_sequence")
+            if _is_int(value):
+                sequences.append(value)
     first = sequences[0] if sequences else None
     last = sequences[-1] if sequences else None
-    require(receipt.get("first_capture_sequence") == first, "close receipt first capture_sequence mismatch")
-    require(receipt.get("last_capture_sequence") == last, "close receipt last capture_sequence mismatch")
+    if receipt.get("records") == 0:
+        require(receipt.get("first_capture_sequence") is None and receipt.get("last_capture_sequence") is None,
+                "a zero-record receipt must carry null capture-sequence bounds")
+    else:
+        require(_is_int(receipt.get("first_capture_sequence")) and receipt.get("first_capture_sequence") == first,
+                "close receipt first capture_sequence mismatch")
+        require(_is_int(receipt.get("last_capture_sequence")) and receipt.get("last_capture_sequence") == last,
+                "close receipt last capture_sequence mismatch")
 
     counters = receipt.get("counters")
-    if not isinstance(counters, dict):
-        problems.append("close receipt must carry the final measurement counters")
-    else:
+    if _exact_keys(counters, _COUNTER_KEYS, "close receipt.counters", problems):
         for key in ("captured", "delivered", "persisted"):
-            require(counters.get(key) == len(records), f"close receipt counter {key} does not match the record count")
+            require(_is_int(counters.get(key)) and counters.get(key) == len(records),
+                    f"close receipt counter {key} does not match the record count")
         for key in ("overflow", "wrong_thread", "nesting_mismatch", "incomplete_events"):
-            require(counters.get(key) == 0, f"close receipt counter {key} must be zero for a completed session")
+            require(_is_int(counters.get(key)) and counters.get(key) == 0,
+                    f"close receipt counter {key} must be zero for a completed session")
     health = receipt.get("probe_health")
-    if not isinstance(health, dict):
-        problems.append("close receipt must carry the final probe health")
-    else:
+    if _exact_keys(health, _HEALTH_KEYS, "close receipt.probe_health", problems):
         for key in ("faults", "overflow", "wrong_thread_calls"):
-            require(health.get(key) == 0, f"close receipt probe health {key} must be zero")
-        require(health.get("active_initializers") == 0, "close receipt probe still has an active initializer")
-        require(health.get("queued") == 0, "close receipt probe still has queued records")
+            require(_is_int(health.get(key)) and health.get(key) == 0,
+                    f"close receipt probe health {key} must be zero")
+        require(_is_int(health.get("active_initializers")) and health.get("active_initializers") == 0,
+                "close receipt probe still has an active initializer")
+        require(_is_int(health.get("queued")) and health.get("queued") == 0,
+                "close receipt probe still has queued records")
         require(health.get("healthy") is True, "close receipt probe health is not healthy")
-        require(health.get("captured") == len(records), "close receipt probe captured count does not match the record count")
+        require(_is_int(health.get("captured")) and health.get("captured") == len(records),
+                "close receipt probe captured count does not match the record count")
+
+    persistence = receipt.get("persistence")
+    if _exact_keys(persistence, _PERSISTENCE_KEYS, "close receipt.persistence", problems):
+        require(persistence.get("method") == "flush_close_then_atomic_receipt",
+                "close receipt persistence method mismatch")
+        require(persistence.get("receipt_written_after_close") is True,
+                "close receipt must assert it was written after the events close")
 
 
 def _identity_problems(records: list[dict], capability: dict, receipt: dict | None,
@@ -341,56 +591,24 @@ def _identity_problems(records: list[dict], capability: dict, receipt: dict | No
     return problems
 
 
-def _sequence_problems(records: list[dict]) -> tuple[list[str], dict]:
-    problems: list[str] = []
-    previous: int | None = None
-    previous_index: int | None = None
-    first = last = None
-    for index, record in enumerate(records):
-        sequence = record.get("event", {}).get("capture_sequence")
-        if type(sequence) is not int:
-            continue
-        if first is None:
-            first = sequence
-        last = sequence
-        if previous is not None and sequence <= previous:
-            reason = "duplicated" if sequence == previous else "out of order"
-            problems.append(f"line {index + 1}: capture_sequence {sequence} is {reason} "
-                            f"(after {previous} on line {previous_index + 1})")
-        previous, previous_index = sequence, index
-    gaps = None if first is None else (last - first + 1) - len(records)
-    unique = len({record.get("event", {}).get("capture_sequence") for record in records})
-    return problems, {"first_capture_sequence": first, "last_capture_sequence": last,
-                      "unique_sequences": unique, "gaps": gaps,
-                      "rule": "strictly increasing within one run/session/sequence_domain; gaps allowed, "
-                              "duplicates and decreases are refused"}
-
-
-def _parent_problems(records: list[dict]) -> list[str]:
-    problems: list[str] = []
-    invocations: dict[int, int] = {}
-    for index, record in enumerate(records):
-        invocation = record.get("event", {}).get("invocation")
-        if isinstance(invocation, dict) and type(invocation.get("invocation_id")) is int:
-            invocations[invocation["invocation_id"]] = index
-    for index, record in enumerate(records):
-        invocation = record.get("event", {}).get("invocation")
-        if not isinstance(invocation, dict) or type(invocation.get("depth")) is not int or invocation["depth"] <= 0:
-            continue
-        parent = invocation.get("parent_invocation_id")
-        if type(parent) is int and parent not in invocations:
-            problems.append(f"line {index + 1}: parent invocation {parent} has no event in this session")
-    return problems
+def _display(value) -> str:
+    if isinstance(value, str):
+        return value
+    if _is_int(value):
+        return str(value)
+    return repr(value)
 
 
 def validate(directory: str | Path, *, manifest: dict | None = None,
-             recorder: str | Path | None = None) -> dict:
+             recorder: str | Path | None = None, require_close: bool = True) -> dict:
     """Validate one audit directory and return a JSON-serializable report.
 
-    ``status`` is ``valid``, ``unavailable``, ``disabled`` or ``failed``. A
-    malformed capability/file set raises :class:`LifecycleError` instead of
-    returning a report, because that is a contract error rather than a
-    classification of a trajectory.
+    ``status`` is ``valid``, ``unavailable``, ``disabled``, ``open`` or
+    ``failed``. ``open`` is only returned with ``require_close=False`` when the
+    present records satisfy the contract but the close receipt does not exist
+    yet (a live reader). A malformed capability raises :class:`LifecycleError`
+    instead of returning a report, because that is a contract error rather
+    than a classification of a trajectory.
     """
     directory = Path(directory)
     if manifest is None:
@@ -408,6 +626,7 @@ def validate(directory: str | Path, *, manifest: dict | None = None,
         "schema": VALIDATION_SCHEMA,
         "status": classification,
         "directory": str(directory),
+        "require_close": require_close,
         "capability": {
             "declared": CAPABILITY_KEY in manifest,
             "mode": block.get("mode"),
@@ -422,7 +641,8 @@ def validate(directory: str | Path, *, manifest: dict | None = None,
                     "first_capture_sequence": None, "last_capture_sequence": None,
                     "unique_sequences": None, "gaps": None, "rule": None},
         "close_receipt": {"present": False, "records": None, "sha256": None},
-        "probe_events": {"scanned": False, "fault_events": 0, "closed_unhealthy": False},
+        "probe_events": {"present": False, "scanned": False, "fault_events": 0, "closed_unhealthy": False,
+                         "problems": []},
         "problems": [],
         "claims": {
             "capture_table": "only zombie_initialize_exit is installed",
@@ -461,21 +681,30 @@ def validate(directory: str | Path, *, manifest: dict | None = None,
         report["problems"].append("declared lifecycle recording has no lifecycle-events.jsonl")
         return report
     events_bytes = _read_plain(store, EVENTS_FILE)
-    records, problems = _decode_records(events_bytes)
-    problems += [problem for index, record in enumerate(records) for problem in _check_envelope(record, index, block)]
+    records, problems = _decode_records(events_bytes, allow_partial_tail=not require_close)
+    problems += [problem for index, record in enumerate(records)
+                 for problem in _check_envelope(record, index, block)]
     problems += _identity_problems(records, block, None)
     sequence_problems, sequence_summary = _sequence_problems(records)
     problems += sequence_problems
-    problems += _parent_problems(records)
+    problems += _nesting_problems(records)
 
     report["records"] = {
         "count": len(records),
         "kinds": _kind_counts(records),
-        "identities": sorted({(record.get("run_id"), record.get("branch_id"), record.get("session_id"))
-                              for record in records}, key=repr),
+        "identities": sorted({tuple(_display(record.get(key)) for key in ("run_id", "branch_id", "session_id"))
+                              for record in records}),
         **sequence_summary,
     }
-    report["probe_events"] = _scan_probe_events(store)
+    probe = _scan_probe_events(store)
+    report["probe_events"] = {key: probe[key] for key in ("present", "scanned", "fault_events",
+                                                          "closed_unhealthy", "problems")}
+    if probe["fault_events"]:
+        problems.append(f"audit events record {probe['fault_events']} explicit probe fault(s): "
+                        "the lifecycle capture was unhealthy")
+    if probe["closed_unhealthy"]:
+        problems.append("audit spawn_hook_closed reports an unhealthy probe close")
+    problems += probe["problems"]
 
     manifest_bytes = None
     manifest_path = store.directory / "manifest.json"
@@ -483,34 +712,40 @@ def validate(directory: str | Path, *, manifest: dict | None = None,
         manifest_bytes = manifest_path.read_bytes()
 
     if not receipt_present:
-        report["status"] = "failed"
-        report["problems"] = problems + [
-            "lifecycle close receipt is missing: the events stream was not proven flushed and closed "
-            "(crash, failed write, failed close or an aborted session)"]
+        if require_close:
+            report["status"] = "failed"
+            report["problems"] = problems + [
+                "lifecycle close receipt is missing: the events stream was not proven flushed and closed "
+                "(crash, failed write, failed close or an aborted session)"]
+            return report
+        report["status"] = "failed" if problems else "open"
+        report["problems"] = problems
         return report
     receipt_bytes = _read_plain(store, RECEIPT_FILE)
-    receipt_records, receipt_decode_problems = _decode_records(receipt_bytes)
+    receipt_records, receipt_decode_problems = _decode_records(receipt_bytes, allow_partial_tail=False)
     if receipt_decode_problems:
         problems += [f"close receipt: {problem}" for problem in receipt_decode_problems]
     if len(receipt_records) != 1:
         problems.append(f"close receipt must contain exactly one record, found {len(receipt_records)}")
-        receipt = receipt_records[0] if receipt_records else {}
+        receipt = receipt_records[0] if receipt_records else None
     else:
         receipt = receipt_records[0]
-    report["close_receipt"] = {"present": True, "records": receipt.get("records"),
-                               "sha256": receipt.get("sha256")}
-    _cross_check_receipt(receipt, block, records, events_bytes, manifest_bytes, problems)
-    problems += _identity_problems(records, block, receipt, check_capability=False)
-    problems += _run_identity_bindings(directory, manifest, block, receipt, recorder)
+    report["close_receipt"] = {"present": True, "records": receipt.get("records") if receipt else None,
+                               "sha256": receipt.get("sha256") if receipt else None}
+    if receipt is not None:
+        _cross_check_receipt(receipt, block, records, events_bytes, manifest_bytes, problems)
+        problems += _identity_problems(records, block, receipt, check_capability=False)
+        problems += _run_identity_bindings(directory, manifest, block, receipt, recorder)
     report["problems"] = problems
     report["status"] = "valid" if not problems else "failed"
     return report
 
 
-def _kind_counts(records: list[dict]) -> dict:
+def _kind_counts(records: list[dict]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:
-        kind = record.get("event", {}).get("kind")
+        event = _record_event(record)
+        kind = event.get("kind") if event else None
         if isinstance(kind, str):
             counts[kind] = counts.get(kind, 0) + 1
     return counts
@@ -537,7 +772,8 @@ def _run_identity_bindings(directory: Path, manifest: dict, capability: dict, re
                 problems.append("run manifest run_id does not match the lifecycle close receipt")
             implementation = run_manifest.get("implementation")
             if isinstance(implementation, dict) and isinstance(implementation.get("recorder_sha256"), str):
-                if implementation["recorder_sha256"] != capability.get("build", {}).get("sha256"):
+                declared_build = capability.get("build") if isinstance(capability, dict) else None
+                if not isinstance(declared_build, dict) or implementation["recorder_sha256"] != declared_build.get("sha256"):
                     problems.append("run manifest implementation.recorder_sha256 does not match the "
                                     "declared lifecycle build identity")
     launcher_path = directory.parent / "launcher.json"
@@ -555,6 +791,7 @@ def _run_identity_bindings(directory: Path, manifest: dict, capability: dict, re
             problems.append(f"recorder binary is missing: {path}")
         else:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if digest != capability.get("build", {}).get("sha256"):
+            declared_build = capability.get("build") if isinstance(capability, dict) else None
+            if not isinstance(declared_build, dict) or digest != declared_build.get("sha256"):
                 problems.append("recorder binary does not match the declared lifecycle build identity")
     return problems

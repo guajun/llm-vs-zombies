@@ -10,8 +10,9 @@ runtime or reads a sealed archive's game data: it validates
 ``lifecycle-events.jsonl`` against ``lifecycle-close-receipt.jsonl`` and the
 audit manifest capability.
 
-Exit codes: 0 for valid/unavailable/disabled, 1 for a failed validation, 2 for
-an unreadable contract. ``--json`` prints only the machine-readable report.
+Exit codes: 0 for valid/unavailable/disabled/open, 1 for a failed validation,
+2 for an unreadable contract. ``--json`` prints only the machine-readable
+report.
 """
 from __future__ import annotations
 
