@@ -251,3 +251,19 @@ build 身份；重复的 phase store 原样保留（不做 dedup）；candidate 
 `lifecycle_probes.probe_counters`、`sites` 以及 audit `lifecycle_probes_closed` 事件逐项一致。
 v2 receipt 的 `event_schemas` 同时声明 v1 与 v2；缺关闭事件、payload 不一致或任一故障计数
 非零都判 failed。
+
+## 计数器语义政策（评审修正）
+
+- **良性**：`live_skips` 只是回收 guard 的存活分支，不计入失败。
+- **丢失观测（使完整性/首杀证明失败）**：`read_failed`、`classify_refused`、`inactive_suppressed`、
+  `unmatched_commits`、`pair_mismatch`、`overwritten_pending`、`faults`、`overflow`、`wrong_thread`。
+  它们必须为 0 才会写入 `healthy=true` 的关闭回执；`analyze_capture_facts` 同样拒绝证明。
+- **不丢失的筛选**：离板预览对象（`on_board=false`）照常发布事实，不是读/分类失败。
+- `reader_protected=false` 且 `pending_callbacks=0` 表示 VEH 读取保护句柄已随补丁卸载而释放。
+
+## 形式 schema（评审修正）
+
+`logger/schemas/lifecycle-record.schema.json` 的信封 `event` 现在是 v1/v2 的 `oneOf`；
+`lifecycle-close-receipt.schema.json` 顶层是 `receipt_v1`/`receipt_v2` 的 `oneOf`。
+`tests/test_lifecycle_schemas.py` 用仓库内置的最小 draft-2020-12 子集校验器对原生混合
+v1/v2 产物逐条验证信封与回执，不依赖第三方 `jsonschema`。

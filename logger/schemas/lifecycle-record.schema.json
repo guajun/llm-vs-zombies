@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LLM vs Zombies lifecycle record envelope v1",
+  "title": "LLM vs Zombies lifecycle record envelope (v1 envelope, v1/v2 event union)",
   "$id": "lvz.lifecycle-record.v1",
   "type": "object",
   "required": ["schema", "file_seq", "run_id", "branch_id", "session_id", "sequence_domain", "event"],
@@ -12,7 +12,7 @@
     "branch_id": {"type": "string", "minLength": 1},
     "session_id": {"type": "integer", "minimum": 1},
     "sequence_domain": {"const": "lvz.measurement.capture-sequence"},
-    "event": {"$ref": "#/$defs/event"}
+    "event": {"oneOf": [{"$ref": "#/$defs/event"}, {"$ref": "#/$defs/event_v2"}]}
   },
   "$defs": {
     "event": {
@@ -24,21 +24,7 @@
         "schema": {"const": "lvz.lifecycle-event.v1"},
         "kind": {"const": "zombie_initialized"},
         "capture_sequence": {"type": "integer", "minimum": 1},
-        "version": {
-          "oneOf": [
-            {"type": "null"},
-            {
-              "type": "object",
-              "required": ["epoch", "tick", "revision"],
-              "additionalProperties": false,
-              "properties": {
-                "epoch": {"type": "integer", "minimum": 0},
-                "tick": {"type": "integer", "minimum": 0},
-                "revision": {"type": "integer", "minimum": 0}
-              }
-            }
-          ]
-        },
+        "version": {"$ref": "#/$defs/version"},
         "version_phase": {"enum": ["initialization", "controlled_boundary"]},
         "engine_call_id": {"type": ["integer", "null"], "minimum": 1},
         "invocation": {
@@ -51,16 +37,7 @@
             "parent_invocation_id": {"type": ["integer", "null"], "minimum": 1}
           }
         },
-        "entity": {
-          "type": "object",
-          "required": ["id", "slot", "generation"],
-          "additionalProperties": false,
-          "properties": {
-            "id": {"type": "integer", "minimum": 1},
-            "slot": {"type": "integer", "minimum": 0, "maximum": 65535},
-            "generation": {"type": "integer", "minimum": 0, "maximum": 65535}
-          }
-        },
+        "entity": {"$ref": "#/$defs/entity_v1"},
         "before_after": {
           "type": "object",
           "required": ["before", "after"],
@@ -90,17 +67,187 @@
           }
         },
         "complete": {"const": true}
-      },
-      "allOf": [
-        {
-          "if": {"properties": {"version_phase": {"const": "initialization"}}, "required": ["version_phase"]},
-          "then": {"properties": {"version": {"type": "null"}, "engine_call_id": {"type": "null"}}}
+      }
+    },
+    "event_v2": {
+      "oneOf": [
+        {"$ref": "#/$defs/event_v2_phase"},
+        {"$ref": "#/$defs/event_v2_removal"},
+        {"$ref": "#/$defs/event_v2_candidate"},
+        {"$ref": "#/$defs/event_v2_commit"}
+      ]
+    },
+    "event_v2_phase": {
+      "type": "object",
+      "required": ["schema", "kind", "capture_sequence", "version", "version_phase", "engine_call_id",
+                   "entity", "object", "probe", "phase", "complete"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "lvz.lifecycle-event.v2"},
+        "kind": {"const": "zombie_phase_transition"},
+        "capture_sequence": {"type": "integer", "minimum": 1},
+        "version": {"$ref": "#/$defs/version"},
+        "version_phase": {"enum": ["controlled_boundary", "uncontrolled_update"]},
+        "engine_call_id": {"type": ["integer", "null"], "minimum": 1},
+        "entity": {"$ref": "#/$defs/entity_v2"},
+        "object": {"$ref": "#/$defs/probe_object"},
+        "probe": {"$ref": "#/$defs/probe_declaration"},
+        "phase": {
+          "type": "object",
+          "required": ["site", "before", "after"],
+          "additionalProperties": false,
+          "properties": {
+            "site": {"enum": ["phase-playdeathanim", "phase-applyburn", "phase-mowdown",
+                               "phase-catapult", "phase-zamboni"]},
+            "before": {"type": "integer"},
+            "after": {"type": "integer"}
+          }
         },
+        "complete": {"const": true}
+      }
+    },
+    "event_v2_removal": {
+      "type": "object",
+      "required": ["schema", "kind", "capture_sequence", "version", "version_phase", "engine_call_id",
+                   "entity", "object", "probe", "removal", "complete"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "lvz.lifecycle-event.v2"},
+        "kind": {"const": "zombie_removal_marked"},
+        "capture_sequence": {"type": "integer", "minimum": 1},
+        "version": {"$ref": "#/$defs/version"},
+        "version_phase": {"enum": ["controlled_boundary", "uncontrolled_update"]},
+        "engine_call_id": {"type": ["integer", "null"], "minimum": 1},
+        "entity": {"$ref": "#/$defs/entity_v2"},
+        "object": {"$ref": "#/$defs/probe_object"},
+        "probe": {"$ref": "#/$defs/probe_declaration"},
+        "removal": {
+          "type": "object",
+          "required": ["source", "before", "after"],
+          "additionalProperties": false,
+          "properties": {
+            "source": {"const": "dienoloot_mdead_store"},
+            "before": {"type": "integer"},
+            "after": {"const": 1}
+          }
+        },
+        "complete": {"const": true}
+      }
+    },
+    "event_v2_candidate": {
+      "type": "object",
+      "required": ["schema", "kind", "capture_sequence", "version", "version_phase", "engine_call_id",
+                   "entity", "object", "probe", "recycle", "complete"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "lvz.lifecycle-event.v2"},
+        "kind": {"const": "zombie_slot_recycle_candidate"},
+        "capture_sequence": {"type": "integer", "minimum": 1},
+        "version": {"$ref": "#/$defs/version"},
+        "version_phase": {"enum": ["controlled_boundary", "uncontrolled_update"]},
+        "engine_call_id": {"type": ["integer", "null"], "minimum": 1},
+        "entity": {"$ref": "#/$defs/entity_v2"},
+        "object": {"$ref": "#/$defs/probe_object"},
+        "probe": {"$ref": "#/$defs/probe_declaration"},
+        "recycle": {
+          "type": "object",
+          "required": ["state", "slot", "free_head_before", "count_before"],
+          "additionalProperties": false,
+          "properties": {
+            "state": {"const": "candidate"},
+            "slot": {"type": "integer", "minimum": 0},
+            "free_head_before": {"type": "integer", "minimum": 0},
+            "count_before": {"type": "integer", "minimum": 1}
+          }
+        },
+        "complete": {"const": true}
+      }
+    },
+    "event_v2_commit": {
+      "type": "object",
+      "required": ["schema", "kind", "capture_sequence", "version", "version_phase", "engine_call_id",
+                   "entity", "object", "probe", "recycle", "complete"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "lvz.lifecycle-event.v2"},
+        "kind": {"const": "zombie_slot_recycle_commit"},
+        "capture_sequence": {"type": "integer", "minimum": 1},
+        "version": {"$ref": "#/$defs/version"},
+        "version_phase": {"enum": ["controlled_boundary", "uncontrolled_update"]},
+        "engine_call_id": {"type": ["integer", "null"], "minimum": 1},
+        "entity": {"$ref": "#/$defs/entity_v2"},
+        "object": {"$ref": "#/$defs/probe_object"},
+        "probe": {"$ref": "#/$defs/probe_declaration"},
+        "recycle": {
+          "type": "object",
+          "required": ["state", "slot", "candidate_capture_sequence", "free_head_after", "count_after"],
+          "additionalProperties": false,
+          "properties": {
+            "state": {"const": "committed"},
+            "slot": {"type": "integer", "minimum": 0},
+            "candidate_capture_sequence": {"type": "integer", "minimum": 1},
+            "free_head_after": {"type": "integer", "minimum": 0},
+            "count_after": {"type": "integer", "minimum": 0}
+          }
+        },
+        "complete": {"const": true}
+      }
+    },
+    "version": {
+      "oneOf": [
+        {"type": "null"},
         {
-          "if": {"properties": {"version_phase": {"const": "controlled_boundary"}}, "required": ["version_phase"]},
-          "then": {"properties": {"version": {"type": "object"}}}
+          "type": "object",
+          "required": ["epoch", "tick", "revision"],
+          "additionalProperties": false,
+          "properties": {
+            "epoch": {"type": "integer", "minimum": 0},
+            "tick": {"type": "integer", "minimum": 0},
+            "revision": {"type": "integer", "minimum": 0}
+          }
         }
       ]
+    },
+    "entity_v1": {
+      "type": "object",
+      "required": ["id", "slot", "generation"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "slot": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "generation": {"type": "integer", "minimum": 0, "maximum": 65535}
+      }
+    },
+    "entity_v2": {
+      "type": "object",
+      "required": ["id", "slot", "generation"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "slot": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "generation": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "probe_object": {
+      "type": "object",
+      "required": ["class", "on_board", "wave", "board"],
+      "additionalProperties": false,
+      "properties": {
+        "class": {"const": "zombie"},
+        "on_board": {"type": "boolean"},
+        "wave": {"type": "integer"},
+        "board": {"type": "integer", "minimum": 1}
+      }
+    },
+    "probe_declaration": {
+      "type": "object",
+      "required": ["name", "schema", "sequence_domain"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"const": "zombie-lifecycle-store"},
+        "schema": {"const": "lvz.lifecycle-event.v2"},
+        "sequence_domain": {"const": "lvz.measurement.capture-sequence"}
+      }
     },
     "snapshot": {
       "type": "object",

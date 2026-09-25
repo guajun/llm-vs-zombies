@@ -69,17 +69,9 @@
     }
   ],
   "evaluation_child_mapping": {
-    "note": "Each name is one evaluation suite; run_suite creates these child directories (seed 42, cold_starts=1). They are child runs of a suite, not four separate trajectories.",
     "per_suite": [
-      "<suite>-s42-c0",
-      "<suite>-s42-c1",
-      "<suite>-s42-recovery"
-    ],
-    "kinds": {
-      "<suite>-s42-c0": "source trajectory",
-      "<suite>-s42-c1": "cold replay",
-      "<suite>-s42-recovery": "disconnect recovery probe"
-    }
+      "<suite>-s42-c0"
+    ]
   },
   "comparisons": [
     {
@@ -150,10 +142,10 @@
   "commands": [
     "python tools/issue111_stage_d.py --root . check",
     "python tools/issue111_stage_d.py --root . doctor --require-game",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --skip-build",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --skip-build",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --skip-build",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --skip-build",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --expected-recorder-sha256 7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --expected-recorder-sha256 7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --expected-recorder-sha256 7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --expected-recorder-sha256 7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2",
     "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-off-a",
     "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-on-a",
     "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-off-b",
@@ -186,8 +178,11 @@
     }
   },
   "command_notes": [
-    "Every prepare arm pins both switches: --mode on keeps LVZ_LIFECYCLE_RECORDING=1 in both probe arms and --probes off/on is the real LVZ_LIFECYCLE_PROBES switch.",
-    "The suite has no audit of its own: report/compare read the real child run directories named in evaluation_child_mapping (issue111-d-probe-on-a-s42-c0 etc.).",
-    "Only one game process at a time; run arms sequentially. The runner applies LVZ_LIFECYCLE_PROBES from the prepared metadata, so the ambient environment is not trusted."
-  ]
+    "every prepare arm pins both switches: --mode on keeps LVZ_LIFECYCLE_RECORDING=1 in both probe arms, --probes off/on is the real LVZ_LIFECYCLE_PROBES switch, and --single-cold limits each arm to its one source trajectory (-s42-c0); no extra replay or recovery child exists",
+    "the four prepared arms are exactly OFF A/B and ON A/B; report/compare read the real child run directories named in evaluation_child_mapping",
+    "one game process at a time; the runner applies LVZ_LIFECYCLE_PROBES and single-cold mode from the prepared metadata, so the ambient environment is not trusted",
+    "all four arms pin the same recorder build sha256 (--expected-recorder-sha256); check fails if a child audit declares a different build"
+  ],
+  "single_cold": true,
+  "pinned_recorder_sha256": "7d75aa1e011ad965ab2a0acf1f668b0834d5da08ba0959b83e345b548bd15be2"
 }

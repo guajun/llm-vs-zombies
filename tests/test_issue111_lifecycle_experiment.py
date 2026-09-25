@@ -115,6 +115,28 @@ class ExperimentEntryTests(unittest.TestCase):
         with self.assertRaises(experiment.ExperimentError):
             self.prepare(name="issue111-d-on-a", mode="on")
 
+    def test_single_cold_prepare_locks_exactly_one_trajectory_and_a_build_pin(self):
+        metadata = experiment.prepare(self.root, "issue111-d-probe-on-a", self.plan_path(), "on",
+                                      run_builds=False, probes="on", single_cold=True,
+                                      build_sha256="a" * 64)
+        self.assertTrue(metadata["single_cold"])
+        self.assertEqual(metadata["expected_children"], ["issue111-d-probe-on-a-s42-c0"])
+        self.assertEqual(metadata["expected_recorder_sha256"], "a" * 64)
+        self.assertIn("--single-cold", metadata["launch_command"])
+        with self.assertRaises(experiment.ExperimentError):
+            experiment.prepare(self.root, "issue111-d-probe-on-a", self.plan_path(), "on",
+                               run_builds=False, probes="on", single_cold=True)
+
+    def test_check_rejects_a_child_with_a_different_pinned_build(self):
+        metadata, suite = self._complete_suite()
+        sidecar = experiment.mode_path(self.root, "issue111-d-on-a")
+        doc = json.loads(sidecar.read_text(encoding="utf-8"))
+        doc["expected_recorder_sha256"] = "a" * 64
+        sidecar.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        report = experiment.check(self.root, "issue111-d-on-a")
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("pinned build" in problem for problem in report["problems"]), report["problems"])
+
     # --- run against the real backend ------------------------------------
 
     def test_run_creates_suite_through_real_backend_and_detects_launch_failure(self):

@@ -43,5 +43,9 @@ void LvzProbeSetThreadForTest(uint32_t thread) noexcept;
 void LvzProbeSetActiveForTest(bool active) noexcept;
 void LvzProbeSetVirtualProtectFailureForTest(bool fail) noexcept;
 void LvzProbeSetQueueCapacityForTest(uint32_t capacity) noexcept;
+bool LvzProbeReaderProtectionInstalledForTest() noexcept;
+uint64_t LvzProbeReaderHandlersAddedForTest() noexcept;
+uint64_t LvzProbeReaderHandlersRemovedForTest() noexcept;
+void LvzProbeSetInFlightForTest(uint32_t value) noexcept;
 #endif
 }

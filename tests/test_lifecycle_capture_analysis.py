@@ -10,7 +10,8 @@ from llm_vs_zombies import lifecycle_events  # noqa: E402
 from llm_vs_zombies.lifecycle_report import analyze_capture_facts  # noqa: E402
 
 FULL_COVERAGE = {"receipt_valid": True, "probe_capability": True, "initialization_capture": True,
-                 "full_window": True, "health_clean": True}
+                 "full_window": True, "health_clean": True,
+                 "initial_entity_ids": frozenset({0x00020001, 0x00030001})}
 
 
 def event(kind, sequence, *, entity=0x00020001, site="phase-mowdown", before=0, after=3):
@@ -87,6 +88,15 @@ class CaptureAnalysisTests(unittest.TestCase):
                                        counters={"overflow": 1}, coverage=FULL_COVERAGE)
         self.assertFalse(report["first_kill"]["proven"])
         self.assertIn("overflow", " ".join(report["first_kill"]["reasons"]))
+        for counter in ("read_failed", "classify_refused", "inactive_suppressed"):
+            with self.subTest(counter=counter):
+                report = analyze_capture_facts([event("zombie_phase_transition", 1)],
+                                               counters={counter: 1}, coverage=FULL_COVERAGE)
+                self.assertFalse(report["first_kill"]["proven"])
+                self.assertIn(counter, " ".join(report["first_kill"]["reasons"]))
+        benign = analyze_capture_facts([event("zombie_phase_transition", 1)],
+                                       counters={"live_skips": 3}, coverage=FULL_COVERAGE)
+        self.assertTrue(benign["first_kill"]["proven"], benign["first_kill"]["reasons"])
 
     def test_envelope_records_are_unwrapped(self):
         report = analyze_capture_facts([{"event": event("zombie_phase_transition", 1)}],

@@ -47,9 +47,35 @@ DEATH_PHASE_BY_SITE = {
 }
 DEATH_STAGES = {1: "falling", 2: "ash", 3: "mower_death_stage"}
 NONDEATH_SITES = frozenset({"phase-drop-loot"})
-# Health counters that invalidate first-kill proof for the whole stream.
-BLOCKING_COUNTERS = ("overflow", "wrong_thread", "faults", "refused_recycle", "unmatched_commits",
-                     "pair_mismatch", "overwritten_pending", "incomplete_records")
+# Health counters that invalidate completeness and first-kill proof. live_skips
+# is the expected live guard branch and stays benign; off-board facts are
+# published (not dropped) and are never a read/classification failure.
+BLOCKING_COUNTERS = ("overflow", "wrong_thread", "faults", "unmatched_commits", "pair_mismatch",
+                     "overwritten_pending", "read_failed", "classify_refused", "inactive_suppressed")
+BENIGN_COUNTERS = ("live_skips",)
+
+
+def _attach_predecessor(fact: dict, initialization: dict, initial_entity_ids, event: dict) -> None:
+    """Correlate a captured fact with its initialization/initial residue.
+
+    Only a captured v1 initialization or an entity present at the first
+    sampled boundary is a known predecessor. Anything else stays explicitly
+    unknown so an earlier unobserved removal can never be folded away.
+    """
+    identifier = fact.get("entity")
+    init = initialization.get(identifier)
+    if init is not None:
+        fact["initialization"] = {"capture_sequence": init["capture_sequence"],
+                                  "invocation_id": init["invocation_id"],
+                                  "engine_call_id": init["engine_call_id"]}
+        fact["predecessor"] = "initialization"
+        call = event.get("engine_call_id")
+        if call is not None and init.get("engine_call_id") is not None and call == init["engine_call_id"]:
+            fact["same_call_lifetime"] = True
+    elif identifier in initial_entity_ids:
+        fact["predecessor"] = "initial_residue"
+    else:
+        fact["predecessor"] = "unknown_predecessor"
 
 
 def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
@@ -62,13 +88,30 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
     capability, the initialization capture, a full frozen window and clean
     counters. Missing evidence is never read as clean.
     """
+    coverage = coverage or {}
     events: list[dict] = []
+    initialization: dict[int, dict] = {}
     for record in records:
         event = record.get("event") if isinstance(record, dict) and isinstance(record.get("event"), dict) else record
-        if isinstance(event, dict) and event.get("schema") == lifecycle_events.PROBE_EVENT_SCHEMA:
+        if not isinstance(event, dict):
+            continue
+        if event.get("schema") == lifecycle_events.EVENT_SCHEMA \
+                and event.get("kind") == lifecycle_events.KIND_INITIALIZATION:
+            entity = event.get("entity") if isinstance(event.get("entity"), dict) else {}
+            identifier = entity.get("id")
+            if isinstance(identifier, int):
+                invocation = event.get("invocation") if isinstance(event.get("invocation"), dict) else {}
+                initialization[identifier] = {
+                    "capture_sequence": event.get("capture_sequence"),
+                    "invocation_id": invocation.get("invocation_id"),
+                    "engine_call_id": event.get("engine_call_id"),
+                }
+        elif event.get("schema") == lifecycle_events.PROBE_EVENT_SCHEMA:
             events.append(event)
     entities: dict[int, dict] = {}
     facts: list[dict] = []
+    initial_entity_ids = coverage.get("initial_entity_ids") if isinstance(coverage, dict) else None
+    initial_entity_ids = initial_entity_ids if isinstance(initial_entity_ids, (set, frozenset)) else frozenset()
 
     def entity(identifier: int) -> dict:
         return entities.setdefault(identifier, {"id": identifier, "confirmed_death_stage": False,
@@ -94,6 +137,7 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
                 transition["class"] = "confirmed_death_stage"
                 transition["stage"] = DEATH_STAGES.get(expected)
                 state["confirmed_death_stage"] = True
+                _attach_predecessor(transition, initialization, initial_entity_ids, event)
             elif site in NONDEATH_SITES:
                 transition["class"] = "nondeath"
             else:
@@ -105,6 +149,7 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
                        "before": event.get("removal", {}).get("before"),
                        "after": event.get("removal", {}).get("after")}
             state["removal"] = True
+            _attach_predecessor(removal, initialization, initial_entity_ids, event)
             if state["confirmed_death_stage"]:
                 removal["class"] = "removal_after_death"
             else:
@@ -122,8 +167,10 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
 
     confirmed = [fact for fact in facts if fact.get("class") == "confirmed_death_stage"]
     unknown = [fact for fact in facts if fact.get("class") in ("removal_unclassified", "phase_unclassified")]
+    unknown_predecessors = [fact for fact in confirmed if fact.get("predecessor") == "unknown_predecessor"]
+    unknown += unknown_predecessors
+    candidates = [fact for fact in confirmed if fact.get("predecessor") != "unknown_predecessor"]
     counters = counters or {}
-    coverage = coverage or {}
     unhealthy = {name: counters.get(name) for name in BLOCKING_COUNTERS
                  if isinstance(counters.get(name), int) and counters.get(name) > 0}
     reasons: list[str] = []
@@ -133,7 +180,8 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
         reasons.append("no valid close receipt proves the capture stream was complete")
     if not coverage.get("probe_capability"):
         reasons.append("the exact-store probe capability is not proven installed and healthy")
-    if not coverage.get("initialization_capture"):
+    initialization_capture = bool(coverage.get("initialization_capture")) or bool(initialization)
+    if not initialization_capture:
         reasons.append("the initialization capture is not proven installed")
     if not coverage.get("full_window"):
         reasons.append("a full frozen window with both endpoints is not proven")
@@ -142,15 +190,18 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
     if not confirmed:
         reasons.append("no capture fact shows a death-confirming phase store")
     else:
-        first = confirmed[0]
-        blocking = [fact for fact in unknown if fact["capture_sequence"] < first["capture_sequence"]]
-        if blocking:
-            reasons.append("an earlier unclassified fact blocks first-kill proof")
+        first = candidates[0] if candidates else None
+        if unknown_predecessors:
+            reasons.append("a death fact has no captured initialization or initial-residue predecessor")
+        if first is not None:
+            blocking = [fact for fact in unknown if fact["capture_sequence"] < first["capture_sequence"]]
+            if blocking:
+                reasons.append("an earlier unclassified fact blocks first-kill proof")
     if unhealthy:
         reasons.append("probe health counters are not clean: " + ", ".join(sorted(unhealthy)))
-    prerequisites = all(coverage.get(key) is True for key in
-                        ("receipt_valid", "probe_capability", "initialization_capture", "full_window")) \
-        and coverage.get("health_clean") is True
+    prerequisites = (coverage.get("receipt_valid") is True and coverage.get("probe_capability") is True
+                     and initialization_capture and coverage.get("full_window") is True
+                     and coverage.get("health_clean") is True)
     proven = bool(first) and not blocking and not unhealthy and prerequisites
     return {
         "facts": facts,
@@ -159,15 +210,20 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
             "fact_count": len(facts),
             "confirmed_death_stages": len(confirmed),
             "unclassified_facts": len(unknown),
+            "initialization_facts": len(initialization),
+            "same_call_lifetimes": sum(1 for fact in facts if fact.get("same_call_lifetime")),
+            "unknown_predecessors": len(unknown_predecessors),
             "removals": sum(1 for fact in facts if fact["kind"] == "zombie_removal_marked"),
             "recycle_candidates": sum(1 for fact in facts if fact["kind"] == "zombie_slot_recycle_candidate"),
             "recycle_commits": sum(1 for fact in facts if fact["kind"] == "zombie_slot_recycle_commit"),
         },
         "first_kill": {
             "proven": proven,
-            "prerequisites": {key: bool(coverage.get(key)) for key in
-                              ("receipt_valid", "probe_capability", "initialization_capture", "full_window",
-                               "health_clean")},
+            "prerequisites": {"receipt_valid": bool(coverage.get("receipt_valid")),
+                              "probe_capability": bool(coverage.get("probe_capability")),
+                              "initialization_capture": initialization_capture,
+                              "full_window": bool(coverage.get("full_window")),
+                              "health_clean": bool(coverage.get("health_clean"))},
             "entity": None if not (proven and first) else first["entity"],
             "capture_sequence": None if not (proven and first) else first["capture_sequence"],
             "blocking_facts": [{"capture_sequence": fact["capture_sequence"], "class": fact["class"],
@@ -439,8 +495,59 @@ def load_capture_facts(audit_directory: str | Path) -> list[dict]:
     return lifecycle_events.load_records(directory)
 
 
+def _full_window_evidence(run: Path, audit_directory: Path, snapshots: list[dict],
+                         plan: str | Path | None) -> tuple[bool, list[str]]:
+    """Prove the frozen plan, the executed endpoint and the audited tail agree.
+
+    A constant is never flipped here: every clause reads real evidence, and a
+    missing binding stays an explicit blocker.
+    """
+    if plan is None:
+        return False, ["no frozen plan was supplied to bind the window"]
+    plan_path = Path(plan)
+    if not plan_path.is_file():
+        return False, [f"frozen plan is unreadable: {plan_path}"]
+    try:
+        plan_doc = json.loads(plan_path.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, [f"frozen plan is unreadable: {exc}"]
+    child = run if (run / "audit" / "manifest.json").is_file() else audit_directory
+    suite_name = child.name.rsplit("-s", 1)[0] if "-s" in child.name else child.name
+    suite_plan = child.parent / suite_name / "plan.json"
+    if not suite_plan.is_file():
+        return False, [f"suite plan copy is missing: {suite_plan}"]
+    try:
+        suite_doc = json.loads(suite_plan.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, [f"suite plan copy is unreadable: {exc}"]
+    if suite_doc != plan_doc:
+        return False, ["the suite plan copy does not match the frozen plan"]
+    endpoint = child / "experiment-end.json"
+    if not endpoint.is_file():
+        return False, ["executed endpoint evidence is missing"]
+    try:
+        ending = json.loads(endpoint.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, [f"executed endpoint is unreadable: {exc}"]
+    final_version = (ending.get("final_observation") or {}).get("version") \
+        if isinstance(ending.get("final_observation"), dict) else None
+    if not isinstance(final_version, dict):
+        return False, ["executed endpoint has no boundary version"]
+    if not snapshots:
+        return False, ["no audited boundary exists"]
+    last_version = (snapshots[-1].get("coordinate") or {}).get("version")
+    if last_version != final_version:
+        return False, ["the audited boundary stream does not end at the executed endpoint"]
+    stop = plan_doc.get("stop_when")
+    if isinstance(stop, dict) and "wave_at_least" in stop:
+        wave = ending.get("maximum_wave")
+        if not isinstance(wave, int) or wave < stop["wave_at_least"]:
+            return False, ["the executed endpoint does not satisfy the frozen stop condition"]
+    return True, []
+
+
 def report_for_run(run: str | Path, *, require_closed: bool = True,
-                   lifecycle: bool = True) -> dict:
+                   lifecycle: bool = True, plan: str | Path | None = None) -> dict:
     """Read a run (or audit) directory and return the full report."""
     run = Path(run)
     audit_directory = run / "audit" if (run / "audit" / "manifest.json").is_file() else run
@@ -472,21 +579,36 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
         probes_enabled = isinstance(probes_block, dict) and probes_block.get("enabled") is True
         probes_healthy = isinstance(probes_block, dict) and probes_block.get("healthy") is True \
             and probes_block.get("pending_candidate") is False
+        probe_counters = (probes_block or {}).get("probe_counters") if probes_enabled else None
+        if isinstance(probe_counters, dict):
+            probes_healthy = probes_healthy and not any(
+                isinstance(probe_counters.get(name), int) and probe_counters.get(name) > 0
+                for name in BLOCKING_COUNTERS)
         receipt = lifecycle_report.get("close_receipt") or {}
         try:
             capture_records = load_capture_facts(audit_directory)
         except (ReportError, OSError):
             capture_records = []
+        full_window, window_problems = _full_window_evidence(run, audit_directory, snapshots, plan)
+        initial_entity_ids = set()
+        if snapshots:
+            initial_entity_ids = {entry.get("id") for entry in (snapshots[0].get("zombies") or {}).values()
+                                  if isinstance(entry, dict) and isinstance(entry.get("id"), int)}
+        report["coverage"]["frozen_plan"] = str(plan) if plan is not None else None
+        report["coverage"]["full_window_problems"] = window_problems
         report["capture_facts"] = analyze_capture_facts(
             capture_records,
-            counters=(probes_block or {}).get("probe_counters") if probes_enabled else None,
+            counters=probe_counters,
             coverage={
                 "receipt_valid": lifecycle_report.get("status") == "valid" and receipt.get("present") is True,
                 "probe_capability": probes_enabled,
                 "initialization_capture": spawn_hook.get("installed") is True,
-                "full_window": False,
+                "full_window": full_window,
                 "health_clean": probes_healthy,
+                "initial_entity_ids": frozenset(initial_entity_ids),
             })
+        if window_problems:
+            report["coverage"]["full_window_limit"] = window_problems
         capture_first_kill = report["capture_facts"]["first_kill"]
         report["first_kill"] = {
             "proven": capture_first_kill["proven"],
@@ -514,6 +636,7 @@ def markdown_report(report: dict) -> str:
              f"- unknown removals: count={unknown.get('count')}",
              f"- first kill proven: {first_kill.get('proven')}",
              f"- capture facts: {json.dumps((report.get('capture_facts') or {}).get('summary'), sort_keys=True)}",
+             f"- full window problems: {json.dumps((report.get('coverage') or {}).get('full_window_problems'), sort_keys=True)}",
              f"- capture level: {json.dumps(report.get('capture_level'), ensure_ascii=False, sort_keys=True)}",
              f"- lifecycle: {json.dumps(report.get('lifecycle'), ensure_ascii=False, sort_keys=True)}", ""]
     if report.get("problems"):

@@ -106,16 +106,40 @@ LONG CALLBACK ProbeVectoredHandler(PEXCEPTION_POINTERS info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+void* readerHandler = nullptr;
+std::atomic<uint64_t> readerHandlersAdded{0}, readerHandlersRemoved{0};
+std::atomic<uint32_t> inFlightCallbacks{0};
+std::atomic<uint32_t> inFlightForTest{0};
+
 bool ProtectReaderInstalled() noexcept {
-    static std::atomic<bool> installed{false};
-    static std::atomic<bool> attempted{false};
-    if (installed.load()) return true;
-    if (!attempted.exchange(true)) {
-        if (AddVectoredExceptionHandler(1, ProbeVectoredHandler))
-            installed.store(true);
-    }
-    return installed.load();
+    if (readerHandler) return true;
+    void* handler = AddVectoredExceptionHandler(1, ProbeVectoredHandler);
+    if (!handler) return false;
+    readerHandler = handler;
+    readerHandlersAdded.fetch_add(1);
+    return true;
 }
+
+bool ReaderProtectionInstalled() noexcept { return readerHandler != nullptr; }
+
+uint32_t InFlightCount() noexcept { return inFlightCallbacks.load() + inFlightForTest.load(); }
+
+bool ReleaseReaderProtection() noexcept {
+    if (!readerHandler) return true;
+    if (LifecycleProbesInstalled()) return false;
+    if (InFlightCount() != 0) return false;
+    if (!RemoveVectoredExceptionHandler(readerHandler)) return false;
+    readerHandler = nullptr;
+    readerHandlersRemoved.fetch_add(1);
+    return true;
+}
+
+struct InFlightGuard {
+    InFlightGuard() noexcept { inFlightCallbacks.fetch_add(1); }
+    ~InFlightGuard() noexcept { inFlightCallbacks.fetch_sub(1); }
+    InFlightGuard(const InFlightGuard&) = delete;
+    InFlightGuard& operator=(const InFlightGuard&) = delete;
+};
 
 inline bool SafeRead8(uintptr_t address, uint8_t& out) noexcept {
     uint32_t value = 0;
@@ -471,6 +495,8 @@ void ResetState() {
     counterPairMismatch = counterOverwrittenPending = counterFaults = 0;
     queueCapacityOverride.store(0);
     virtualProtectFailureForTest.store(0);
+    inFlightForTest.store(0);
+    everInstalled = false;
 }
 
 void PrepareTable() {
@@ -587,6 +613,7 @@ std::string RestoreFailure(const std::string& first) {
 
 extern "C" void __cdecl LvzProbeBeforePhase(uint32_t site, uint32_t zombie, uint32_t address) noexcept {
     LastErrorGuard guard;
+    InFlightGuard flight;
     if (!AcceptsObservation()) {
         tlsCapture = TlsCapture{};
         return;
@@ -629,6 +656,7 @@ extern "C" void __cdecl LvzProbeBeforePhase(uint32_t site, uint32_t zombie, uint
 
 extern "C" void __cdecl LvzProbeAfterPhase(uint32_t site, uint32_t zombie, uint32_t address) noexcept {
     LastErrorGuard guard;
+    InFlightGuard flight;
     if (!tlsCapture.valid || tlsCapture.site != site || tlsCapture.zombie != zombie
         || tlsCapture.target != address) {
         tlsCapture = TlsCapture{};
@@ -675,6 +703,7 @@ extern "C" void __cdecl LvzProbeAfterPhase(uint32_t site, uint32_t zombie, uint3
 
 extern "C" void __cdecl LvzProbeRecycleGuard(uint32_t zombie, uint32_t deadBranch) noexcept {
     LastErrorGuard guard;
+    InFlightGuard flight;
     if (!AcceptsObservation()) return;
     if (!deadBranch) {
         counterLiveSkips.fetch_add(1);
@@ -713,6 +742,7 @@ extern "C" void __cdecl LvzProbeRecycleGuard(uint32_t zombie, uint32_t deadBranc
 
 extern "C" void __cdecl LvzProbeRecycleCommit(uint32_t zombie, uint32_t board) noexcept {
     LastErrorGuard guard;
+    InFlightGuard flight;
     if (!AcceptsObservation()) return;
     if (!recyclePending.valid || recyclePending.zombie != zombie || recyclePending.board != board) {
         counterUnmatchedCommits.fetch_add(1);
@@ -779,6 +809,7 @@ bool InstallLifecycleProbes(std::string& error) {
         error = "Cannot install the probe fault-protection handler";
         return false;
     }
+    gameThread = GetCurrentThreadId();
     PrepareTable();
     ResetState();
     for (size_t index = 0; index < kSiteCount; ++index) {
@@ -791,6 +822,8 @@ bool InstallLifecycleProbes(std::string& error) {
             }
             if (!rollbackError.empty())
                 error = RestoreFailure(error + "; " + rollbackError);
+            if (!ReleaseReaderProtection() && rollbackError.empty())
+                error = RestoreFailure(error + "; reader protection could not be released");
             return false;
         }
     }
@@ -819,6 +852,7 @@ bool InstallLifecycleProbesForTest(const uintptr_t targets[8], const uintptr_t c
         error = "Cannot install the probe fault-protection handler";
         return false;
     }
+    gameThread = GetCurrentThreadId();
     for (size_t i = 0; i < kSiteCount; ++i) {
         target[i] = targets[i];
         continuation[i] = continuations[i];
@@ -835,6 +869,8 @@ bool InstallLifecycleProbesForTest(const uintptr_t targets[8], const uintptr_t c
             }
             if (!rollbackError.empty())
                 error = RestoreFailure(error + "; " + rollbackError);
+            if (!ReleaseReaderProtection() && rollbackError.empty())
+                error = RestoreFailure(error + "; reader protection could not be released");
             return false;
         }
     }
@@ -846,10 +882,15 @@ bool InstallLifecycleProbesForTest(const uintptr_t targets[8], const uintptr_t c
     error.clear();
     return true;
 }
+
+bool LvzProbeReaderProtectionInstalledForTest() noexcept { return ReaderProtectionInstalled(); }
+uint64_t LvzProbeReaderHandlersAddedForTest() noexcept { return readerHandlersAdded.load(); }
+uint64_t LvzProbeReaderHandlersRemovedForTest() noexcept { return readerHandlersRemoved.load(); }
+void LvzProbeSetInFlightForTest(uint32_t value) noexcept { inFlightForTest.store(value); }
 #endif
 
 bool RemoveLifecycleProbes(std::string& error) {
-    if (!LifecycleProbesInstalled()) {
+    if (!LifecycleProbesInstalled() && !ReaderProtectionInstalled()) {
         error.clear();
         return true;
     }
@@ -859,6 +900,10 @@ bool RemoveLifecycleProbes(std::string& error) {
     }
     if (recyclePending.valid) {
         error = "Recycle candidate is pending completion; keep runtime DLL loaded";
+        return false;
+    }
+    if (InFlightCount() != 0) {
+        error = "Probe callback is still in flight; keep runtime DLL loaded";
         return false;
     }
     for (size_t index = 0; index < kSiteCount; ++index) {
@@ -876,6 +921,10 @@ bool RemoveLifecycleProbes(std::string& error) {
     }
     if (!failure.empty()) {
         error = RestoreFailure(failure);
+        return false;
+    }
+    if (!ReleaseReaderProtection()) {
+        error = RestoreFailure("reader protection handler could not be released");
         return false;
     }
     error.clear();
@@ -909,11 +958,17 @@ Json LifecycleProbeStatus() {
         if (siteState[index] == kSiteOwned) patchedSites.push_back(kSites[index].id);
     }
     const bool installed = LifecycleProbesInstalled();
+    // Policy: live_skips is the expected live guard branch and is benign.
+    // read_failed/classify_refused/inactive_suppressed are lost observations
+    // and invalidate completeness; everything else is a fault.
     const bool healthy = everInstalled && counterFaults.load() == 0 && counterOverflow.load() == 0
-        && counterWrongThread.load() == 0 && counterUnmatchedCommits.load() == 0
-        && counterPairMismatch.load() == 0 && counterOverwrittenPending.load() == 0
-        && !recyclePending.valid;
+        && counterWrongThread.load() == 0 && counterInactive.load() == 0
+        && counterClassifyRefused.load() == 0 && counterReadFailed.load() == 0
+        && counterUnmatchedCommits.load() == 0 && counterPairMismatch.load() == 0
+        && counterOverwrittenPending.load() == 0 && !recyclePending.valid;
     return {{"installed", installed},
+            {"reader_protected", ReaderProtectionInstalled()},
+            {"pending_callbacks", InFlightCount()},
             {"active", captureActive.load()},
             {"healthy", healthy},
             {"pending_candidate", recyclePending.valid},
@@ -923,6 +978,7 @@ Json LifecycleProbeStatus() {
 }
 
 Json DrainLifecycleProbeBatch() {
+    if (!everInstalled) return Json::array();
     if (GetCurrentThreadId() != owningThread) {
         counterWrongThread.fetch_add(1);
         measurement::Host().OnWrongThread();

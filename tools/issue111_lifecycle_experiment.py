@@ -85,21 +85,26 @@ def seal_path(root: Path, name: str) -> Path:
     return run_directory(root, name).with_suffix(".lifecycle-seal.json")
 
 
-def expected_children(name: str, plan) -> list[str]:
+def expected_children(name: str, plan, single_cold: bool = False) -> list[str]:
     """The child directories ``evaluation.run_suite`` creates for this plan."""
     children = []
     for seed in plan.seeds:
-        for index in range(max(2, plan.cold_starts)):
+        indexes = [0] if single_cold else list(range(max(2, plan.cold_starts)))
+        for index in indexes:
             children.append(f"{name}-s{seed}-c{index}")
-        children.append(f"{name}-s{seed}-recovery")
+        if not single_cold:
+            children.append(f"{name}-s{seed}-recovery")
     return children
 
 
-def launch_command(root: Path, name: str, plan_path: Path, *, run_builds: bool) -> list[str]:
+def launch_command(root: Path, name: str, plan_path: Path, *, run_builds: bool,
+                   single_cold: bool = False) -> list[str]:
     command = [sys.executable, "-m", "llm_vs_zombies.evaluation", "run", str(plan_path),
                "--root", str(root), "--output", str(run_directory(root, name))]
     if not run_builds:
         command.append("--skip-build")
+    if single_cold:
+        command.append("--single-cold")
     return command
 
 
@@ -121,7 +126,8 @@ def plan_abspath(root: Path, metadata: dict) -> Path:
 
 
 def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = True,
-            probes: str | None = None) -> dict:
+            probes: str | None = None, single_cold: bool = False,
+            build_sha256: str | None = None) -> dict:
     """Lock plan/root/mode/probe/child identities without creating the suite output."""
     root = Path(root).resolve()
     if mode not in MODE_VALUES:
@@ -130,13 +136,15 @@ def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = 
         raise ExperimentError("probes must be off, on or omitted")
     if probes == "on" and mode != "on":
         raise ExperimentError("the probe arm requires lifecycle recording to stay on")
+    if build_sha256 is not None and not _valid_sha256(build_sha256):
+        raise ExperimentError("expected recorder build must be a lowercase sha256")
     plan_path = Path(plan).resolve()
     parsed = _load_plan(plan_path)
     suite = run_directory(root, name)
     sidecar = mode_path(root, name)
     if suite.exists():
         raise ExperimentError(f"suite output already exists; create a fresh run: {suite}")
-    for child in expected_children(name, parsed):
+    for child in expected_children(name, parsed, single_cold):
         candidate = root / "experiments" / "runs" / child
         if candidate.exists():
             raise ExperimentError(f"expected child run already exists: {candidate}")
@@ -156,9 +164,12 @@ def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = 
             "normalized_sha256": _plan_identity(parsed),
         },
         "run_builds": bool(run_builds),
+        "single_cold": bool(single_cold),
+        "expected_recorder_sha256": build_sha256,
         "suite": str(suite),
-        "expected_children": expected_children(name, parsed),
-        "launch_command": launch_command(root, name, plan_path, run_builds=run_builds),
+        "expected_children": expected_children(name, parsed, single_cold),
+        "launch_command": launch_command(root, name, plan_path, run_builds=run_builds,
+                                         single_cold=single_cold),
     }
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     sidecar.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -199,6 +210,13 @@ def _read_prepared(root: Path, name: str) -> dict:
     if _plan_identity(parsed) != metadata["plan"]["normalized_sha256"]:
         raise ExperimentError("evaluation plan normalized identity changed since prepare")
     expected = expected_children(name, parsed)
+    pin = metadata.get("expected_recorder_sha256")
+    if pin is not None and not _valid_sha256(pin):
+        raise ExperimentError("lifecycle mode file has a malformed recorder build pin")
+    single_cold = metadata.get("single_cold", False)
+    if type(single_cold) is not bool:
+        raise ExperimentError("lifecycle mode file has a malformed single_cold flag")
+    expected = expected_children(name, parsed, single_cold)
     if metadata.get("expected_children") != expected:
         raise ExperimentError("prepared child-run list does not match the validated plan")
     if Path(metadata.get("suite", "")).resolve() != run_directory(root, name).resolve():
@@ -290,7 +308,8 @@ def run_experiment(root: Path, name: str, *, suite_runner=None,
         runner = suite_runner
         if runner is None:
             def runner():
-                return evaluation.run_suite(root, plan, suite, run_builds=metadata["run_builds"])
+                return evaluation.run_suite(root, plan, suite, run_builds=metadata["run_builds"],
+                                            single_cold=metadata.get("single_cold", False))
         return runner()
     finally:
         if previous is None:
@@ -309,7 +328,8 @@ def _valid_sha256(value) -> bool:
 
 
 def _child_facts(root: Path, name: str, mode: str, child: str,
-                 probe_mode: str | None = None) -> tuple[dict | None, list[str]]:
+                 probe_mode: str | None = None,
+                 expected_build: str | None = None) -> tuple[dict | None, list[str]]:
     from llm_vs_zombies.audit_compare import AuditLog, EvidenceError
     directory = root / "experiments" / "runs" / child
     problems: list[str] = []
@@ -334,6 +354,8 @@ def _child_facts(root: Path, name: str, mode: str, child: str,
         problems.append(f"{child}: run manifest has no well-formed recorder_sha256")
     else:
         facts["build"] = build
+        if expected_build is not None and build != expected_build:
+            problems.append(f"{child}: recorder build does not match the pinned build")
     audit = directory / "audit"
     if not (audit / "manifest.json").is_file():
         return facts, problems + [f"{child}: audit/manifest.json is missing"]
@@ -467,7 +489,9 @@ def check(root: Path, name: str) -> dict:
     children: list[dict] = []
     builds: set[str] = set()
     for child in metadata["expected_children"]:
-        facts, child_problems = _child_facts(root, name, metadata["mode"], child)
+        facts, child_problems = _child_facts(root, name, metadata["mode"], child,
+                                             (metadata.get("probes") or {}).get("mode"),
+                                             metadata.get("expected_recorder_sha256"))
         problems.extend(child_problems)
         if facts is not None:
             if facts.get("build"):
@@ -578,6 +602,10 @@ def main(argv: list[str] | None = None) -> int:
     prepare_parser.add_argument("--mode", choices=sorted(MODE_VALUES), required=True)
     prepare_parser.add_argument("--probes", choices=sorted(PROBES_VALUES), default=None,
                                 help="explicit same-build probe arm (off/on); omitted keeps the old adapter-only arm")
+    prepare_parser.add_argument("--single-cold", action="store_true",
+                                help="one source cold start per arm; no extra replay or recovery child")
+    prepare_parser.add_argument("--expected-recorder-sha256", default=None,
+                                help="pin the recorder build every child audit must declare")
     prepare_parser.add_argument("--skip-build", action="store_true",
                                 help="record that the existing build is reused; never implicit")
     run_parser = sub.add_parser("run", help="run the real evaluation suite with the mode environment")
@@ -592,7 +620,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "prepare":
             report = prepare(args.root, args.name, args.plan, args.mode, run_builds=not args.skip_build,
-                             probes=args.probes)
+                             probes=args.probes, single_cold=args.single_cold,
+                             build_sha256=args.expected_recorder_sha256)
         elif args.command == "run":
             report = run_experiment(args.root, args.name)
         elif args.command == "check":

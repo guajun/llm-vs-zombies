@@ -210,7 +210,10 @@ void DrainAndCheckSpawns() {
         auto batch=DrainSpawnBatch();
         // One drain per probe per boundary; merge both lifecycle projections by
         // their shared capture_sequence so the recorder sees the real order.
-        auto probes=DrainLifecycleProbeBatch();
+        // The probe drain must never run when no probe was installed (off or
+        // unset): DrainLifecycleProbeBatch itself is safe then, and the gate
+        // keeps a poisoned wrong-thread counter out of the baseline.
+        Json probes=probesInstalled?DrainLifecycleProbeBatch():Json::array();
         for(auto& spawn:batch.legacy) {
             const auto& boundary=spawn.at("boundary");
             const bool controlled=boundary.is_object();

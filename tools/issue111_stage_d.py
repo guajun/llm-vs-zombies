@@ -96,17 +96,27 @@ def check(doc: dict, root: Path) -> list[str]:
         if not isinstance(switch.get("limitations"), list) or not switch["limitations"]:
             problems.append("mode_switch.limitations must state what the probe switch cannot measure")
 
+    single_cold = doc.get("single_cold") is True
     mapping = doc.get("evaluation_child_mapping")
     if not isinstance(mapping, dict) or not isinstance(mapping.get("per_suite"), list) or not mapping["per_suite"]:
         problems.append("evaluation_child_mapping.per_suite must enumerate run_suite child directories")
     elif frozen.get("seeds"):
         expected = []
         for seed in frozen["seeds"]:
-            for index in range(max(2, frozen.get("cold_starts", 1))):
-                expected.append(f"<suite>-s{seed}-c{index}")
-            expected.append(f"<suite>-s{seed}-recovery")
+            if single_cold:
+                expected.append(f"<suite>-s{seed}-c0")
+            else:
+                for index in range(max(2, frozen.get("cold_starts", 1))):
+                    expected.append(f"<suite>-s{seed}-c{index}")
+                expected.append(f"<suite>-s{seed}-recovery")
         if sorted(mapping["per_suite"]) != sorted(expected):
             problems.append("evaluation_child_mapping.per_suite does not match the frozen plan seeds/cold_starts")
+        if single_cold and len(mapping["per_suite"]) != len(frozen["seeds"]):
+            problems.append("single_cold child mapping must contain exactly one trajectory per seed")
+    if single_cold:
+        probe_modes = [run.get("probe_mode") for run in (doc.get("runs") or []) if isinstance(run, dict)]
+        if sorted(mode for mode in probe_modes if mode in ("off", "on")) != ["off", "off", "on", "on"]:
+            problems.append("single_cold plan must declare probe_mode off/off/on/on across exactly four arms")
 
     runs = doc.get("runs")
     if not isinstance(runs, list) or not runs:

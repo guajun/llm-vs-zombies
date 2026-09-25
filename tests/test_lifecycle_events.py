@@ -758,9 +758,15 @@ class SchemaDocumentTests(unittest.TestCase):
                          lifecycle_events.KIND_INITIALIZATION)
         self.assertEqual(record_schema["$defs"]["event"]["properties"]["classification"]["properties"]["class"]["const"],
                          "initialization")
-        self.assertEqual(receipt_schema["properties"]["schema"]["const"], lifecycle_events.RECEIPT_SCHEMA)
+        self.assertEqual(receipt_schema["$defs"]["receipt_v1"]["properties"]["schema"]["const"],
+                         lifecycle_events.RECEIPT_SCHEMA)
+        self.assertEqual(receipt_schema["$defs"]["receipt_v2"]["properties"]["schema"]["const"],
+                         lifecycle_events.PROBE_RECEIPT_SCHEMA)
+        self.assertEqual(receipt_schema["oneOf"],
+                         [{"$ref": "#/$defs/receipt_v1"}, {"$ref": "#/$defs/receipt_v2"}])
         self.assertFalse(record_schema["additionalProperties"])
-        self.assertFalse(receipt_schema["additionalProperties"])
+        self.assertFalse(receipt_schema["$defs"]["receipt_v1"]["additionalProperties"])
+        self.assertFalse(receipt_schema["$defs"]["receipt_v2"]["additionalProperties"])
         with tempfile.TemporaryDirectory() as temp:
             fixture = Fixture(Path(temp) / "run")
             envelope = fixture.items[0]
@@ -771,8 +777,9 @@ class SchemaDocumentTests(unittest.TestCase):
             self.assertEqual(set(event), set(event_schema["properties"]))
             self.assertEqual(set(event_schema["required"]), set(event_schema["properties"]))
             self.assertEqual(set(event["before_after"]["after"]), set(record_schema["$defs"]["snapshot"]["properties"]))
-            self.assertEqual(set(fixture.receipt), set(receipt_schema["properties"]))
-            self.assertEqual(set(receipt_schema["required"]), set(receipt_schema["properties"]))
+            receipt_v1 = receipt_schema["$defs"]["receipt_v1"]
+            self.assertEqual(set(fixture.receipt), set(receipt_v1["properties"]))
+            self.assertEqual(set(receipt_v1["required"]), set(receipt_v1["properties"]))
 
 
 class CliTests(unittest.TestCase):

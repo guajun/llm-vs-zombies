@@ -222,6 +222,14 @@ RunResult RunOne(uintptr_t function, Machine& work, size_t slot, uint32_t esi, u
     } else if (variation == 3) {
         const uint32_t freeSlot = 0;
         std::memcpy(work.zombie(slot) + 0x158, &freeSlot, 4);
+    } else if (variation == 4) {
+        std::memcpy(work.zombie(slot) + 4, &esi, 4);
+    } else if (variation == 5) {
+        // Fake board at the caller address; re-anchor its pool block to this
+        // copy and point the zombie at it after relocation.
+        const uint32_t localBlock = U32(work.pool);
+        std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(esi) + 0x90), &localBlock, 4);
+        std::memcpy(work.zombie(slot) + 4, &esi, 4);
     }
     const uint32_t edi = U32(work.zombie(slot));
     const uint32_t esiValue = (esi == kBoardMarker) ? U32(work.board) : esi;
@@ -321,6 +329,10 @@ int RunTests() {
     using lvz::determinism::InstallLifecycleProbesForTest;
     using lvz::determinism::LifecycleProbesInstalled;
     using lvz::determinism::LifecycleProbeStatus;
+    using lvz::determinism::LvzProbeReaderHandlersAddedForTest;
+    using lvz::determinism::LvzProbeReaderHandlersRemovedForTest;
+    using lvz::determinism::LvzProbeReaderProtectionInstalledForTest;
+    using lvz::determinism::LvzProbeSetInFlightForTest;
     using lvz::determinism::LvzProbeSetActiveForTest;
     using lvz::determinism::LvzProbeSetQueueCapacityForTest;
     using lvz::determinism::LvzProbeSetThreadForTest;
@@ -332,8 +344,19 @@ int RunTests() {
     Check(Host().Open(GetCurrentThreadId(), &error), "open measurement session");
     Pages baseline = MakePages(true);
     Pages patched = MakePages(false);
+    {
+        const auto offBatch = DrainLifecycleProbeBatch();
+        const auto offStatus = LifecycleProbeStatus();
+        Check(offBatch.empty(), "never-installed drain must return no facts");
+        Check(!offStatus.at("installed").get<bool>() && !offStatus.at("reader_protected").get<bool>(),
+              "never-installed state must not claim installation");
+        Check(offStatus.at("counters").at("wrong_thread").get<uint64_t>() == 0
+                  && offStatus.at("counters").at("faults").get<uint64_t>() == 0,
+              "never-installed drain must not poison baseline counters");
+    }
     Check(InstallLifecycleProbesForTest(patched.addresses, patched.continuations, patched.jumpTargets, error),
           error.c_str());
+    Check(LvzProbeReaderProtectionInstalledForTest(), "reader protection must live while patches are owned");
     Check(LifecycleProbesInstalled(), "probes must be installed");
     Check(*reinterpret_cast<const uint8_t*>(patched.addresses[2]) == 0xe9, "patched byte must be a jump");
 
@@ -356,21 +379,6 @@ int RunTests() {
         PrepareZombie(initial, 0, 2, wave);
         (void)CompareCase(baseline.addresses[2], patched.addresses[2], initial, 0, 7u, 8u, 9u,
                           "off-board phase store");
-    }
-    // 3. Nonmatching pool pointer and generation-0 free slot: observer refuses
-    //    to classify but the store still executes exactly once.
-    {
-        const RunResult shot = CompareCase(baseline.addresses[2], patched.addresses[2], machine, 0, 1u, 2u, 3u,
-                                           "foreign board pointer", 1);
-        Check(Read32(shot.machine.zombie(0) + 0x28) == 3, "store must survive a refused classification");
-        (void)CompareCase(baseline.addresses[2], patched.addresses[2], machine, 0, 1u, 2u, 3u,
-                          "generation-0 free slot", 3);
-    }
-    // 4. Unreadable observer address (wild board pointer): the protected hook
-    //    reader must not change the original store semantics.
-    {
-        (void)CompareCase(baseline.addresses[2], patched.addresses[2], machine, 0, 4u, 5u, 6u,
-                          "fault-protected observer read", 2);
     }
     // 5. Zamboni store + flds: x87 state (all ST registers, control word) must
     //    match the original execution exactly.
@@ -453,6 +461,67 @@ int RunTests() {
     }
     Check(LifecycleProbeStatus().at("healthy").get<bool>(), "capture must be healthy after the normal cases");
 
+    // 3+4. Lost observations are injected only after the healthy window so the
+    // benign live_skips policy stays separate from read/classification faults.
+    // 3. Nonmatching pool pointer and generation-0 free slot: observer refuses
+    //    to classify but the store still executes exactly once.
+    {
+        const RunResult shot = CompareCase(baseline.addresses[2], patched.addresses[2], machine, 0, 1u, 2u, 3u,
+                                           "foreign board pointer", 1);
+        Check(Read32(shot.machine.zombie(0) + 0x28) == 3, "store must survive a refused classification");
+        (void)CompareCase(baseline.addresses[2], patched.addresses[2], machine, 0, 1u, 2u, 3u,
+                          "generation-0 free slot", 3);
+    }
+    // 4. Unreadable observer address (wild board pointer): the protected hook
+    //    reader must not change the original store semantics.
+    {
+        (void)CompareCase(baseline.addresses[2], patched.addresses[2], machine, 0, 4u, 5u, 6u,
+                          "fault-protected observer read", 2);
+    }
+    {
+        // Classification can succeed while the free-list read fails; the real
+        // guard compare still runs, and the lost observation must invalidate
+        // completeness instead of being silently accepted.
+        {
+            const auto refusedStatus = LifecycleProbeStatus();
+            Check(!refusedStatus.at("healthy").get<bool>(),
+                  "refused classifications must invalidate health");
+            Check(refusedStatus.at("counters").at("classify_refused").get<uint64_t>() >= 3,
+                  "refused classifications must be counted");
+        }
+        Check(RemoveLifecycleProbes(error), error.c_str());
+        Pages guardOnly = MakePages(false);
+        std::memcpy(guardOnly.window(6), kGuardBytes.data(), kGuardBytes.size());
+        guardOnly.window(6)[kGuardBytes.size()] = 0xc3;
+        guardOnly.continuations[6] = reinterpret_cast<uintptr_t>(guardOnly.window(6) + kGuardBytes.size());
+        Check(InstallLifecycleProbesForTest(guardOnly.addresses, guardOnly.continuations,
+                                            guardOnly.jumpTargets, error), error.c_str());
+        const size_t pageSize = 4096;
+        uint8_t* pages = static_cast<uint8_t*>(VirtualAlloc(nullptr, pageSize * 2, MEM_COMMIT | MEM_RESERVE,
+                                                            PAGE_READWRITE));
+        Check(pages != nullptr, "cannot allocate the boundary board page");
+        const uint32_t boardAddress = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pages + pageSize) - 0x9c);
+        const uint32_t block = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(machine.pool));
+        const uint32_t used = 2, capacity = 8;
+        std::memcpy(pages + pageSize - 0x9c + 0x90, &block, 4);
+        std::memcpy(pages + pageSize - 0x9c + 0x94, &used, 4);
+        std::memcpy(pages + pageSize - 0x9c + 0x98, &capacity, 4);
+        DWORD previousProtection = 0;
+        Check(VirtualProtect(pages + pageSize, pageSize, PAGE_NOACCESS, &previousProtection) != 0,
+              "cannot protect the boundary page");
+        Machine boundary = machine;
+        boundary.zombie(0)[0xec] = 1;
+        (void)RunOne(guardOnly.addresses[6], boundary, 0, boardAddress, 0, 0, XmmSentinels(), 5);
+        VirtualFree(pages, 0, MEM_RELEASE);
+        Check(RemoveLifecycleProbes(error), error.c_str());
+        const auto failedStatus = LifecycleProbeStatus();
+        Check(!failedStatus.at("healthy").get<bool>(), "lost observations must invalidate health");
+        Check(failedStatus.at("counters").at("read_failed").get<uint64_t>() >= 1,
+              "read failures must be counted");
+        Check(InstallLifecycleProbesForTest(patched.addresses, patched.continuations, patched.jumpTargets, error),
+              error.c_str());
+    }
+
     // 10. Wrong thread: store still executes, nothing is published.
     {
         LvzProbeSetThreadForTest(GetCurrentThreadId() + 1u);
@@ -485,15 +554,21 @@ int RunTests() {
     Check(RemoveLifecycleProbes(error), error.c_str());
     for (size_t index = 0; index < 8; ++index) ExpectWindowBytes(patched, index, "restore after normal removal");
     Check(!LifecycleProbesInstalled(), "probes must be removed");
+    Check(!LvzProbeReaderProtectionInstalledForTest(), "a clean removal must release the reader handler");
+    Check(LvzProbeReaderHandlersRemovedForTest() == LvzProbeReaderHandlersAddedForTest(),
+          "a clean removal must unregister exactly the acquired handler");
     Check(InstallLifecycleProbesForTest(patched.addresses, patched.continuations, patched.jumpTargets, error),
           error.c_str());
+    Check(LvzProbeReaderProtectionInstalledForTest(), "reinstall must register a new handler");
     LvzProbeSetVirtualProtectFailureForTest(true);
     Check(!RemoveLifecycleProbes(error), "a protection failure must refuse removal");
     Check(LifecycleProbesInstalled(), "a failed removal must keep the probes tracked");
+    Check(LvzProbeReaderProtectionInstalledForTest(), "a failed removal must keep the handler alive");
     Check(*reinterpret_cast<const uint8_t*>(patched.addresses[2]) == 0xe9, "failed removal must keep the jump");
     LvzProbeSetVirtualProtectFailureForTest(false);
     Check(RemoveLifecycleProbes(error), error.c_str());
     Check(!LifecycleProbesInstalled(), "retry after cleared injection must restore");
+    Check(!LvzProbeReaderProtectionInstalledForTest(), "the retry must release the handler");
     // 14. Ownership replacement: a foreign patch is never overwritten.
     Check(InstallLifecycleProbesForTest(patched.addresses, patched.continuations, patched.jumpTargets, error),
           error.c_str());
@@ -519,6 +594,9 @@ int RunTests() {
         Check(!InstallLifecycleProbesForTest(broken.addresses, broken.continuations, broken.jumpTargets, mismatch),
               "signature mismatch must be refused");
         Check(!LifecycleProbesInstalled(), "a failed install must not leave probes installed");
+        Check(!LvzProbeReaderProtectionInstalledForTest(), "a failed install must release its handler");
+        Check(LvzProbeReaderHandlersRemovedForTest() == LvzProbeReaderHandlersAddedForTest(),
+              "a failed install must unregister the acquired handler");
         for (size_t index = 0; index < 3; ++index) ExpectWindowBytes(broken, index, "rollback of the partial install");
     }
     // 16. Incomplete recycle candidate: pending blocks removal, drain clears it.
@@ -542,6 +620,11 @@ int RunTests() {
     {
         Check(InstallLifecycleProbesForTest(patched.addresses, patched.continuations, patched.jumpTargets, error),
               error.c_str());
+        LvzProbeSetInFlightForTest(1);
+        Check(!RemoveLifecycleProbes(error), "an in-flight callback must refuse removal");
+        Check(LifecycleProbesInstalled() && LvzProbeReaderProtectionInstalledForTest(),
+              "an in-flight refusal must keep patches and handler");
+        LvzProbeSetInFlightForTest(0);
         LvzProbeSetThreadForTest(GetCurrentThreadId() + 1u);
         bool threw = false;
         try {
@@ -552,6 +635,9 @@ int RunTests() {
         LvzProbeSetThreadForTest(GetCurrentThreadId());
         Check(threw, "drain from a foreign thread must throw");
         Check(RemoveLifecycleProbes(error), error.c_str());
+        Check(!LvzProbeReaderProtectionInstalledForTest(), "the final removal must release the handler");
+        Check(LvzProbeReaderHandlersRemovedForTest() == LvzProbeReaderHandlersAddedForTest(),
+              "every acquired handler must be released");
     }
     std::string closeError;
     Host().OnPersisted(0);

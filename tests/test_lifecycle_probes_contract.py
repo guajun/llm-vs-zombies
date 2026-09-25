@@ -147,14 +147,16 @@ class ProbeContractTests(unittest.TestCase):
             events_extra = [{"kind": "lifecycle_probes_closed",
                              "payload": {"installed": False, "active": False, "healthy": True,
                                          "pending_candidate": False, "patched_sites": [],
-                                         "counters": closed_counters, "sites": SITES}}]
+                                         "counters": closed_counters, "sites": SITES,
+                                         "reader_protected": False, "pending_callbacks": 0}}]
         if events_extra is not None:
             lines = [json.dumps(value, separators=(",", ":")) for value in events_extra]
             (self.audit / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
         if receipt is None and receipt_v2:
             with_persisted = dict(probe_counters_final, persisted=v2_count)
             health = {"installed": False, "active": False, "healthy": True, "pending_candidate": False,
-                      "patched_sites": [], "counters": with_persisted, "sites": SITES}
+                      "patched_sites": [], "counters": with_persisted, "sites": SITES,
+                      "reader_protected": False, "pending_callbacks": 0}
             receipt = {
                 "schema": lifecycle_events.PROBE_RECEIPT_SCHEMA, "run_id": "run-probe",
                 "branch_id": "branch-probe", "session_id": SESSION,
@@ -201,7 +203,7 @@ class ProbeContractTests(unittest.TestCase):
                    events_extra=[{"kind": "lifecycle_probes_closed", "payload": {
                        "installed": False, "active": False, "healthy": True, "pending_candidate": False,
                        "patched_sites": [], "counters": dict(probe_counters(), captured=4, delivered=4),
-                       "sites": SITES}}])
+                       "sites": SITES, "reader_protected": False, "pending_callbacks": 0}}])
         report = lifecycle_events.validate(self.audit, require_close=True)
         self.assertEqual(report["status"], "valid", report["problems"])
 
@@ -310,6 +312,19 @@ class ProbeContractTests(unittest.TestCase):
         report = lifecycle_events.validate(self.audit, require_close=True)
         self.assertEqual(report["status"], "failed")
         self.problem(report, "without an enabled lifecycle_probes capability")
+
+    def test_lost_observation_counters_fail_the_receipt(self):
+        for counter in ("read_failed", "classify_refused", "inactive_suppressed"):
+            with self.subTest(counter=counter):
+                self.write(self.valid_events())
+                receipt = json.loads((self.audit / lifecycle_events.RECEIPT_FILE).read_text(encoding="utf-8"))
+                receipt["counters"]["probes"][counter] = 1
+                receipt["probe_health"]["counters"][counter] = 1
+                (self.audit / lifecycle_events.RECEIPT_FILE).write_text(
+                    json.dumps(receipt, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8")
+                report = lifecycle_events.validate(self.audit, require_close=True)
+                self.assertEqual(report["status"], "failed")
+                self.problem(report, counter)
 
     def test_offboard_fact_is_allowed(self):
         events = [v1_event(1), probe_event("zombie_phase_transition", 2, site="phase-mowdown",

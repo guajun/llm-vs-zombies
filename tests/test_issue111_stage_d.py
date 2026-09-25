@@ -68,8 +68,14 @@ class PlanCheckTests(unittest.TestCase):
 
     def test_child_mapping_must_match_the_frozen_plan(self):
         doc = copy.deepcopy(self.doc)
-        doc["evaluation_child_mapping"]["per_suite"] = ["<suite>-s42-c0"]
+        doc["evaluation_child_mapping"]["per_suite"] = ["<suite>-s42-c0", "<suite>-s42-c1"]
         self.assertTrue(any("per_suite" in problem for problem in stage_d.check(doc, ROOT)))
+
+    def test_single_cold_probe_arms_must_be_off_off_on_on(self):
+        doc = copy.deepcopy(self.doc)
+        doc["runs"][3]["probe_mode"] = "off"
+        problems = stage_d.check(doc, ROOT)
+        self.assertTrue(any("probe_mode" in problem for problem in problems), problems)
 
     def test_comparisons_must_not_claim_instrumentation_off_on(self):
         doc = copy.deepcopy(self.doc)

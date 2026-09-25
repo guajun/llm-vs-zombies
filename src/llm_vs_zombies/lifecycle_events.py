@@ -78,7 +78,7 @@ _PROBE_COUNTER_BASE_KEYS = {"captured", "queued", "delivered", "overflow", "wron
                             "unmatched_commits", "pair_mismatch", "overwritten_pending", "faults"}
 _PROBE_COUNTER_KEYS = _PROBE_COUNTER_BASE_KEYS | {"persisted"}
 _PROBE_HEALTH_KEYS = {"installed", "active", "healthy", "pending_candidate", "patched_sites",
-                      "counters", "sites"}
+                      "counters", "sites", "reader_protected", "pending_callbacks"}
 _RECEIPT_V2_KEYS = {"schema", "run_id", "branch_id", "session_id", "sequence_domain", "envelope_schema",
                     "event_schemas", "probe", "build", "manifest_sha256", "records",
                     "first_capture_sequence", "last_capture_sequence", "bytes", "sha256",
@@ -952,7 +952,8 @@ def _cross_check_receipt_v2(receipt, capability: dict, records: list[dict], even
     if isinstance(probes, dict) and _exact_keys(probes, _PROBE_COUNTER_KEYS,
                                                 "close receipt v2.counters.probes", problems):
         for key in ("overflow", "wrong_thread", "unmatched_commits", "pair_mismatch",
-                    "overwritten_pending", "faults"):
+                    "overwritten_pending", "faults", "read_failed", "classify_refused",
+                    "inactive_suppressed"):
             require(probes.get(key) == 0, f"close receipt v2 probe counter {key} must be zero")
         require(probes.get("queued") == 0, "close receipt v2 still has queued probe records")
         require(probes.get("persisted") == v2_count,
@@ -977,6 +978,10 @@ def _cross_check_receipt_v2(receipt, capability: dict, records: list[dict], even
         require(health.get("pending_candidate") is False, "close receipt v2 still has a pending candidate")
         require(health.get("active") is False, "close receipt v2 probe capture is still active")
         require(health.get("counters") == probes, "close receipt v2 probe health counters differ from counters.probes")
+        require(health.get("reader_protected") is False,
+                "close receipt v2 reader protection must be released")
+        require(health.get("pending_callbacks") == 0,
+                "close receipt v2 must not have callbacks in flight")
         final = probes_block if isinstance(probes_block, dict) else {}
         if final.get("enabled") is True and isinstance(health.get("counters"), dict):
             health_counters = {key: value for key, value in health["counters"].items() if key != "persisted"}
