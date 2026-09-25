@@ -1172,8 +1172,15 @@ def run_cold_attempt(root, plan, output, seed, repeat, trajectory):
             "secondary_errors": case.get("secondary_errors", [])}
 
 
-def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) -> dict:
-    """Run owned processes; each session is retained before evaluating its gates."""
+def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True,
+              single_cold: bool = False) -> dict:
+    """Run owned processes; each session is retained before evaluating its gates.
+
+    ``single_cold`` is the frozen four-trajectory experiment path: it runs only
+    the source cold start (``-c0``) per seed and skips the extra replay and the
+    recovery probe, so one prepared arm is exactly one trajectory. The default
+    keeps the historical three-child suite unchanged.
+    """
     from .audit_compare import AuditLog, first_difference
     from .engine_replay import ReplaySession, capture_initial, identity_from_launcher, replay
     root, output = root.resolve(), output.resolve()
@@ -1183,7 +1190,8 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
     if not output.is_relative_to(root / "experiments/runs") or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in output.name):
         raise ValueError("suite output must be a safe name under experiments/runs")
     for seed in plan.seeds:
-        suffixes = [f"c{index}" for index in range(max(2, plan.cold_starts))] + ["recovery"]
+        suffixes = ["c0"] if single_cold else (
+            [f"c{index}" for index in range(max(2, plan.cold_starts))] + ["recovery"])
         for suffix in suffixes:
             candidate = root / "experiments/runs" / f"{output.name}-s{seed}-{suffix}"
             if candidate.exists():
@@ -1301,6 +1309,12 @@ def run_suite(root: Path, plan: Plan, output: Path, *, run_builds: bool = True) 
                     case["replay_blockers"] = blockers
                     case["replays_skipped"] = ("source infrastructure or recording did not pass: "
                         + ", ".join(blockers)) if blockers else "source infrastructure or recording did not pass"
+                    continue
+                if single_cold:
+                    # The frozen experiment needs exactly this one trajectory;
+                    # the extra replay and the recovery probe are not acquired.
+                    case["status"] = "completed"
+                    case["single_cold"] = True
                     continue
                 if plan.tier == "strict" and case.get("full_cycle") is not True:
                     case.update(status="incomplete",
@@ -1448,6 +1462,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--skip-build", action="store_true")
+    run.add_argument("--single-cold", action="store_true",
+                     help="run only the source cold start (-c0) and skip the extra replay/recovery children")
     args = parser.parse_args(argv)
     try:
         if args.command == "plan":
@@ -1484,7 +1500,8 @@ def main(argv: list[str] | None = None) -> int:
             if plan.b0_normalization:
                 print(json.dumps(list(plan.b0_normalization), ensure_ascii=False, indent=2))
             return 0
-        report = run_suite(args.root, Plan.load(args.plan), args.output, run_builds=not args.skip_build)
+        report = run_suite(args.root, Plan.load(args.plan), args.output, run_builds=not args.skip_build,
+                           single_cold=args.single_cold)
         print(json.dumps(report["readiness"], ensure_ascii=False, indent=2))
         # Smoke success is not strict readiness. Its required stages must still
         # complete, including an actual cold-start replay and recovery probe.

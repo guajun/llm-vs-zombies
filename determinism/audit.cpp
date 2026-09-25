@@ -10,6 +10,7 @@
 #include "memory.hpp"
 #include "measurement.hpp"
 #include "lifecycle_record.hpp"
+#include "lifecycle_probes.hpp"
 #include "stream_close.hpp"
 #include "spawn_hook.hpp"
 #include "reanimation_audit.hpp"
@@ -24,9 +25,11 @@
 #include "tests/flag_drop_live.hpp"
 #endif
 #include <array>
+#include <algorithm>
 #include <fstream>
 #include <memory>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace lvz::determinism {
@@ -53,6 +56,20 @@ std::set<uint32_t> previousZombies;
 // file at all, so old trajectories keep their exact behavior and comparability.
 LifecycleRecorder lifecycleRecorder;
 bool lifecycleSettingPresent=false, lifecycleEnabled=false;
+// New lifecycle probe set (phase stores, mDead, recycle guard/commit). It has
+// its own explicit switch; persistence stays a separate responsibility and
+// the probes refuse to run without it so captures are never silently dropped.
+bool probeSettingPresent=false, probesEnabled=false, probesInstalled=false;
+
+std::string LifecycleProbeSetting() {
+    char buffer[32]{};
+    const DWORD size=GetEnvironmentVariableA("LVZ_LIFECYCLE_PROBES",buffer,sizeof(buffer));
+    if(!size) return {};
+    if(size>=sizeof(buffer)) throw std::runtime_error("LVZ_LIFECYCLE_PROBES must be 0 or 1");
+    const std::string value(buffer,size);
+    if(value!="0"&&value!="1") throw std::runtime_error("LVZ_LIFECYCLE_PROBES must be 0 or 1");
+    return value;
+}
 
 // LVZ_LIFECYCLE_RECORDING is "1" (enabled), "0" (explicitly disabled) or
 // unset (no capability declaration). Any other value is rejected: a typo must
@@ -106,6 +123,54 @@ Json LifecycleProbeHealth(const Json& status) {
         {"active_initializers",status.value("active_initializers",uint64_t(0))},
         {"healthy",status.value("healthy",false)}};
 }
+Json LifecycleProbesCapability(const LifecycleIdentity* identity) {
+    const Json status=LifecycleProbeStatus();
+    return {{"mode","lvz.lifecycle-probes.v1"},{"enabled",true},
+        {"record_schema",kLifecycleProbeEventSchema},
+        {"probe_set",{"zombie-phase-store","zombie-removal-marked","zombie-slot-recycle"}},
+        {"session_id",identity->session_id},
+        {"build",{{"module",identity->build_module},{"sha256",identity->build_sha256}}},
+        {"sites",status["sites"]},
+        {"patch_windows_evidence","docs/issue111-patch-windows.json"},
+        {"probe_counters",status["counters"]},
+        {"live_validated",false}};
+}
+Json LifecycleProbesDisabledCapability() {
+    return {{"mode","lvz.lifecycle-probes.v1"},{"enabled",false}};
+}
+
+bool RewriteProbeCapability(const std::filesystem::path& auditDir,const Json& probeStatus,std::string& error) {
+    const auto path=auditDir/"manifest.json";
+    std::ifstream input(path);
+    Json manifest;
+    if(!(input>>manifest)||!manifest.is_object()) {
+        error="Cannot read the audit manifest for final probe counters"; return false;
+    }
+    if(!manifest.contains("lifecycle_probes")||!manifest.at("lifecycle_probes").is_object()) return true;
+    Json& block=manifest["lifecycle_probes"];
+    block["probe_counters"]=probeStatus.contains("counters")?probeStatus.at("counters"):Json::object();
+    block["healthy"]=probeStatus.value("healthy",false);
+    block["pending_candidate"]=probeStatus.value("pending_candidate",false);
+    block["active"]=probeStatus.value("active",false);
+    block["installed"]=probeStatus.value("installed",false);
+    const auto temporary=auditDir/"manifest.json.partial";
+    try {
+        std::ofstream output(temporary,std::ios::out|std::ios::binary|std::ios::trunc);
+        if(!output) throw std::runtime_error("Cannot open the audit manifest partial file");
+        output<<manifest.dump(2)<<'\n';
+        if(!output) throw std::runtime_error("Audit manifest pending write failed");
+        output.close();
+        if(!output) throw std::runtime_error("Audit manifest pending close failed");
+    } catch(...) {
+        std::error_code ignored; std::filesystem::remove(temporary,ignored);
+        error="Final audit manifest write failed"; return false;
+    }
+    if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+        std::error_code ignored; std::filesystem::remove(temporary,ignored);
+        error="Final audit manifest finalize failed"; return false;
+    }
+    error.clear(); return true;
+}
 
 void RequireThread() {
     if (!initialized || GetCurrentThreadId() != ownerThread)
@@ -143,6 +208,13 @@ void DrainAndCheckSpawns() {
     const auto health=SpawnHookStatus();
     if(health.value("active_initializers",size_t(0))==0) {
         auto batch=DrainSpawnBatch();
+        // One drain per probe per boundary; merge both lifecycle projections by
+        // their shared capture_sequence so the recorder sees the real order.
+        // The probe drain must never run when no probe was installed (off or
+        // unset): DrainLifecycleProbeBatch itself is safe then, and the gate
+        // keeps a poisoned wrong-thread counter out of the baseline.
+        const bool probesOwned=probesInstalled||LifecycleProbeResourcesOwned();
+        Json probes=probesOwned?DrainLifecycleProbeBatch():Json::array();
         for(auto& spawn:batch.legacy) {
             const auto& boundary=spawn.at("boundary");
             const bool controlled=boundary.is_object();
@@ -154,19 +226,31 @@ void DrainAndCheckSpawns() {
                 {"native_phase","zombie_initialize_exit"},{"version",version},
                 {"payload",std::move(spawn)}});
         }
-        // The lifecycle projection is the second view of the same immutable
-        // batch. It is persisted only here; no other consumer may drain the
-        // probe. A failed write throws before OnPersisted, so Close() sees an
-        // unbalanced batch and the session is aborted instead of committed.
+        std::vector<std::pair<uint64_t,Json>> merged;
+        for(auto& record:batch.lifecycle)
+            merged.emplace_back(record.at("capture_sequence").get<uint64_t>(),std::move(record));
+        for(auto& record:probes)
+            merged.emplace_back(record.at("capture_sequence").get<uint64_t>(),std::move(record));
+        std::sort(merged.begin(),merged.end(),[](const auto& left,const auto& right){
+            return left.first<right.first;});
         if(lifecycleRecorder.Opened())
-            for(auto& record:batch.lifecycle) lifecycleRecorder.Write(record);
-        lvz::measurement::Host().OnPersisted(batch.count);
+            for(auto& item:merged) lifecycleRecorder.Write(item.second);
+        lvz::measurement::Host().OnPersisted(batch.count+static_cast<uint64_t>(probes.size()));
     }
     if(!health.value("healthy",false)) {
         Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_fault"},
             {"version",lastObservationVersion},{"payload",health}});
         Flush();
         throw std::runtime_error("ZombieInitialize capture incomplete; strict experiment stopped");
+    }
+    if(probesInstalled) {
+        const auto probeHealth=LifecycleProbeStatus();
+        if(!probeHealth.value("healthy",false)) {
+            Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","lifecycle_probe_fault"},
+                {"version",lastObservationVersion},{"payload",probeHealth}});
+            Flush();
+            throw std::runtime_error("Lifecycle probe capture incomplete; strict experiment stopped");
+        }
     }
 }
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
@@ -375,6 +459,13 @@ void Initialize(const std::filesystem::path& runDir) {
     const std::string lifecycleSetting=LifecycleSetting();
     lifecycleSettingPresent=!lifecycleSetting.empty();
     lifecycleEnabled=lifecycleSetting=="1";
+    const std::string probeSetting=LifecycleProbeSetting();
+    probeSettingPresent=!probeSetting.empty();
+    probesEnabled=probeSetting=="1";
+    // Probes without persistence would capture facts that can never be
+    // committed; refuse explicitly instead of dropping evidence.
+    if(probesEnabled && !lifecycleEnabled)
+        throw std::runtime_error("LVZ_LIFECYCLE_PROBES=1 requires LVZ_LIFECYCLE_RECORDING=1");
     if(!ValidateTargetImage()) throw std::runtime_error("Unsupported PvZ engine image: deterministic adapter rejected");
     const auto directory=runDir/"audit";
     std::filesystem::create_directories(directory);
@@ -395,6 +486,8 @@ void Initialize(const std::filesystem::path& runDir) {
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
     bool hookInstalled=false, measurementOpened=false;
     Json lifecycleCapability=Json::object();
+    Json probeCapability=Json::object();
+    LifecycleIdentity identity;
     try {
         silentaudio::Initialize(runDir);
         if(silentaudio::Enabled()){
@@ -405,8 +498,7 @@ void Initialize(const std::filesystem::path& runDir) {
         if(!lvz::measurement::Host().Open(ownerThread, &measureError))
             throw std::runtime_error(measureError);
         measurementOpened=true;
-        if(lifecycleEnabled) {
-            LifecycleIdentity identity;
+        if(lifecycleEnabled||probesEnabled) {
             identity.run_id=runDir.filename().string();
             identity.branch_id=lvz::runtime::InstanceBranchScope(runDir);
             identity.session_id=lvz::measurement::Host().SessionId();
@@ -414,7 +506,7 @@ void Initialize(const std::filesystem::path& runDir) {
             identity.build_module=module.filename().string();
             identity.build_sha256=lvz::determinism::FileSha256(module);
             // The run manifest already binds recorder_sha256; the loaded module
-            // must match it or this run cannot claim the lifecycle capability.
+            // must match it or this run cannot claim its measurement capability.
             std::ifstream runManifest(runDir/"manifest.json");
             Json declared=Json::object();
             if(!(runManifest>>declared)||!declared.is_object())
@@ -425,22 +517,44 @@ void Initialize(const std::filesystem::path& runDir) {
                 if(!declaredHash.is_string()||declaredHash.get<std::string>()!=identity.build_sha256)
                     throw std::runtime_error("Lifecycle recorder build does not match the run manifest identity");
             }
-            lifecycleRecorder.Open(directory,std::move(identity));
+        }
+        if(lifecycleEnabled) {
+            lifecycleRecorder.Open(directory,identity);
             lifecycleCapability=LifecycleCapability(lifecycleRecorder.Identity());
         } else if(lifecycleSettingPresent) {
             lifecycleCapability=LifecycleDisabledCapability();
         }
         if(!InstallSpawnHook(error)) throw std::runtime_error(error);
         hookInstalled=true;
+        if(probesEnabled) {
+            std::string probeError;
+            if(!InstallLifecycleProbes(probeError)) throw std::runtime_error(probeError);
+            probesInstalled=true;
+            probeCapability=LifecycleProbesCapability(&identity);
+        } else if(probeSettingPresent) {
+            probeCapability=LifecycleProbesDisabledCapability();
+        }
         if(!InstallParticleShakeHook(error)) throw std::runtime_error(error);
         foleytrace::Initialize(runDir);
         std::ofstream manifest(directory/"manifest.json");
         Json target=ProbeTarget();
         if(lifecycleSettingPresent) target["lifecycle_recording"]=lifecycleCapability;
+        if(probeSettingPresent) target["lifecycle_probes"]=probeCapability;
         manifest<<target.dump(2)<<'\n';
         if(!manifest) throw std::runtime_error("Cannot write audit manifest");
     } catch(...) {
+        const std::exception_ptr original=std::current_exception();
         foleytrace::Shutdown();
+        std::string probeError;
+        bool probeRollbackFailed=false;
+        // A failed install rollback can own patches/handler while the local
+        // flag is still false, so always synchronize with the actual state.
+        if(!RemoveLifecycleProbes(probeError)) probeRollbackFailed=true;
+        else probesInstalled=false;
+        if(LifecycleProbeResourcesOwned()) {
+            PinLifecycleProbeModule();
+            probeRollbackFailed=true;
+        }
         std::string particleError;
         if(!RemoveParticleShakeHook(particleError))
             throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+particleError);
@@ -457,8 +571,11 @@ void Initialize(const std::filesystem::path& runDir) {
             lvz::measurement::Host().Abort();
         }
         lifecycleSettingPresent=false;lifecycleEnabled=false;
+        probeSettingPresent=false;probesEnabled=false;
         checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();fpRaw.close();initialized=false;
-        throw;
+        if(probeRollbackFailed)
+            throw std::runtime_error("Audit initialization failed and lifecycle probes could not be removed; keep runtime DLL loaded: "+probeError);
+        std::rethrow_exception(original);
     }
 }
 Json ActivateFloatingPoint(int ui,uintptr_t board,const Json& context) {
@@ -727,6 +844,25 @@ void Shutdown() {
                 Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},
                     {"version",lastObservationVersion},{"payload",finalHealth}});
             } catch(const std::exception& exception) { note(exception.what()); }
+            Json finalProbeStatus=nullptr;
+            const bool probesOwned=probesInstalled||LifecycleProbeResourcesOwned();
+            if(probesOwned) {
+                std::string error;
+                const bool probeRemoved=RemoveLifecycleProbes(error);
+                if(!probeRemoved) note("Keep runtime DLL loaded: "+error);
+                else probesInstalled=false;
+                if(!probeRemoved||LifecycleProbeResourcesOwned()) PinLifecycleProbeModule();
+                finalProbeStatus=LifecycleProbeStatus();
+                try {
+                    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","lifecycle_probes_closed"},
+                        {"version",lastObservationVersion},{"payload",finalProbeStatus}});
+                } catch(const std::exception& exception) { note(exception.what()); }
+                if(probeRemoved) {
+                    std::string manifestError;
+                    if(!RewriteProbeCapability(lifecycleRecorder.EventsPath().parent_path(),finalProbeStatus,manifestError))
+                        note(manifestError);
+                }
+            }
             std::string error;
             if(!RemoveParticleShakeHook(error)) note("Keep runtime DLL loaded: "+error);
             if(!RemoveSpawnHook(error)) note("Keep runtime DLL loaded: "+error);
@@ -742,10 +878,14 @@ void Shutdown() {
             // this cleanup returns, so the receipt never depends on it.
             if(lifecycleRecorder.Opened()) {
                 try {
-                    if(cleanupError.empty() && lvz::measurement::Host().Closing())
-                        lifecycleRecorder.Finish(true,LifecycleCounters(lvz::measurement::Host().Health()),
-                            LifecycleProbeHealth(finalHealth));
-                    else
+                    if(cleanupError.empty() && lvz::measurement::Host().Closing()) {
+                        if(probesEnabled)
+                            lifecycleRecorder.Finish(true,LifecycleCounters(lvz::measurement::Host().Health()),
+                                finalProbeStatus.is_object()?finalProbeStatus:Json::object(),true);
+                        else
+                            lifecycleRecorder.Finish(true,LifecycleCounters(lvz::measurement::Host().Health()),
+                                LifecycleProbeHealth(finalHealth));
+                    } else
                         lifecycleRecorder.Finish(false);
                 } catch(const std::exception& exception) {
                     note(std::string("Lifecycle evidence finalization failed: ")+exception.what());
@@ -754,6 +894,7 @@ void Shutdown() {
             lifecycleRecorder.Abandon();
             initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
             lifecycleSettingPresent=false;lifecycleEnabled=false;
+            probeSettingPresent=false;probesEnabled=false;
             reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
             ResetHostedFire();

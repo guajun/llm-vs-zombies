@@ -6,16 +6,17 @@
 
 ## 1. 目的与边界
 
-在经典十二炮短窗口内验证：生命周期**持久化适配器**（`LVZ_LIFECYCLE_RECORDING` 打开/关闭）是否
+在经典十二炮短窗口内验证：生产 store 探针（`LVZ_LIFECYCLE_PROBES` 打开/关闭，同构建、持久化
+`LVZ_LIFECYCLE_RECORDING=1` 在两个探针臂都开启）是否
 引入可观测差异、同一模式的两次冷启动是否可复现，并为 tick 940 的未知消失路径给出边界坐标与
 覆盖限制。
 
 **重要语义修正（不得含糊）：**
 
-- `LVZ_LIFECYCLE_RECORDING` 只控制 lifecycle-events/close-receipt 的落盘；`ZombieInitialize`
-  探针与 legacy `lvz.spawn.v1` 投影在 off/on 两种模式下**都安装**。因此本对照只能测
+- `LVZ_LIFECYCLE_PROBES` 只控制 5 个 phase store、mDead store、回收 guard/commit 的生产探针
+  安装；`ZombieInitialize` v1 探针、legacy `lvz.spawn.v1` 投影和持久化在两条臂**都开启**。因此本对照测
   **持久化适配器增量开销**，不能当作“新增插桩关闭/开启”验收，也不能覆盖死亡/移除/回收。
-- 真正的 instrumentation off/on 需要一份**不含探针的构建**（新的 recorder 构建身份）；当前没有
+- 这不等于“无插桩构建”对照：两条臂都含 recorder 其它部件。如需真正无插桩对照，仍需另一份构建身份；
   构建期开关，这属于缺口，待维护者决定是否为本 issue 增加第二种构建，而不是用本 switch 冒充。
 - 死亡/移除/回收的生产事实取决于 [`issue111-原生候选证据.md`](issue111-原生候选证据.md) 的维护者
   审查。审查未通过时，D 只使用初始化探针，tick 940 的捕获级结论输出 `unavailable`。
@@ -34,25 +35,23 @@
 
 ## 3. 运行矩阵与实际子运行身份
 
-四个名字是**四次 evaluation suite 执行**，不是四条轨迹。每次 suite 由 `evaluation.run_suite`
-按计划（seed 42、`cold_starts=1`）自动创建以下子运行：
+四个名字是**四次单冷轨迹执行**（`prepare --single-cold`），不是四套 suite。每次执行由
+`evaluation.run_suite(..., single_cold=True)` 只创建 `<suite>-s42-c0` 一条源轨迹；不创建
+`-s42-c1` 重放或 `-s42-recovery` 恢复子运行，因此总共恰好四条轨迹：
 
-| 子运行 | 类型 |
-|---|---|
-| `<suite>-s42-c0` | 源轨迹 |
-| `<suite>-s42-c1` | 原版冷重放 |
-| `<suite>-s42-recovery` | 断线恢复探针 |
-
-| suite | 模式 | 用途 |
+| suite | 模式（prepare 元数据） | 用途 |
 |---|---|---|
-| `issue111-d-off-a` | `LVZ_LIFECYCLE_RECORDING=0` | 持久化关闭对照 A |
-| `issue111-d-off-b` | `0` | 对照复跑 |
-| `issue111-d-on-a` | `1` | 持久化开启冷启动 A |
-| `issue111-d-on-b` | `1` | 持久化开启冷启动 B |
+| `issue111-d-probe-off-a` | `--mode on --probes off --single-cold`，`LVZ_LIFECYCLE_RECORDING=1`、`LVZ_LIFECYCLE_PROBES=0` | 探针关闭对照冷启动 A（仅差探针安装） |
+| `issue111-d-probe-off-b` | 同上 | 探针关闭对照冷启动 B（独立复跑） |
+| `issue111-d-probe-on-a` | `--mode on --probes on --single-cold`，`LVZ_LIFECYCLE_RECORDING=1`、`LVZ_LIFECYCLE_PROBES=1` | 探针开启冷启动 A |
+| `issue111-d-probe-on-b` | 同上 | 探针开启冷启动 B（独立复跑） |
+
+四条臂都通过 `--expected-recorder-sha256` 固定同一个 recorder 构建身份；`check` 会拒绝任何子审计
+声明不同构建的轨迹。子审计真实路径为 `experiments/runs/<suite>-s42-c0`（suite 目录本身没有 audit）。
 
 比较：
 
-1. `off-a` vs `off-b`：对照可复现；
+1. `off-a` vs `off-b`：`issue111_lifecycle_compare.py --scope both`——共同 gameplay/state/RNG/action 证据 + 同模式完整 v2 语义序列；
 2. `on-a` vs `on-b`：新模式可复现（每个子运行都须有有效回执）；
 3. `off-a` vs `on-a`：**持久化适配器**共同证据比较；用 `tools/issue111_lifecycle_compare.py` 比较
    lifecycle 流（只归一化 run_id/branch_id/session_id，不剥离事实/计数/序号），并报告首个分叉
@@ -102,7 +101,7 @@ python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-o
 | 判定 | 通过条件 | 失败处理 |
 |---|---|---|
 | 采集机制完整性 | 每个子运行 lifecycle 严格校验 valid（含关闭回执）且审计严格读取 closed、计数平衡、无探针故障 | 保留失败现场，报告故障坐标，不封存为合格证据 |
-| 持久化适配器非扰动（仅此范围） | off/on 在声明范围内共同证据逐边界一致，或首个分叉被定位并解释；不声称插桩本身无扰动 | 报告首个分叉与比较范围；不因事件流差异本身判失败 |
+| 探针安装效应（仅此范围） | probe off/on 在声明范围内共同证据逐边界一致，或首个分叉被定位并解释；不声称无插桩非扰动 | 报告首个分叉与比较范围；v2 事实只出现在 on 臂，属预期差异 |
 | 两次重复性 | on-a 子运行 == on-b 子运行（同一模式、声明范围内） | 定位环境/审计噪声；不挑选时段 |
 | 死亡/移除覆盖 | 仅在候选证据通过维护者审查并实现 hook 后判定；当前为 `unavailable` | 不勾选 #99/#105 正向门槛；建立最小后续任务 |
 | 首次击杀证据充分性 | 由 `tools/issue111_lifecycle_report.py` 判定；当前 `first_kill_proven=false` | 如实输出缺口，不缩减标准 |
@@ -114,3 +113,14 @@ python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-o
 2. 确认是否要求“真正无插桩构建”的 off/on 对照；若需要，安排第二种构建身份并重冻计划，而不是把
    持久化 switch 当成插桩 switch。
 3. 确认资源与排期后，由执行者在独立 session 串行运行四个 suite；本轮不运行。
+
+## 比较工具范围（评审第四轮）
+
+- 同模式复跑（off/off、on/on）使用 `--scope both`：先各自严格校验完整流，再比较共同 gameplay 证据，并单独比较
+  完整 v2 语义序列/健康。
+- OFF vs ON 安装效应使用 `--scope common`：该 scope 现在必须同时通过严格 audit 比较、严格
+  action/request/result 比较（`engine_replay._trace_steps`，存在原生请求时再与 `_native_steps` 交叉校验）
+  以及 initial/final outcome 比较；任一输入缺失即 fail closed。仅做声明的窄归一化（run/branch/session、
+  `lifecycle_probes` manifest、`event.object.board` 诊断指针），不把合法的 v2 事件差异当作扰动失败；
+  任何共同 state/RNG/action/结果首差异都必须如实报告。
+- 默认比较器保持严格；scoped 路径不丢宽字段。

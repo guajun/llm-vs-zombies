@@ -115,6 +115,28 @@ class ExperimentEntryTests(unittest.TestCase):
         with self.assertRaises(experiment.ExperimentError):
             self.prepare(name="issue111-d-on-a", mode="on")
 
+    def test_single_cold_prepare_locks_exactly_one_trajectory_and_a_build_pin(self):
+        metadata = experiment.prepare(self.root, "issue111-d-probe-on-a", self.plan_path(), "on",
+                                      run_builds=False, probes="on", single_cold=True,
+                                      build_sha256="a" * 64)
+        self.assertTrue(metadata["single_cold"])
+        self.assertEqual(metadata["expected_children"], ["issue111-d-probe-on-a-s42-c0"])
+        self.assertEqual(metadata["expected_recorder_sha256"], "a" * 64)
+        self.assertIn("--single-cold", metadata["launch_command"])
+        with self.assertRaises(experiment.ExperimentError):
+            experiment.prepare(self.root, "issue111-d-probe-on-a", self.plan_path(), "on",
+                               run_builds=False, probes="on", single_cold=True)
+
+    def test_check_rejects_a_child_with_a_different_pinned_build(self):
+        metadata, suite = self._complete_suite()
+        sidecar = experiment.mode_path(self.root, "issue111-d-on-a")
+        doc = json.loads(sidecar.read_text(encoding="utf-8"))
+        doc["expected_recorder_sha256"] = "a" * 64
+        sidecar.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        report = experiment.check(self.root, "issue111-d-on-a")
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("pinned build" in problem for problem in report["problems"]), report["problems"])
+
     # --- run against the real backend ------------------------------------
 
     def test_run_creates_suite_through_real_backend_and_detects_launch_failure(self):
@@ -178,11 +200,56 @@ class ExperimentEntryTests(unittest.TestCase):
                         "statistics": {"seed_cases": len(seeds), "completed_cases": len(seeds), "failed_cases": 0}}
         (suite / "evaluation.json").write_text(json.dumps(suite_report), encoding="utf-8")
         (suite / "plan.json").write_text(json.dumps(asdict(plan)), encoding="utf-8")
+        binding = {"schema": "lvz.lifecycle-plan-binding.v1",
+                   "raw_plan_sha256": metadata["plan"]["sha256"],
+                   "plan": metadata["plan"]["path"], "mode": metadata["mode"],
+                   "probes": (metadata.get("probes") or {}).get("mode"),
+                   "single_cold": metadata.get("single_cold", False),
+                   "recorder_sha256": metadata.get("expected_recorder_sha256")}
+        (suite / "lifecycle-plan-binding.json").write_text(json.dumps(binding) + "\n", encoding="utf-8")
         for child in metadata["expected_children"]:
             directory = self.root / "experiments" / "runs" / child
             write_run_manifest(directory, child)
             add_audit_mode(directory / "audit", child, enabled=(mode == "on"))
+            (directory / "replay-initial.json").write_text(json.dumps(
+                {"schema": "lvz.replay-initial.v1",
+                 "observation": {"version": {"epoch": 3, "tick": 0, "revision": 1}}}), encoding="utf-8")
+            (directory / "experiment-end.json").write_text(json.dumps(
+                {"final_observation": {"version": {"epoch": 3, "tick": 1000, "revision": 0}},
+                 "maximum_wave": 2, "full_cycle": True}), encoding="utf-8")
         return metadata, suite
+
+    def test_seal_binds_the_window_inputs_and_never_rewrites_on_mutation(self):
+        self._complete_suite()
+        seal = experiment.seal(self.root, "issue111-d-on-a")
+        seal_path = experiment.seal_path(self.root, "issue111-d-on-a")
+        original_seal = seal_path.read_bytes()
+        child = self.root / "experiments" / "runs" / "issue111-d-on-a-s42-c0"
+        suite = self.root / "experiments" / "runs" / "issue111-d-on-a"
+        for target in (suite / "lifecycle-plan-binding.json", child / "replay-initial.json",
+                       child / "experiment-end.json"):
+            original = target.read_bytes()
+            for mutated in (original + b" ", b""):
+                target.write_bytes(mutated)
+                with self.assertRaises(experiment.ExperimentError):
+                    experiment.verify_seal(self.root, "issue111-d-on-a")
+                with self.assertRaises(experiment.ExperimentError):
+                    experiment.seal(self.root, "issue111-d-on-a")
+                self.assertEqual(seal_path.read_bytes(), original_seal)
+                target.write_bytes(original)
+            self.assertTrue(experiment.verify_seal(self.root, "issue111-d-on-a")["ok"])
+        self.assertIn("plan_binding_sha256", seal)
+
+    def test_child_facts_bind_probe_arm_and_pinned_build(self):
+        child = "issue111-d-probe-on-a-s42-c0"
+        directory = self.root / "experiments" / "runs" / child
+        write_run_manifest(directory, child)
+        add_audit_mode(directory / "audit", child, enabled=True)
+        _, problems = experiment._child_facts(self.root, "issue111-d-probe-on-a", "on", child, "on")
+        self.assertTrue(any("no lifecycle_probes capability" in problem for problem in problems), problems)
+        _, pinned = experiment._child_facts(self.root, "issue111-d-probe-on-a", "on", child, None,
+                                            "a" * 64)
+        self.assertTrue(any("pinned build" in problem for problem in pinned), pinned)
 
     def test_check_and_seal_on_complete_suite(self):
         metadata, suite = self._complete_suite()

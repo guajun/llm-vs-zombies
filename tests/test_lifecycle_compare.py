@@ -107,6 +107,15 @@ class LifecycleCompareTests(unittest.TestCase):
         self.assertEqual(normalized["file_seq"], 0)
         self.assertEqual(normalized["capture_sequence_probe"]["counters"]["captured"], 2)
 
+    def test_normalize_replaces_only_the_local_board_pointer(self):
+        left = {"event": {"object": {"board": 0x1111, "wave": 0, "on_board": True},
+                          "entity": {"id": 0x00020001, "slot": 1}}}
+        right = {"event": {"object": {"board": 0x2222, "wave": 0, "on_board": True},
+                           "entity": {"id": 0x00020001, "slot": 1}}}
+        self.assertEqual(lifecycle_compare.normalize(left), lifecycle_compare.normalize(right))
+        self.assertEqual(lifecycle_compare.normalize(left)["event"]["object"]["board"], "<board-scope>")
+        self.assertEqual(lifecycle_compare.normalize(left)["event"]["entity"]["id"], 0x00020001)
+
     def test_missing_receipt_is_a_compare_error(self):
         (self.right / lifecycle_events.RECEIPT_FILE).unlink()
         with self.assertRaises(lifecycle_compare.CompareError):

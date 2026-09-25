@@ -29,7 +29,7 @@ void LifecycleRecorder::Open(const std::filesystem::path& auditDir, LifecycleIde
         throw std::runtime_error("Cannot open lifecycle events output");
     hasher_ = std::make_unique<Sha256>();
     identity_ = std::move(identity);
-    count_ = bytes_ = firstSequence_ = lastSequence_ = 0;
+    count_ = bytes_ = initializationRecords_ = probeRecords_ = firstSequence_ = lastSequence_ = 0;
     digest_.clear();
     opened_ = true;
 }
@@ -37,15 +37,24 @@ void LifecycleRecorder::Open(const std::filesystem::path& auditDir, LifecycleIde
 void LifecycleRecorder::Write(const Json& event) {
     if (!Opened())
         throw std::runtime_error("Lifecycle recorder is not open");
-    if (!event.is_object() || event.value("schema", "") != kLifecycleEventSchema
-        || event.value("kind", "") != "zombie_initialized")
-        throw std::runtime_error("Lifecycle recorder accepts only complete initialization events");
+    const std::string schema = event.is_object() ? event.value("schema", "") : std::string();
+    const std::string kind = event.is_object() ? event.value("kind", "") : std::string();
+    const bool initialization = schema == kLifecycleEventSchema && kind == "zombie_initialized";
+    const bool probe_event = schema == kLifecycleProbeEventSchema
+        && (kind == "zombie_phase_transition" || kind == "zombie_removal_marked"
+            || kind == "zombie_slot_recycle_candidate" || kind == "zombie_slot_recycle_commit");
+    if (!event.is_object() || (!initialization && !probe_event))
+        throw std::runtime_error("Lifecycle recorder accepts only complete lifecycle events");
     const auto& sequence = event.at("capture_sequence");
     if (!sequence.is_number_unsigned() || sequence.get<uint64_t>() == 0)
         throw std::runtime_error("Lifecycle event has no positive capture_sequence");
     const uint64_t captureSequence = sequence.get<uint64_t>();
     if (count_ && captureSequence <= lastSequence_)
         throw std::runtime_error("Lifecycle capture_sequence is not strictly increasing");
+    if (initialization)
+        ++initializationRecords_;
+    else
+        ++probeRecords_;
     const Json envelope = {
         {"schema", kLifecycleEnvelopeSchema},
         {"file_seq", count_},
@@ -75,14 +84,14 @@ void LifecycleRecorder::CloseEvents() {
     opened_ = false;
 }
 
-void LifecycleRecorder::Finish(bool complete, const Json& counters, const Json& probeHealth) {
+void LifecycleRecorder::Finish(bool complete, const Json& counters, const Json& probeHealth, bool probesEnabled) {
     if (!Opened())
         throw std::runtime_error("Lifecycle recorder is not open");
     CloseEvents();
     finished_ = true;
     if (!complete)
         return;
-    WriteReceipt(counters, probeHealth);
+    WriteReceipt(counters, probeHealth, probesEnabled);
 }
 
 void LifecycleRecorder::Abandon() noexcept {
@@ -93,13 +102,53 @@ void LifecycleRecorder::Abandon() noexcept {
     hasher_.reset();
     opened_ = false;
     finished_ = false;
-    count_ = bytes_ = firstSequence_ = lastSequence_ = 0;
+    count_ = bytes_ = initializationRecords_ = probeRecords_ = firstSequence_ = lastSequence_ = 0;
     digest_.clear();
 }
 
-void LifecycleRecorder::WriteReceipt(const Json& counters, const Json& probeHealth) {
+void LifecycleRecorder::WriteReceipt(const Json& counters, const Json& probeHealth, bool probesEnabled) {
     digest_ = hasher_->HexDigest();
-    const Json receipt = {
+    Json receipt;
+    if (probesEnabled) {
+        Json initialization = counters.is_object() && counters.contains("initialization")
+            ? counters.at("initialization") : Json::object();
+        Json probes = counters.is_object() && counters.contains("probes")
+            ? counters.at("probes") : Json::object();
+        initialization["persisted"] = initializationRecords_;
+        probes["persisted"] = probeRecords_;
+        Json health = probeHealth.is_object() ? probeHealth : Json::object();
+        if (!health.contains("counters") || !health["counters"].is_object())
+            health["counters"] = Json::object();
+        health["counters"]["persisted"] = probeRecords_;
+        const Json perSource = {
+            {"initialization", initialization},
+            {"probes", probes},
+            {"total", {{"persisted", count_}, {"records", count_}, {"bytes", bytes_}}},
+        };
+        receipt = {
+            {"schema", "lvz.lifecycle-close-receipt.v2"},
+            {"run_id", identity_.run_id},
+            {"branch_id", identity_.branch_id},
+            {"session_id", identity_.session_id},
+            {"sequence_domain", identity_.sequence_domain},
+            {"envelope_schema", kLifecycleEnvelopeSchema},
+            {"event_schemas", {kLifecycleEventSchema, kLifecycleProbeEventSchema}},
+            {"probe", {{"name", "zombie-initialize-exit"}, {"schema", "lvz.spawn.v1"}}},
+            {"build", {{"module", identity_.build_module}, {"sha256", identity_.build_sha256}}},
+            {"manifest_sha256", FileSha256(auditDir_ / "manifest.json")},
+            {"records", count_},
+            {"first_capture_sequence", count_ ? Json(firstSequence_) : Json(nullptr)},
+            {"last_capture_sequence", count_ ? Json(lastSequence_) : Json(nullptr)},
+            {"bytes", bytes_},
+            {"sha256", digest_},
+            {"counters", perSource},
+            {"probe_health", health},
+            {"completed", true},
+            {"persistence", {{"method", "flush_close_then_atomic_receipt"},
+                             {"receipt_written_after_close", true}}},
+        };
+    } else {
+    receipt = {
         {"schema", kLifecycleReceiptSchema},
         {"run_id", identity_.run_id},
         {"branch_id", identity_.branch_id},
@@ -121,6 +170,7 @@ void LifecycleRecorder::WriteReceipt(const Json& counters, const Json& probeHeal
         {"persistence", {{"method", "flush_close_then_atomic_receipt"},
                          {"receipt_written_after_close", true}}},
     };
+    }
     const auto temporary = auditDir_ / (std::string(kLifecycleReceiptFile) + ".partial");
     try {
         {

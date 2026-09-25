@@ -257,3 +257,24 @@ python -m unittest tests.test_issue111_capture_points tests.test_issue99_shovel_
 `seq` 或出生探针 `ordinal` 冒充 `capture_sequence`、重复 id、事实类别缺失、
 hooks_added/game_runs 非零、CLI 失败退出等负例。这些都是无游戏、无 AvZ 的离线性测试，
 不替代真机验收。
+
+## ApplyBurn 直接死亡链的有界帧事实（评审第三轮补充）
+
+锁定二进制 `f9669af3…` 的独立反汇编证据：
+
+- ApplyBurn `0x532FC2`：`e8 29 d3 ff ff`（`call 0x5302F0`），返回地址 `0x532FC7`；
+- DieWithLoot `0x5302F0`：`push ebp; mov esp,ebp; and esp,-8; push ecx; push esi`，随后
+  `0x5302FA`：`e8 11 02 00 00`（`call 0x530510`），返回地址 `0x5302FF`；
+- DieNoLoot `0x530510` 建立 EBP 帧；既有 mDead store `0x530602` 执行时 EBP 仍是该帧。
+
+在既有 mDead hook 中做**有界**帧事实读取（不扫描任意栈、不新增补丁地址）：
+
+1. shim 保存的原始 EBP 指向 DieNoLoot 帧；`[ebp]`=DieWithLoot 保存的 EBP，
+   `[ebp+4]`=返回 DieWithLoot 的地址（应为 `0x5302FF`）；
+2. `[[ebp]+4]`=返回 ApplyBurn 的地址（应为 `0x532FC7`）；
+3. 再校验两个 pinned callsite 的 5 字节序列（`0x532FC2`、`0x5302FA`）与锁定二进制一致。
+
+只有“首次 mDead 0→1、gameplay on_board、两个返回地址精确匹配、callsite 字节匹配”同时成立，
+分析器才把该 removal 标为 `confirmed_death_path`（`charred_animation_via_applyburn`）；
+通用 mDead / DieNoLoot / DieWithLoot 观测仍然不是击杀证据。原生夹具覆盖正例、外来帧返回、
+缺帧（null）与 callsite 字节不匹配四类；读失败/线程/停采等情况下 store 仍无条件重放。

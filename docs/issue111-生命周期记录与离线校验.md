@@ -225,3 +225,45 @@ python -m unittest discover -s tests -q
 - 实验编排读写 `LVZ_LIFECYCLE_RECORDING` 的便捷入口（可选，不阻塞本 PR）。
 - 未做 fsync/掉电语义声明：receipt 证明写入者的 flush+close 成功与内容绑定，与现有 JSONL 证据
   同一持久化级别。
+
+## v2 生产探针记录（`lvz.lifecycle-event.v2`）
+
+当 manifest 含有启用的 `lifecycle_probes` capability 时，同一个
+`lifecycle-events.jsonl` 还包含 store 粒度的探针事实（envelope 仍为
+`lvz.lifecycle-record.v1`）：
+
+- `zombie_phase_transition`（5 个 phase store；记录 site、原始 before/after）；
+- `zombie_removal_marked`（mDead store；removal 不是 kill）；
+- `zombie_slot_recycle_candidate` / `zombie_slot_recycle_commit`（guard 与 free 提交配对，
+  commit 记录 `candidate_capture_sequence` 与 free head/count）。
+
+校验规则（`lifecycle_events.validate`）：v2 记录必须伴随
+`lifecycle_probes.enabled=true`、`record_schema=lvz.lifecycle-event.v2`、probe set、session 与
+build 身份；重复的 phase store 原样保留（不做 dedup）；candidate 必须有 commit、commit 必须
+引用已知 candidate，否则文件判 failed。旧 v1 轨迹与 unavailable 判定保持兼容。
+
+## v2 关闭回执与最终健康（评审修正）
+
+探针开启时回执 schema 升级为 `lvz.lifecycle-close-receipt.v2`：`counters` 按来源分为
+`initialization` / `probes` / `total`，其中 `probes.persisted` 与 v2 记录数严格相等；
+`probe_health` 绑定卸载后的最终状态（`installed=false`、`pending_candidate=false`、
+`healthy=true`、`queued=0`，所有故障计数为 0），并与 manifest 的最终
+`lifecycle_probes.probe_counters`、`sites` 以及 audit `lifecycle_probes_closed` 事件逐项一致。
+v2 receipt 的 `event_schemas` 同时声明 v1 与 v2；缺关闭事件、payload 不一致或任一故障计数
+非零都判 failed。
+
+## 计数器语义政策（评审修正）
+
+- **良性**：`live_skips` 只是回收 guard 的存活分支，不计入失败。
+- **丢失观测（使完整性/首杀证明失败）**：`read_failed`、`classify_refused`、`inactive_suppressed`、
+  `unmatched_commits`、`pair_mismatch`、`overwritten_pending`、`faults`、`overflow`、`wrong_thread`。
+  它们必须为 0 才会写入 `healthy=true` 的关闭回执；`analyze_capture_facts` 同样拒绝证明。
+- **不丢失的筛选**：离板预览对象（`on_board=false`）照常发布事实，不是读/分类失败。
+- `reader_protected=false` 且 `pending_callbacks=0` 表示 VEH 读取保护句柄已随补丁卸载而释放。
+
+## 形式 schema（评审修正）
+
+`logger/schemas/lifecycle-record.schema.json` 的信封 `event` 现在是 v1/v2 的 `oneOf`；
+`lifecycle-close-receipt.schema.json` 顶层是 `receipt_v1`/`receipt_v2` 的 `oneOf`。
+`tests/test_lifecycle_schemas.py` 用仓库内置的最小 draft-2020-12 子集校验器对原生混合
+v1/v2 产物逐条验证信封与回执，不依赖第三方 `jsonschema`。

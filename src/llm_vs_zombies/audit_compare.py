@@ -2247,10 +2247,46 @@ def lifecycle_identity_normalized_manifest(manifest: dict) -> dict:
     return normalized
 
 
+def common_manifest_normalized(manifest: dict) -> dict:
+    """Narrow, declared instrumentation normalization for scoped comparison.
+
+    Only the lifecycle identity (run/branch/session) and the exact-store probe
+    capability block are removed; every gameplay/state/RNG/action/audio field
+    stays in the comparison. The default comparator above remains strict.
+    """
+    normalized = lifecycle_identity_normalized_manifest(manifest)
+    if not isinstance(normalized, dict):
+        return normalized
+    import copy as _copy
+    normalized = _copy.deepcopy(normalized)
+    if "lifecycle_probes" in normalized:
+        normalized["lifecycle_probes"] = "<instrumentation-scope>"
+    return normalized
+
+
+def compare_common_audits(expected: AuditLog, actual: AuditLog, *,
+                          request_map: dict[str, str] | None = None) -> dict:
+    """Compare common evidence with the narrow instrumentation normalization.
+
+    The two arms may legitimately differ in their exact-store probe streams and
+    final probe counters; those are compared separately by the lifecycle
+    semantic comparator. Everything else keeps the full strict comparison.
+    """
+    result = compare_audits(expected, actual, request_map=request_map,
+                           manifest_normalizer=common_manifest_normalized)
+    result["normalized"] = ["run_id", "branch_id", "session_id", "lifecycle_probes manifest"]
+    result["scope"] = ("captured audit state/render/engine-call/particle evidence only; action/result, "
+                       "endpoint and exact-store probe streams are compared by their own comparators")
+    return result
+
+
 def compare_audits(expected: AuditLog, actual: AuditLog, *,
-                   request_map: dict[str, str] | None = None) -> dict:
-    expected_manifest = lifecycle_identity_normalized_manifest(expected.manifest)
-    actual_manifest = lifecycle_identity_normalized_manifest(actual.manifest)
+                   request_map: dict[str, str] | None = None,
+                   manifest_normalizer=None) -> dict:
+    if manifest_normalizer is None:
+        manifest_normalizer = lifecycle_identity_normalized_manifest
+    expected_manifest = manifest_normalizer(expected.manifest)
+    actual_manifest = manifest_normalizer(actual.manifest)
     if expected_manifest != actual_manifest:
         return {"equal": False, "reason": "audit_manifest",
                 "difference": first_difference(expected_manifest, actual_manifest)}
