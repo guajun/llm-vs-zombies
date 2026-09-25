@@ -99,7 +99,8 @@ def compare_scoped(left: str | Path, right: str | Path, *, scope: str = "both") 
     """
     if scope not in ("common", "lifecycle", "both"):
         raise CompareError(f"unsupported comparison scope: {scope}")
-    left, right = Path(left), Path(right)
+    left_run, right_run = Path(left), Path(right)
+    left, right = left_run, right_run
     left = left / "audit" if (left / "audit" / "manifest.json").is_file() else left
     right = right / "audit" if (right / "audit" / "manifest.json").is_file() else right
     for directory in (left, right):
@@ -110,20 +111,24 @@ def compare_scoped(left: str | Path, right: str | Path, *, scope: str = "both") 
         if report["status"] == "failed":
             raise CompareError("lifecycle evidence is invalid: " + "; ".join(report["problems"]))
     report = {"schema": "lvz.lifecycle-scoped-compare.v1", "scope": scope,
-              "normalized": list(SCOPED_NORMALIZATION), "equal": False}
+              "normalized": list(SCOPED_NORMALIZATION), "equal": False,
+              "requires": ["audit", "actions"] + (["lifecycle"] if scope != "common" else [])}
     if scope in ("common", "both"):
         try:
-            from . import audit_compare
+            from . import action_compare, audit_compare
             report["common"] = audit_compare.compare_common_audits(
                 audit_compare.AuditLog(left, require_closed=True),
                 audit_compare.AuditLog(right, require_closed=True))
-        except (audit_compare.EvidenceError, OSError, UnicodeError, ValueError) as exc:
-            raise CompareError(f"common audit evidence is unreadable: {exc}") from exc
+            report["actions"] = action_compare.compare_actions(left_run, right_run)
+        except (audit_compare.EvidenceError, action_compare.ActionCompareError,
+                OSError, UnicodeError, ValueError) as exc:
+            raise CompareError(f"common audit/action evidence is unreadable: {exc}") from exc
     if scope in ("lifecycle", "both"):
         report["lifecycle"] = compare_lifecycle(left, right)
     common_equal = report.get("common", {}).get("equal", True)
+    actions_equal = report.get("actions", {}).get("equal", True)
     lifecycle_equal = report.get("lifecycle", {}).get("equal", True)
-    report["equal"] = common_equal and lifecycle_equal
+    report["equal"] = common_equal and actions_equal and lifecycle_equal
     return report
 
 

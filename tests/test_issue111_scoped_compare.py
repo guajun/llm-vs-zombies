@@ -56,12 +56,51 @@ def make_off_run(source: Path, target: Path) -> Path:
     return target
 
 
+def write_trace(run: Path, *, executed_ticks=1, method="advance") -> None:
+    """One minimal strict trace accepted by engine_replay._trace_steps."""
+    marker = {
+        "schema": "lvz.engine-replay.v1",
+        "identity": {"build": {"runtime_protocol": 1, "avz_commit": "a" * 40},
+                     "game": {"schema": "lvz.audit.v1", "loaded_signatures_match": True,
+                              "target": "synthetic"},
+                     "artifacts": {"runtime": "a" * 64}},
+        "observation": {"version": {"epoch": 0, "tick": 0, "revision": 0}, "game_ui": 3, "scene": 1},
+        "initialization": {"execution_mode": "headless"},
+        "state": {"schema": "lvz.audit.v1", "rng": {"target": "synthetic"}, "board": {"tick": 0}},
+    }
+    declared = run / "replay-initial.json"
+    if declared.is_file():
+        try:
+            declared_version = (json.loads(declared.read_bytes()).get("observation") or {}).get("version")
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            declared_version = None
+        if isinstance(declared_version, dict):
+            marker["observation"]["version"] = declared_version
+    records = [
+        {"schema": 1, "seq": 0, "kind": "replay_initial", "data": marker},
+        {"schema": 1, "seq": 1, "kind": "request",
+         "data": {"protocol": 1, "request_id": "a", "method": method, "params": {"ticks": 1}}},
+        {"schema": 1, "seq": 2, "kind": "response",
+         "data": {"protocol": 1, "request_id": "a", "ok": True,
+                  "result": {"executed_ticks": executed_ticks,
+                             "observation": {"version": {"epoch": 0, "tick": 1, "revision": 0}}}}},
+        {"schema": 1, "seq": 3, "kind": "request",
+         "data": {"protocol": 1, "request_id": "b", "method": "stop_recording", "params": {}}},
+        {"schema": 1, "seq": 4, "kind": "response",
+         "data": {"protocol": 1, "request_id": "b", "ok": True, "result": {"closed": True}}},
+    ]
+    path = run / "decisions" / "evaluation.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(record, separators=(",", ":")) + chr(10) for record in records),
+                    encoding="utf-8")
+
 class ScopedCompareTests(unittest.TestCase):
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory()
         self.addCleanup(self._temp.cleanup)
         self.base = Path(self._temp.name)
         self.on_run, _, _ = build_run(self.base / "on")
+        write_trace(self.on_run)
         self.off_run = make_off_run(self.on_run, self.base / "off" / self.on_run.name)
         self.on_b = self.base / "on-b" / self.on_run.name
         shutil.copytree(self.on_run, self.on_b)
@@ -97,6 +136,20 @@ class ScopedCompareTests(unittest.TestCase):
         self.assertFalse(streams["equal"])
         self.assertNotEqual(streams["lifecycle"].get("equal"), True)
 
+    def test_action_or_result_mismatch_is_detected_even_with_equal_audits(self):
+        write_trace(self.on_b, executed_ticks=0)
+        scoped = lifecycle_compare.compare_scoped(self.on_run, self.on_b, scope="common")
+        self.assertFalse(scoped["equal"])
+        self.assertTrue(scoped["common"]["equal"], scoped["common"])
+        self.assertEqual(scoped["actions"]["reason"], "action_or_result")
+        self.assertEqual(scoped["actions"]["index"], 0)
+
+    def test_action_method_difference_is_detected(self):
+        write_trace(self.on_b, method="commit")
+        scoped = lifecycle_compare.compare_scoped(self.on_run, self.on_b, scope="common")
+        self.assertFalse(scoped["equal"])
+        self.assertEqual(scoped["actions"]["reason"], "action_method")
+
     def test_real_particle_identity_mismatch_is_reported(self):
         from tests.test_audit_compare import particle_audit
         left = self.base / "p-left" / "audit"
@@ -105,9 +158,12 @@ class ScopedCompareTests(unittest.TestCase):
         right.parent.mkdir(parents=True)
         particle_audit(left)
         particle_audit(right, identity=131074)
-        common = lifecycle_compare.compare_scoped(left, right, scope="common")
+        from llm_vs_zombies import audit_compare
+        common = audit_compare.compare_common_audits(
+            audit_compare.AuditLog(left, require_closed=True),
+            audit_compare.AuditLog(right, require_closed=True))
         self.assertFalse(common["equal"])
-        self.assertEqual(common["common"]["reason"], "particle_shake")
+        self.assertEqual(common["reason"], "particle_shake")
 
 
 if __name__ == "__main__":

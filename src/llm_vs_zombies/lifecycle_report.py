@@ -120,6 +120,9 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
     gameplay first-kill proof instead of being dropped or counted as blockers.
     """
     coverage = coverage or {}
+    window_start = coverage.get("window_start")
+    window_end = coverage.get("window_end")
+    window_declared = _version_tuple(window_start) is not None and _version_tuple(window_end) is not None
     initial_entities = coverage.get("initial_entities") if isinstance(coverage, dict) else None
     initial_entities = initial_entities if isinstance(initial_entities, dict) else {}
     events: list[tuple[int, dict]] = []
@@ -164,11 +167,13 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
         sequence = event.get("capture_sequence")
         obj = event.get("object") if isinstance(event.get("object"), dict) else {}
         scope = "gameplay" if obj.get("on_board") is not False else "preview"
+        time_scope = _time_scope(event.get("version"), window_start, window_end)
         if kind == "zombie_phase_transition":
             phase = event.get("phase", {})
             site = phase.get("site")
             transition = {"capture_sequence": sequence, "entity": identifier, "kind": kind, "site": site,
-                          "before": phase.get("before"), "after": phase.get("after"), "scope": scope}
+                          "before": phase.get("before"), "after": phase.get("after"), "scope": scope,
+                          "time_scope": time_scope}
             state["phase_transitions"].append(transition)
             expected = DEATH_PHASE_BY_SITE.get(site)
             before, after = phase.get("before"), phase.get("after")
@@ -207,7 +212,8 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
             removal = {"capture_sequence": sequence, "entity": identifier, "kind": kind,
                        "source": event.get("removal", {}).get("source"),
                        "before": event.get("removal", {}).get("before"),
-                       "after": event.get("removal", {}).get("after"), "scope": scope}
+                       "after": event.get("removal", {}).get("after"), "scope": scope,
+                       "time_scope": time_scope}
             state["removal"] = True
             _attach_predecessor(removal, initialization, initial_entities, event, removal=True)
             frame = event.get("removal", {}).get("frame") if isinstance(event.get("removal"), dict) else None
@@ -231,25 +237,37 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
         elif kind == "zombie_slot_recycle_candidate":
             state["recycle_states"].append("candidate")
             facts.append({"capture_sequence": sequence, "entity": identifier, "kind": kind,
-                          "class": "slot_recycle_candidate", "scope": scope})
+                          "class": "slot_recycle_candidate", "scope": scope, "time_scope": time_scope})
         elif kind == "zombie_slot_recycle_commit":
             state["recycle_states"].append("committed")
             facts.append({"capture_sequence": sequence, "entity": identifier, "kind": kind,
-                          "class": "slot_recycle_commit", "scope": scope})
+                          "class": "slot_recycle_commit", "scope": scope, "time_scope": time_scope})
 
     preview_facts = [fact for fact in facts if fact.get("scope") == "preview"]
     gameplay_facts = [fact for fact in facts if fact.get("scope") != "preview"]
-    confirmed = [fact for fact in gameplay_facts
+    proof_facts = [fact for fact in gameplay_facts if fact.get("time_scope") == "inside"]
+    context_facts = [fact for fact in gameplay_facts
+                     if fact.get("time_scope") in ("before", "after")]
+    uncontrolled_facts = [fact for fact in gameplay_facts
+                          if fact.get("time_scope") == "uncontrolled"]
+    uncontrolled_death_evidence = [
+        fact for fact in uncontrolled_facts
+        if fact.get("kind") == "zombie_removal_marked"
+        or fact.get("class") in ("confirmed_death_stage", "confirmed_death_path",
+                                 "death_after_dying", "already_dying", "phase_unclassified")]
+    confirmed = [fact for fact in proof_facts
                  if fact.get("class") in ("confirmed_death_stage", "confirmed_death_path")]
-    unknown = [fact for fact in gameplay_facts
+    unknown = [fact for fact in proof_facts
                if fact.get("class") in ("removal_unclassified", "phase_unclassified")]
     unknown_predecessors = [fact for fact in confirmed
                             if fact.get("predecessor") in ("unknown_predecessor",
                                                            "initial_residue_doomed")]
-    unknown_onsets = [fact for fact in gameplay_facts
+    unknown_onsets = [fact for fact in proof_facts
                       if fact.get("class") == "already_dying" and fact.get("onset") == "unknown"]
     unknown += unknown_predecessors
     unknown += unknown_onsets
+    if window_declared:
+        unknown += uncontrolled_death_evidence
     candidates = [fact for fact in confirmed
                   if fact.get("predecessor") in ("initialization", "initial_residue")]
     counters = counters or {}
@@ -272,6 +290,8 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
         reasons.append("clean probe counters are not asserted by the evidence")
     if unknown_onsets:
         reasons.append("an already-dying observation has no captured onset (earlier death state missed)")
+    if window_declared and uncontrolled_death_evidence:
+        reasons.append("uncontrolled facts cannot be ordered inside or outside the declared window")
     if not confirmed:
         reasons.append("no capture fact shows a death-confirming phase store")
     else:
@@ -304,6 +324,11 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
             "same_call_lifetimes": sum(1 for fact in facts if fact.get("same_call_lifetime")),
             "unknown_predecessors": len(unknown_predecessors),
             "unknown_onsets": len(unknown_onsets),
+            "proof_facts": len(proof_facts),
+            "context_facts": len(context_facts),
+            "uncontrolled_facts": len(uncontrolled_facts),
+            "time_scope_counts": {name: sum(1 for fact in facts if fact.get("time_scope") == name)
+                                  for name in ("inside", "before", "after", "uncontrolled", "undeclared")},
             "removals": sum(1 for fact in facts if fact["kind"] == "zombie_removal_marked"),
             "recycle_candidates": sum(1 for fact in facts if fact["kind"] == "zombie_slot_recycle_candidate"),
             "recycle_commits": sum(1 for fact in facts if fact["kind"] == "zombie_slot_recycle_commit"),
@@ -322,6 +347,8 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
             "reasons": reasons,
         },
         "preview_facts": preview_facts,
+        "context_facts": context_facts,
+        "uncontrolled_facts": uncontrolled_facts,
         "unknown_facts": unknown,
     }
 
@@ -391,7 +418,11 @@ def snapshot_from_frame(frame, line: int) -> dict:
                   "engine_call_id": call.get("engine_call_id"),
                   "native_clock_before": call.get("native_clock_before"),
                   "native_clock_after": call.get("native_clock_after")}
-    return {"coordinate": coordinate, "zombies": zombies, "problems": problems}
+    digest = None
+    if isinstance(frame.state, dict) and frame.state:
+        from . import audit_compare
+        digest = hashlib.sha256(audit_compare.canonical(frame.state)).hexdigest()
+    return {"coordinate": coordinate, "zombies": zombies, "problems": problems, "state_sha256": digest}
 
 
 def snapshots_from_audit(directory: str | Path, *, require_closed: bool = True):
@@ -609,39 +640,93 @@ def _plan_binding_paths(run_directory: Path, suite_directory: Path,
     return paths
 
 
-def _initial_anchor(snapshots: list[dict], initial: dict) -> int | None:
+def _initial_anchor(snapshots: list[dict], initial: dict) -> tuple[int | None, list[str]]:
     """Locate the captured initial boundary inside the complete audit.
 
     Real initialization/B0 can legitimately produce audit boundaries before the
-    captured initial state; the frozen window starts at the anchor, not
-    necessarily at frame zero. The anchor is located by version and, when the
-    captured state carries the zombie pool, by the same allocated slot ids.
+    captured initial state; the frozen window starts at the anchor. The anchor
+    must match the captured version **and the exact canonical state**; a
+    subset match or a missing/malformed state never proves the window.
     """
+    state = initial.get("state") if isinstance(initial, dict) else None
+    if not isinstance(state, dict) or not state:
+        return None, ["the captured initial state is missing or malformed"]
     observation = initial.get("observation") if isinstance(initial.get("observation"), dict) else initial
     initial_version = observation.get("version") if isinstance(observation, dict) else None
     if not isinstance(initial_version, dict):
-        return None
-    state = initial.get("state") if isinstance(initial.get("state"), dict) else {}
-    slots = ((state.get("zombies") or {}).get("slots")) or {}
-    expected_ids: dict[str, int] = {}
-    if isinstance(slots, dict):
-        for slot, entry in slots.items():
-            if not isinstance(entry, dict):
-                continue
-            identifier = entry.get("id_or_free_next")
-            if isinstance(identifier, int) and identifier >> 16 != 0:
-                expected_ids[str(slot)] = identifier
+        return None, ["the captured initial boundary has no version"]
+    from . import audit_compare
+    digest = hashlib.sha256(audit_compare.canonical(state)).hexdigest()
     for index, snapshot in enumerate(snapshots):
         coordinate = (snapshot.get("coordinate") or {}).get("version")
         if coordinate != initial_version:
             continue
-        if expected_ids:
-            zombies = snapshot.get("zombies") or {}
-            if not all((zombies.get(slot) or {}).get("id") == identifier
-                       for slot, identifier in expected_ids.items()):
-                continue
-        return index
-    return None
+        if snapshot.get("state_sha256") != digest:
+            continue
+        return index, []
+    return None, ["the audited stream does not contain the exact captured initial state at its version"]
+
+
+def _version_tuple(value) -> tuple[int, int, int] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return (int(value["epoch"]), int(value["tick"]), int(value["revision"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _time_scope(version, window_start, window_end) -> str:
+    """Classify a fact relative to the declared window without pretending.
+
+    ``uncontrolled`` covers facts with no controlled coordinate; ``undeclared``
+    covers a report without a declared window. Neither is silently folded into
+    inside/outside.
+    """
+    begin, finish = _version_tuple(window_start), _version_tuple(window_end)
+    if begin is None or finish is None:
+        return "undeclared"
+    coordinate = _version_tuple(version)
+    if coordinate is None:
+        return "uncontrolled"
+    if coordinate < begin:
+        return "before"
+    if coordinate > finish:
+        return "after"
+    return "inside"
+
+
+def _resolve_window_anchor(run_directory: Path, plan: str | Path | None,
+                           plan_binding: str | Path | None, snapshots: list[dict]
+                           ) -> tuple[int | None, int | None]:
+    """Locate the declared start/end frames for scoping, without claiming proof."""
+    if plan is None or not Path(plan).is_file() or not snapshots:
+        return None, None
+    initial_path = run_directory / "replay-initial.json"
+    if not initial_path.is_file():
+        return None, None
+    try:
+        initial = json.loads(initial_path.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, None
+    anchor, _ = _initial_anchor(snapshots, initial)
+    if anchor is None:
+        return None, None
+    endpoint = run_directory / "experiment-end.json"
+    if not endpoint.is_file():
+        return anchor, None
+    try:
+        ending = json.loads(endpoint.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return anchor, None
+    final_version = (ending.get("final_observation") or {}).get("version") \
+        if isinstance(ending.get("final_observation"), dict) else None
+    if not isinstance(final_version, dict):
+        return anchor, None
+    for index in range(len(snapshots) - 1, anchor - 1, -1):
+        if (snapshots[index].get("coordinate") or {}).get("version") == final_version:
+            return anchor, index
+    return anchor, None
 
 
 def _full_window_evidence(run_directory: Path, audit_directory: Path, snapshots: list[dict],
@@ -734,9 +819,9 @@ def _full_window_evidence(run_directory: Path, audit_directory: Path, snapshots:
         return False, ["the captured initial boundary has no version"], None
     if not snapshots:
         return False, ["no audited boundary exists"], None
-    anchor_index = _initial_anchor(snapshots, initial)
+    anchor_index, anchor_problems = _initial_anchor(snapshots, initial)
     if anchor_index is None:
-        return False, ["the audited stream does not contain the captured initial boundary"], None
+        return False, anchor_problems, None
     first_version = (snapshots[anchor_index].get("coordinate") or {}).get("version")
     endpoint = run_directory / "experiment-end.json"
     if not endpoint.is_file():
@@ -776,7 +861,10 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
 
     Both documented input forms work: a child run directory (with its nested
     ``audit/``) and a bare audit directory (whose parent supplies the endpoint
-    and suite plan binding).
+    and suite plan binding). When a frozen plan is bound, every reported
+    first-death/removal/unknown fact is scoped to the declared window
+    (anchor -> executed endpoint); earlier frames/records stay predecessor and
+    health context and are never reported as in-window firsts.
     """
     run = Path(run)
     audit_directory = run / "audit" if (run / "audit" / "manifest.json").is_file() else run
@@ -786,9 +874,16 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
     coverage = {"audit_manifest_target": manifest.get("target"),
                 "source": "boundary samples",
                 "initialization_capture": "installed" if spawn_hook.get("installed") is True else "not installed"}
-    report = analyze_snapshots(snapshots, coverage=coverage)
-    report["source"] = {"directory": str(audit_directory), "target": manifest.get("target"),
-                        "boundaries": len(snapshots)}
+    lifecycle_report = None
+    probes_enabled = False
+    probe_counters = None
+    probes_healthy = False
+    receipt: dict = {}
+    capture_records: list[dict] = []
+    full_window, window_problems, window_start_index = False, [], None
+    binding_mode_problems: list[str] = []
+    window_anchor: int | None = None
+    window_end_index: int | None = None
     if lifecycle:
         from . import lifecycle_events
         try:
@@ -797,14 +892,6 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
         except lifecycle_events.LifecycleError as exc:
             lifecycle_report = {"schema": lifecycle_events.VALIDATION_SCHEMA, "status": "invalid",
                                 "problems": [str(exc)]}
-        report["lifecycle"] = {"schema": lifecycle_report.get("schema"),
-                               "status": lifecycle_report.get("status"),
-                               "records": (lifecycle_report.get("records") or {}).get("count"),
-                               "close_receipt_present": (lifecycle_report.get("close_receipt") or {}).get("present"),
-                               "problems": lifecycle_report.get("problems") or []}
-        report["coverage"]["lifecycle_recording"] = lifecycle_report.get("status")
-        if lifecycle_report.get("status") == "failed":
-            report["problems"].extend(f"lifecycle: {problem}" for problem in lifecycle_report["problems"])
         probes_block = manifest.get("lifecycle_probes")
         probes_enabled = isinstance(probes_block, dict) and probes_block.get("enabled") is True
         probes_healthy = isinstance(probes_block, dict) and probes_block.get("healthy") is True \
@@ -821,7 +908,10 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
             raise ReportError(f"capture facts are unreadable: {exc}") from exc
         full_window, window_problems, window_start_index = _full_window_evidence(
             run_directory, audit_directory, snapshots, plan, plan_binding)
-        binding_mode_problems: list[str] = []
+        window_anchor, window_end_index = _resolve_window_anchor(run_directory, plan, plan_binding,
+                                                                 snapshots)
+        if window_anchor is None:
+            window_anchor = window_start_index
         suite_directory = run_directory.parent / (run_directory.name.rsplit("-s", 1)[0]
                                                    if "-s" in run_directory.name else run_directory.name)
         for candidate in _plan_binding_paths(run_directory, suite_directory, plan_binding):
@@ -840,9 +930,24 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
                                                                      else "disabled"):
                 binding_mode_problems.append("the lifecycle capability does not match the prepared mode arm")
             break
+    window_snapshots = snapshots[window_anchor:] if window_anchor is not None else snapshots
+    report = analyze_snapshots(window_snapshots, coverage=coverage)
+    report["source"] = {"directory": str(audit_directory), "target": manifest.get("target"),
+                        "boundaries": len(snapshots), "window_start_index": window_anchor,
+                        "window_end_index": window_end_index, "window_boundaries": len(window_snapshots)}
+    if lifecycle:
+        from . import lifecycle_events
+        report["lifecycle"] = {"schema": lifecycle_report.get("schema"),
+                               "status": lifecycle_report.get("status"),
+                               "records": (lifecycle_report.get("records") or {}).get("count"),
+                               "close_receipt_present": (lifecycle_report.get("close_receipt") or {}).get("present"),
+                               "problems": lifecycle_report.get("problems") or []}
+        report["coverage"]["lifecycle_recording"] = lifecycle_report.get("status")
+        if lifecycle_report.get("status") == "failed":
+            report["problems"].extend(f"lifecycle: {problem}" for problem in lifecycle_report["problems"])
         initial_entities: dict[int, dict] = {}
-        if snapshots:
-            for entry in (snapshots[0].get("zombies") or {}).values():
+        if window_snapshots:
+            for entry in (window_snapshots[0].get("zombies") or {}).values():
                 if not isinstance(entry, dict) or not isinstance(entry.get("id"), int):
                     continue
                 raw = entry.get("raw") if isinstance(entry.get("raw"), dict) else {}
@@ -850,9 +955,15 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
                 state = signed(state) if isinstance(state, int) else None
                 initial_entities[entry["id"]] = {"state": state,
                                                  "disappeared": bool(raw.get("disappeared"))}
+        window_start_version = ((snapshots[window_anchor].get("coordinate") or {}).get("version")
+                                if window_anchor is not None else None)
+        window_end_version = ((snapshots[window_end_index].get("coordinate") or {}).get("version")
+                              if window_end_index is not None else None)
         report["coverage"]["frozen_plan"] = str(plan) if plan is not None else None
         report["coverage"]["full_window_problems"] = window_problems
         report["coverage"]["window_start_index"] = window_start_index
+        report["coverage"]["window_start"] = window_start_version
+        report["coverage"]["window_end"] = window_end_version
         report["capture_facts"] = analyze_capture_facts(
             capture_records,
             counters=probe_counters,
@@ -863,6 +974,8 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
                 "full_window": full_window,
                 "health_clean": probes_healthy,
                 "initial_entities": initial_entities,
+                "window_start": window_start_version,
+                "window_end": window_end_version,
             })
         if binding_mode_problems:
             report["coverage"]["binding_problems"] = binding_mode_problems

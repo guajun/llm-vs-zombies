@@ -118,7 +118,9 @@ python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-o
 
 - 同模式复跑（off/off、on/on）使用 `--scope both`：先各自严格校验完整流，再比较共同 gameplay 证据，并单独比较
   完整 v2 语义序列/健康。
-- OFF vs ON 安装效应使用 `--scope common`：仅做声明的窄归一化（run/branch/session、`lifecycle_probes`
-  manifest、`event.object.board` 诊断指针），不把合法的 v2 事件差异当作扰动失败；任何共同
-  state/RNG/action/结果首差异都必须如实报告。
+- OFF vs ON 安装效应使用 `--scope common`：该 scope 现在必须同时通过严格 audit 比较、严格
+  action/request/result 比较（`engine_replay._trace_steps`，存在原生请求时再与 `_native_steps` 交叉校验）
+  以及 initial/final outcome 比较；任一输入缺失即 fail closed。仅做声明的窄归一化（run/branch/session、
+  `lifecycle_probes` manifest、`event.object.board` 诊断指针），不把合法的 v2 事件差异当作扰动失败；
+  任何共同 state/RNG/action/结果首差异都必须如实报告。
 - 默认比较器保持严格；scoped 路径不丢宽字段。

@@ -2275,8 +2275,8 @@ def compare_common_audits(expected: AuditLog, actual: AuditLog, *,
     result = compare_audits(expected, actual, request_map=request_map,
                            manifest_normalizer=common_manifest_normalized)
     result["normalized"] = ["run_id", "branch_id", "session_id", "lifecycle_probes manifest"]
-    result["scope"] = ("common gameplay/state/RNG/action/result evidence; exact-store probe "
-                       "streams and probe counters are compared separately")
+    result["scope"] = ("captured audit state/render/engine-call/particle evidence only; action/result, "
+                       "endpoint and exact-store probe streams are compared by their own comparators")
     return result
 
 

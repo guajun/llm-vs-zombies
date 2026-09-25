@@ -136,9 +136,12 @@ def build_run(base: Path, *, with_receipt: bool = True, truncate: bool = False,
         encoding="utf-8")
     # The captured initial boundary and the run/build identity that the frozen
     # plan and its raw identity binding must agree with.
+    initial_frame = json.loads((audit / "state-deltas.jsonl").read_text(encoding="utf-8").splitlines()[0])
     (run / "replay-initial.json").write_text(json.dumps({
+        "schema": "lvz.replay-initial.v1",
         "observation": {"version": {"epoch": 1, "tick": 0, "revision": 0},
-                        "game_clock": 0}}), encoding="utf-8")
+                        "game_clock": 0},
+        "state": initial_frame["initial"]}), encoding="utf-8")
     (run / "manifest.json").write_text(json.dumps({
         "schema_version": 1, "run_id": run.name, "status": "recording",
         "implementation": {"recorder_sha256": "b" * 64}}), encoding="utf-8")
@@ -215,10 +218,12 @@ class ReportProofTests(unittest.TestCase):
 
     def test_legitimate_preceding_boundary_is_located_by_version_and_state(self):
         run, _, plan_path = build_run(self.base)
+        from llm_vs_zombies import audit_compare
         initial_path = run / "replay-initial.json"
         initial = json.loads(initial_path.read_text(encoding="utf-8"))
-        initial["observation"]["version"] = {"epoch": 1, "tick": 1, "revision": 0}
-        initial["state"] = {"zombies": {"slots": {}}}
+        frames = audit_compare.AuditLog(run / "audit", require_closed=True).frames
+        initial["observation"]["version"] = dict(frames[1].version)
+        initial["state"] = frames[1].state
         initial_path.write_text(json.dumps(initial), encoding="utf-8")
         report = lifecycle_report.report_for_run(run, plan=plan_path)
         self.assertTrue(report["first_kill"]["proven"], report["coverage"]["full_window_problems"])

@@ -13,7 +13,9 @@ ENTITY = 0x00020001
 OTHER = 0x00030001
 LIVE_INITIAL = {ENTITY: {"state": 0, "disappeared": False}, OTHER: {"state": 0, "disappeared": False}}
 FULL_COVERAGE = {"receipt_valid": True, "probe_capability": True, "initialization_capture": True,
-                 "full_window": True, "health_clean": True, "initial_entities": LIVE_INITIAL}
+                 "full_window": True, "health_clean": True, "initial_entities": LIVE_INITIAL,
+                 "window_start": {"epoch": 0, "tick": 0, "revision": 0},
+                 "window_end": {"epoch": 0, "tick": 100, "revision": 0}}
 
 
 def init_event(sequence, *, entity=ENTITY, engine_call_id=42, invocation=1):
@@ -34,10 +36,17 @@ def init_event(sequence, *, entity=ENTITY, engine_call_id=42, invocation=1):
 
 
 def event(kind, sequence, *, entity=ENTITY, site="phase-mowdown", before=0, after=3, on_board=True,
-          engine_call_id=None):
+          engine_call_id=None, version=None):
+    if version is False:
+        event_version, phase = None, "uncontrolled_update"
+    elif version is None:
+        event_version, phase = {"epoch": 0, "tick": sequence, "revision": 0}, "controlled_boundary"
+    else:
+        event_version, phase = version, "controlled_boundary"
     base = {
         "schema": lifecycle_events.PROBE_EVENT_SCHEMA, "kind": kind, "capture_sequence": sequence,
-        "version": None, "version_phase": "uncontrolled_update", "engine_call_id": engine_call_id,
+        "version": event_version, "version_phase": phase,
+        "engine_call_id": engine_call_id,
         "entity": {"id": entity, "slot": entity & 0xFFFF, "generation": entity >> 16},
         "object": {"class": "zombie", "on_board": on_board, "wave": 0 if on_board else -2,
                    "board": 0x123456},
@@ -217,6 +226,43 @@ class CaptureAnalysisTests(unittest.TestCase):
         benign = analyze_capture_facts([event("zombie_phase_transition", 1)],
                                        counters={"live_skips": 3}, coverage=FULL_COVERAGE)
         self.assertTrue(benign["first_kill"]["proven"], benign["first_kill"])
+
+    def test_declared_window_scopes_first_deaths_and_context(self):
+        coverage = {**FULL_COVERAGE,
+                    "window_start": {"epoch": 0, "tick": 5, "revision": 0},
+                    "window_end": {"epoch": 0, "tick": 100, "revision": 0}}
+        report = analyze_capture_facts([
+            event("zombie_phase_transition", 1, entity=OTHER, version={"epoch": 0, "tick": 1, "revision": 0}),
+            event("zombie_phase_transition", 2, entity=ENTITY, version={"epoch": 0, "tick": 6, "revision": 0}),
+        ], coverage=coverage)
+        self.assertTrue(report["first_kill"]["proven"], report["first_kill"])
+        self.assertEqual(report["first_kill"]["entity"], ENTITY)
+        self.assertEqual(report["facts"][0]["time_scope"], "before")
+        self.assertEqual(report["summary"]["context_facts"], 1)
+
+    def test_pre_window_unknown_does_not_block_but_in_window_unknown_does(self):
+        coverage = {**FULL_COVERAGE,
+                    "window_start": {"epoch": 0, "tick": 5, "revision": 0},
+                    "window_end": {"epoch": 0, "tick": 100, "revision": 0}}
+        pre = analyze_capture_facts([
+            event("zombie_removal_marked", 1, entity=OTHER, version={"epoch": 0, "tick": 1, "revision": 0}),
+            event("zombie_phase_transition", 2, entity=ENTITY, version={"epoch": 0, "tick": 6, "revision": 0}),
+        ], coverage=coverage)
+        self.assertTrue(pre["first_kill"]["proven"], pre["first_kill"])
+        inside = analyze_capture_facts([
+            event("zombie_removal_marked", 1, entity=OTHER, version={"epoch": 0, "tick": 6, "revision": 0}),
+            event("zombie_phase_transition", 2, entity=ENTITY, version={"epoch": 0, "tick": 7, "revision": 0}),
+        ], coverage=coverage)
+        self.assertFalse(inside["first_kill"]["proven"])
+        self.assertEqual(inside["first_kill"]["blocking_facts"][0]["capture_sequence"], 1)
+
+    def test_uncontrolled_facts_block_a_declared_window(self):
+        report = analyze_capture_facts([
+            event("zombie_phase_transition", 1, version=False),
+        ], coverage=FULL_COVERAGE)
+        self.assertFalse(report["first_kill"]["proven"])
+        self.assertEqual(report["summary"]["uncontrolled_facts"], 1)
+        self.assertTrue(any("uncontrolled" in reason for reason in report["first_kill"]["reasons"]))
 
     def test_envelope_records_are_unwrapped(self):
         report = analyze_capture_facts([{"event": event("zombie_phase_transition", 1)}],
