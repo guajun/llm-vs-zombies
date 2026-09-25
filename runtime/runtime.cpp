@@ -48,7 +48,7 @@ std::string EnvironmentBranch(const char* name) {
 // LVZ_BRANCH_ID when it creates or forks a process; the default is a
 // process-instance label, so two live processes never share one scope by
 // accident and a clone can still be rebound explicitly over IPC.
-std::string InstanceBranchScope(const std::filesystem::path& directory) {
+std::string LocalBranchScope(const std::filesystem::path& directory) {
     auto explicitScope=EnvironmentBranch("LVZ_BRANCH_ID");
     if(!explicitScope.empty()) return explicitScope;
     auto alnum=[](char c){return (c>='0'&&c<='9')||(c>='A'&&c<='Z')||(c>='a'&&c<='z');};
@@ -412,6 +412,11 @@ std::unique_ptr<Controller> controller;
 // Explicit Shutdown joins workers on the game thread, never under loader lock.
 PipeServer* server=nullptr;
 void CheckThread() { if(GetCurrentThreadId()!=ownerThread) throw std::runtime_error("Runtime accessed off game thread"); }
+}
+// Public wrapper for the audit-side lifecycle evidence so the journal and the
+// lifecycle records bind the exact same branch scope.
+std::string InstanceBranchScope(const std::filesystem::path& directory) {
+    return LocalBranchScope(directory);
 }
 void Start(const std::filesystem::path& directory) {
     if(controller) return;

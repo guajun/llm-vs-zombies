@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LLM vs Zombies lifecycle close receipt v1",
+  "$id": "lvz.lifecycle-close-receipt.v1",
+  "type": "object",
+  "required": ["schema", "run_id", "branch_id", "session_id", "sequence_domain", "envelope_schema",
+               "event_schema", "probe", "build", "manifest_sha256", "records",
+               "first_capture_sequence", "last_capture_sequence", "bytes", "sha256",
+               "counters", "probe_health", "completed", "persistence"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "lvz.lifecycle-close-receipt.v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "branch_id": {"type": "string", "minLength": 1},
+    "session_id": {"type": "integer", "minimum": 1},
+    "sequence_domain": {"const": "lvz.measurement.capture-sequence"},
+    "envelope_schema": {"const": "lvz.lifecycle-record.v1"},
+    "event_schema": {"const": "lvz.lifecycle-event.v1"},
+    "probe": {
+      "type": "object",
+      "required": ["name", "schema"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"const": "zombie-initialize-exit"},
+        "schema": {"const": "lvz.spawn.v1"}
+      }
+    },
+    "build": {
+      "type": "object",
+      "required": ["module", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "module": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "records": {"type": "integer", "minimum": 0},
+    "first_capture_sequence": {"type": ["integer", "null"], "minimum": 1},
+    "last_capture_sequence": {"type": ["integer", "null"], "minimum": 1},
+    "bytes": {"type": "integer", "minimum": 0},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "counters": {
+      "type": "object",
+      "required": ["captured", "delivered", "persisted", "overflow", "wrong_thread",
+                   "nesting_mismatch", "incomplete_events"],
+      "additionalProperties": false,
+      "properties": {
+        "captured": {"type": "integer", "minimum": 0},
+        "delivered": {"type": "integer", "minimum": 0},
+        "persisted": {"type": "integer", "minimum": 0},
+        "overflow": {"type": "integer", "minimum": 0},
+        "wrong_thread": {"type": "integer", "minimum": 0},
+        "nesting_mismatch": {"type": "integer", "minimum": 0},
+        "incomplete_events": {"type": "integer", "minimum": 0}
+      }
+    },
+    "probe_health": {
+      "type": "object",
+      "required": ["captured", "queued", "wrong_thread_calls", "faults", "overflow",
+                   "active_initializers", "healthy"],
+      "additionalProperties": false,
+      "properties": {
+        "captured": {"type": "integer", "minimum": 0},
+        "queued": {"type": "integer", "minimum": 0},
+        "wrong_thread_calls": {"type": "integer", "minimum": 0},
+        "faults": {"type": "integer", "minimum": 0},
+        "overflow": {"type": "integer", "minimum": 0},
+        "active_initializers": {"type": "integer", "minimum": 0},
+        "healthy": {"const": true}
+      }
+    },
+    "completed": {"const": true},
+    "persistence": {
+      "type": "object",
+      "required": ["method", "receipt_written_after_close"],
+      "additionalProperties": false,
+      "properties": {
+        "method": {"const": "flush_close_then_atomic_receipt"},
+        "receipt_written_after_close": {"const": true}
+      }
+    }
+  }
+}

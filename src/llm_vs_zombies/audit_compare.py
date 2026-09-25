@@ -29,6 +29,7 @@ from . import mj_clock_anchor
 from . import sound_counter
 from . import fp_environment
 from . import evidence_codec
+from . import lifecycle_events
 
 SCHEMA = "lvz.audit.v1"
 RAW_ANIMATIONS = "reanimation-handles.jsonl"
@@ -350,6 +351,19 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
     """Resolve supported evidence files without trusting a manifest path."""
     directory = Path(directory)
     store = evidence_codec.EvidenceStore(directory, error=EvidenceError)
+
+    def has_evidence(name: str) -> bool:
+        # A sealed archive only declares the JSONL evidence it actually
+        # contains; asking about an optional name must not raise for an
+        # undeclared one. Non-JSONL evidence is never compressed, so it keeps
+        # its plain-file check.
+        entry = store.entry(name)
+        if entry is not None:
+            return store.exists(name)
+        if store.compressed and name.endswith(".jsonl"):
+            return False
+        return (directory / name).is_file()
+
     draw_mode(manifest)
     app_update_anchor.mode(manifest)
     mj_clock_anchor.mode(manifest)
@@ -374,12 +388,12 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
                 or type(descriptor.get("required")) is not bool):
             raise EvidenceError("unsupported raw animation evidence descriptor")
         required |= descriptor["required"]
-    present = store.exists(RAW_ANIMATIONS)
+    present = has_evidence(RAW_ANIMATIONS)
     if required and not present:
         raise EvidenceError("required raw animation evidence is missing")
     result = AUDIT_FILES + ((RAW_ANIMATIONS,) if present else ())
     particle = manifest.get("particle_shake")
-    particle_file = store.exists(PARTICLE_SHAKE_RAW)
+    particle_file = has_evidence(PARTICLE_SHAKE_RAW)
     if particle is not None:
         if (not isinstance(particle, dict) or particle.get("mode") != PARTICLE_SHAKE_MODE
                 or particle.get("installed") is not True or particle.get("original_engine_bitwise_unmodified") is not False
@@ -390,35 +404,78 @@ def audit_files(directory: Path, manifest: dict) -> tuple[str, ...]:
         result += (PARTICLE_SHAKE_RAW,)
     elif particle_file:
         raise EvidenceError("raw particle shake evidence lacks an explicit engine mode")
-    call_file = store.exists(ENGINE_CALL_RAW)
+    call_file = has_evidence(ENGINE_CALL_RAW)
     if engine_call_mode(manifest):
         if not call_file:
             raise EvidenceError("required raw engine call evidence is missing")
         result += (ENGINE_CALL_RAW,)
     elif call_file:
         raise EvidenceError("raw engine call evidence lacks an explicit engine mode")
-    audio_file = store.exists(sound_effects.EVIDENCE)
+    audio_file = has_evidence(sound_effects.EVIDENCE)
     if sound_effects.mode(manifest):
         if not audio_file:
             raise EvidenceError("required sound effects activation evidence is missing")
         result += (sound_effects.EVIDENCE,)
     elif audio_file:
         raise EvidenceError("sound effects activation lacks an explicit engine mode")
-    counter_file = store.exists(sound_counter.RAW_FILE)
+    counter_file = has_evidence(sound_counter.RAW_FILE)
     if counter_mode:
         if not counter_file:
             raise EvidenceError("required raw sound counter evidence is missing")
         result += (sound_counter.RAW_FILE,)
     elif counter_file:
         raise EvidenceError("raw sound counter evidence lacks an explicit mode")
-    fp_file = store.exists(fp_environment.RAW_FILE)
+    fp_file = has_evidence(fp_environment.RAW_FILE)
     if fp_mode:
         if not fp_file:
             raise EvidenceError("required raw FP evidence is missing")
         result += (fp_environment.RAW_FILE,)
     elif fp_file:
         raise EvidenceError("raw FP evidence lacks an explicit mode")
+    # Lifecycle recording is opt-in per run. An enabled declaration must ship
+    # both the events stream and its close receipt; an undeclared stray stream
+    # is refused instead of being silently ignored or treated as zero events.
+    try:
+        lifecycle = lifecycle_events.mode(manifest)
+    except lifecycle_events.LifecycleError as error:
+        raise EvidenceError(str(error)) from error
+
+    def lifecycle_present(name: str) -> bool:
+        return has_evidence(name)
+
+    declared = (lifecycle_events.EVENTS_FILE, lifecycle_events.RECEIPT_FILE)
+    present = [name for name in declared if lifecycle_present(name)]
+    if lifecycle == "enabled":
+        # The events stream exists from initialization; the close receipt only
+        # exists after a successful finish. A live tail therefore reads a
+        # recording before its receipt exists; the closed reader and the
+        # offline validator are the ones that refuse a missing receipt.
+        if not lifecycle_present(lifecycle_events.EVENTS_FILE):
+            raise EvidenceError("declared lifecycle recording is missing its events stream")
+        result += (lifecycle_events.EVENTS_FILE,)
+        if lifecycle_present(lifecycle_events.RECEIPT_FILE):
+            result += (lifecycle_events.RECEIPT_FILE,)
+    elif present:
+        raise EvidenceError("lifecycle evidence lacks an explicitly enabled capability declaration")
     return result
+
+
+def lifecycle_report(directory: Path, manifest: dict, *, require_close: bool):
+    """Run the full lifecycle contract check for a strict evidence reader.
+
+    Any invalid stream, receipt or declared capability becomes an
+    ``EvidenceError``; only ``unavailable``/``disabled``/``open`` (live reader)
+    pass through. This is the single integration point so ``AuditLog`` and
+    ``AuditTail.verify_closed`` cannot accept a merely present receipt.
+    """
+    try:
+        report = lifecycle_events.validate(directory, manifest=manifest, require_close=require_close)
+    except lifecycle_events.LifecycleError as error:
+        raise EvidenceError(f"lifecycle recording contract error: {error}") from error
+    if report["status"] == "failed":
+        problems = "; ".join(report["problems"]) or "unspecified failure"
+        raise EvidenceError(f"lifecycle recording is invalid: {problems}")
+    return report
 
 
 def _check_state_values(item):
@@ -1788,6 +1845,10 @@ class AuditLog:
         if require_closed:
             _closed_events(self._summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio, fp=self._fp,
                            spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
+        # Full semantic lifecycle validation, not a receipt-existence check. A
+        # live snapshot (require_closed=False) may be missing the receipt but
+        # its present records must still satisfy the contract.
+        lifecycle_report(self.directory, self.manifest, require_close=require_closed)
 
     def _retain_event(self, event):
         self._control_events.append(event)
@@ -1957,7 +2018,13 @@ class AuditTail:
                 or self.manifest.get("loaded_signatures_match") is not True):
             raise EvidenceError("invalid live audit target manifest")
         self._manifest_file = EventStream(self.store, "manifest.json")
+        # The live tail follows engine-frame evidence only. Lifecycle evidence is
+        # a separate offline contract (the offline validator and
+        # AuditLog(require_closed) own it): it is excluded from frame positions
+        # and from the frame file-set check, and the receipt may legitimately
+        # appear while the tail is still being read.
         self.evidence_files = audit_files(self.directory, self.manifest)
+        self._frame_files = self._frame_evidence_files()
         self._static_files = {name: EventStream(self.store, name) for name in self.evidence_files
                               if name == sound_effects.EVIDENCE}
         self.audio_activation = (decode(self.store.stored_path(sound_effects.EVIDENCE).read_bytes())
@@ -1965,7 +2032,7 @@ class AuditTail:
         for evidence in self._static_files.values():
             evidence.verify()
         self._headers, self._control_events = [], []
-        self._positions = {name: 0 for name in self.evidence_files
+        self._positions = {name: 0 for name in self._frame_files
                            if name != "manifest.json" and name not in self._static_files}
         self._hashes = {name: hashlib.sha256() for name in self._positions}
         self._stream = _AuditStreamDecoder(self.manifest, self.evidence_files, reuse_state=True,
@@ -2054,6 +2121,10 @@ class AuditTail:
     def engine_call_health(self):
         return copy.deepcopy(self._calls.health) if self._calls else None
 
+    def _frame_evidence_files(self):
+        return tuple(name for name in audit_files(self.directory, self.manifest)
+                     if name not in (lifecycle_events.EVENTS_FILE, lifecycle_events.RECEIPT_FILE))
+
     def _check_file(self, name, *, required_size=None):
         stat = (self.directory / name).stat()
         identity = (stat.st_dev, stat.st_ino)
@@ -2132,7 +2203,7 @@ class AuditTail:
         self._manifest_file.verify()
         for evidence in self._static_files.values():
             evidence.verify()
-        if audit_files(self.directory, self.manifest) != self.evidence_files:
+        if self._frame_evidence_files() != self._frame_files:
             raise EvidenceError("live audit evidence file set changed")
         for frame in _walk_audit(self._stream, self._new_records, retain_event=self._retain_event,
                                  request_id=request_id, constrain_request=True):
@@ -2147,6 +2218,7 @@ class AuditTail:
         self._stream.finish(final=True)
         _closed_events(self._stream.summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio, fp=self._fp,
                        spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
+        lifecycle_report(self.directory, self.manifest, require_close=True)
         for name, position in self._positions.items():
             if self._check_file(name).st_size != position:
                 raise EvidenceError("unconsumed bytes after recording close")

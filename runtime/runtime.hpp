@@ -4,6 +4,11 @@
 namespace lvz::runtime {
 void Start(const std::filesystem::path& runDir);
 void Shutdown();
+// Every runtime instance owns exactly one branch scope (LVZ_BRANCH_ID when the
+// orchestrator set it, otherwise a process-instance label derived from the run
+// directory). The audit-side lifecycle evidence binds the same value the
+// journal uses instead of inventing a second identity.
+std::string InstanceBranchScope(const std::filesystem::path& runDir);
 bool Started();
 // Called by a generated overlay of the pinned AvZ ScriptHook, on its game thread.
 bool BeforeFrame();
