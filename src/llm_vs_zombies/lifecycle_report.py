@@ -27,6 +27,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import lifecycle_events
+
 ANALYSIS_SCHEMA = "lvz.lifecycle-analysis.v1"
 # Same conservative predecessor set and stage names as issue #110's rule v2.
 FIELDS = {"type": "00000024", "state": "00000028", "hp": "000000c8",
@@ -35,6 +37,118 @@ FIELDS = {"type": "00000024", "state": "00000028", "hp": "000000c8",
 DEAD_STAGES = {1: "falling", 2: "ash", 3: "mower_death_stage"}
 KNOWN_NONDEAD = {0, 11, 15, 20, 69, 70, 71, 73, 76}
 UNIMPLEMENTED_FACT_CLASSES = ("confirmed_death_stage", "removal_unclassified", "slot_recycle")
+# Sites whose store transitions are proven death stages in the locked binary.
+# DropLoot is deliberately absent: it is not kill evidence (issue #111 review).
+DEATH_CONFIRMING_SITES = frozenset({"phase-dienoloot", "phase-diewithloot", "phase-mowdown", "phase-burn",
+                                   "phase-playdeathanim", "phase-zamboni", "phase-catapult"})
+NONDEATH_SITES = frozenset({"phase-drop-loot"})
+# Health counters that invalidate first-kill proof for the whole stream.
+BLOCKING_COUNTERS = ("overflow", "wrong_thread", "faults", "refused_recycle", "unmatched_commits",
+                     "pair_mismatch", "overwritten_pending", "incomplete_records")
+
+
+def analyze_capture_facts(records: list[dict], *, counters: dict | None = None) -> dict:
+    """Classify the v2 exact-store facts without dropping any observation.
+
+    The function never folds repeated phase stores and never treats DropLoot as
+    kill evidence. First-kill provability is derived from the raw order, so an
+    earlier unclassified removal blocks a later claim instead of being hidden.
+    """
+    events: list[dict] = []
+    for record in records:
+        event = record.get("event") if isinstance(record, dict) and isinstance(record.get("event"), dict) else record
+        if isinstance(event, dict) and event.get("schema") == lifecycle_events.PROBE_EVENT_SCHEMA:
+            events.append(event)
+    entities: dict[int, dict] = {}
+    facts: list[dict] = []
+
+    def entity(identifier: int) -> dict:
+        return entities.setdefault(identifier, {"id": identifier, "confirmed_death_stage": False,
+                                               "removal_without_death": False, "removal": False,
+                                               "recycle_states": [], "phase_transitions": []})
+
+    for event in events:
+        identifier = event.get("entity", {}).get("id") if isinstance(event.get("entity"), dict) else None
+        if not isinstance(identifier, int):
+            continue
+        state = entity(identifier)
+        kind = event.get("kind")
+        sequence = event.get("capture_sequence")
+        if kind == "zombie_phase_transition":
+            phase = event.get("phase", {})
+            site = phase.get("site")
+            transition = {"capture_sequence": sequence, "entity": identifier, "kind": kind, "site": site,
+                          "before": phase.get("before"), "after": phase.get("after")}
+            transitions = state["phase_transitions"]
+            transitions.append(transition)
+            if site in DEATH_CONFIRMING_SITES and phase.get("before") != phase.get("after"):
+                transition["class"] = "confirmed_death_stage"
+                state["confirmed_death_stage"] = True
+            elif site in NONDEATH_SITES:
+                transition["class"] = "nondeath"
+            else:
+                transition["class"] = "phase_unclassified"
+            facts.append(transition)
+        elif kind == "zombie_removal_marked":
+            removal = {"capture_sequence": sequence, "entity": identifier, "kind": kind,
+                       "source": event.get("removal", {}).get("source"),
+                       "before": event.get("removal", {}).get("before"),
+                       "after": event.get("removal", {}).get("after")}
+            state["removal"] = True
+            if state["confirmed_death_stage"]:
+                removal["class"] = "removal_after_death"
+            else:
+                removal["class"] = "removal_unclassified"
+                state["removal_without_death"] = True
+            facts.append(removal)
+        elif kind == "zombie_slot_recycle_candidate":
+            state["recycle_states"].append("candidate")
+            facts.append({"capture_sequence": sequence, "entity": identifier, "kind": kind,
+                          "class": "slot_recycle_candidate"})
+        elif kind == "zombie_slot_recycle_commit":
+            state["recycle_states"].append("committed")
+            facts.append({"capture_sequence": sequence, "entity": identifier, "kind": kind,
+                          "class": "slot_recycle_commit"})
+
+    confirmed = [fact for fact in facts if fact.get("class") == "confirmed_death_stage"]
+    unknown = [fact for fact in facts if fact.get("class") in ("removal_unclassified", "phase_unclassified")]
+    counters = counters or {}
+    unhealthy = {name: counters.get(name) for name in BLOCKING_COUNTERS
+                 if isinstance(counters.get(name), int) and counters.get(name) > 0}
+    reasons: list[str] = []
+    blocking: list[dict] = []
+    first: dict | None = None
+    if not confirmed:
+        reasons.append("no capture fact shows a death-confirming phase store")
+    else:
+        first = confirmed[0]
+        blocking = [fact for fact in unknown if fact["capture_sequence"] < first["capture_sequence"]]
+        if blocking:
+            reasons.append("an earlier unclassified fact blocks first-kill proof")
+    if unhealthy:
+        reasons.append("probe health counters are not clean: " + ", ".join(sorted(unhealthy)))
+    proven = bool(first) and not blocking and not unhealthy
+    return {
+        "facts": facts,
+        "entities": {identifier: state for identifier, state in sorted(entities.items())},
+        "summary": {
+            "fact_count": len(facts),
+            "confirmed_death_stages": len(confirmed),
+            "unclassified_facts": len(unknown),
+            "removals": sum(1 for fact in facts if fact["kind"] == "zombie_removal_marked"),
+            "recycle_candidates": sum(1 for fact in facts if fact["kind"] == "zombie_slot_recycle_candidate"),
+            "recycle_commits": sum(1 for fact in facts if fact["kind"] == "zombie_slot_recycle_commit"),
+        },
+        "first_kill": {
+            "proven": proven,
+            "entity": None if not (proven and first) else first["entity"],
+            "capture_sequence": None if not (proven and first) else first["capture_sequence"],
+            "blocking_facts": [{"capture_sequence": fact["capture_sequence"], "class": fact["class"],
+                                "entity": fact["entity"]} for fact in blocking],
+            "reasons": reasons,
+        },
+        "unknown_facts": unknown,
+    }
 
 
 def first_kill_assessment(coverage: dict | None) -> dict:

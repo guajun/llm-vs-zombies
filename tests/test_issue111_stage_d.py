@@ -56,7 +56,7 @@ class PlanCheckTests(unittest.TestCase):
         doc["mode_switch"]["env_var"] = "OTHER"
         problems = stage_d.check(doc, ROOT)
         self.assertTrue(any("frozen_pending_maintainer_review" in problem for problem in problems))
-        self.assertTrue(any("LVZ_LIFECYCLE_RECORDING" in problem for problem in problems))
+        self.assertTrue(any("LVZ_LIFECYCLE_PROBES" in problem for problem in problems))
 
     def test_persistence_switch_must_state_what_it_does_not_gate(self):
         doc = copy.deepcopy(self.doc)
@@ -75,8 +75,8 @@ class PlanCheckTests(unittest.TestCase):
         doc = copy.deepcopy(self.doc)
         doc["comparisons"][2]["name"] = "instrumentation_non_perturbation"
         problems = stage_d.check(doc, ROOT)
-        self.assertTrue(any("persistence_adapter_non_perturbation" in problem for problem in problems))
-        self.assertTrue(any("instrumentation off/on" in problem for problem in problems))
+        self.assertTrue(any("probe_installation_effect" in problem for problem in problems))
+        self.assertTrue(any("instrument-free" in problem or "instrumentation off/on" in problem for problem in problems))
 
 
 class DocumentedCommandTests(unittest.TestCase):

@@ -1,0 +1,121 @@
+{
+  "schema": "lvz.patch-windows.v1",
+  "issue": 111,
+  "generated": "2026-09-26",
+  "target": {
+    "name": "PvZ 1.0.0.1051 EN (local-engine extracted executable)",
+    "sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322",
+    "image_base": "0x400000",
+    "objdump": "llvm-objdump 23 (LLVM-MinGW 20260908)"
+  },
+  "patch_rule": "replace the whole window with a 5-byte relative jump plus NOPs; the shim replays the original instruction semantics with the real register values, allocates capture_sequence only after the original store executes, then continues at continuation_va",
+  "sites": [
+    {
+      "id": "phase-playdeathanim",
+      "function": "Zombie::PlayDeathAnim",
+      "va": "0x533377",
+      "bytes": "c7472801000000",
+      "window_bytes": 7,
+      "instructions": ["movl $0x1, 0x28(%edi)"],
+      "continuation_va": "0x53337e",
+      "register": "edi",
+      "store": {"kind": "immediate_phase", "value": 1},
+      "object_class": "zombie",
+      "external_branch_targets": []
+    },
+    {
+      "id": "phase-applyburn",
+      "function": "Zombie::ApplyBurn",
+      "va": "0x532f5f",
+      "bytes": "c7462802000000",
+      "window_bytes": 7,
+      "instructions": ["movl $0x2, 0x28(%esi)"],
+      "continuation_va": "0x532f66",
+      "register": "esi",
+      "store": {"kind": "immediate_phase", "value": 2},
+      "object_class": "zombie",
+      "external_branch_targets": []
+    },
+    {
+      "id": "phase-mowdown",
+      "function": "Zombie::MowDown",
+      "va": "0x532a62",
+      "bytes": "c7472803000000",
+      "window_bytes": 7,
+      "instructions": ["movl $0x3, 0x28(%edi)"],
+      "continuation_va": "0x532a69",
+      "register": "edi",
+      "store": {"kind": "immediate_phase", "value": 3},
+      "object_class": "zombie",
+      "external_branch_targets": []
+    },
+    {
+      "id": "phase-catapult",
+      "function": "Zombie::CatapultDeath",
+      "va": "0x52ec92",
+      "bytes": "c7472801000000",
+      "window_bytes": 7,
+      "instructions": ["movl $0x1, 0x28(%edi)"],
+      "continuation_va": "0x52ec99",
+      "register": "edi",
+      "store": {"kind": "immediate_phase", "value": 1},
+      "object_class": "zombie",
+      "external_branch_targets": []
+    },
+    {
+      "id": "phase-zamboni",
+      "function": "Zombie::ZamboniDeath",
+      "va": "0x52ea38",
+      "bytes": "895f28d9472c",
+      "window_bytes": 6,
+      "instructions": ["movl %ebx, 0x28(%edi)", "flds 0x2c(%edi)"],
+      "continuation_va": "0x52ea3e",
+      "register": "edi",
+      "store": {"kind": "register_phase", "value_register": "ebx", "value_verified": 1},
+      "object_class": "zombie",
+      "external_branch_targets": [],
+      "x87_effect": "the shim executes flds 0x2c(%edi) after the store so the original x87 stack effect is preserved"
+    },
+    {
+      "id": "removal-mdead",
+      "function": "Zombie::DieNoLoot",
+      "va": "0x530602",
+      "bytes": "c687ec00000001",
+      "window_bytes": 7,
+      "instructions": ["movb $0x1, 0xec(%edi)"],
+      "continuation_va": "0x530609",
+      "register": "edi",
+      "store": {"kind": "mdead_byte", "value": 1},
+      "object_class": "zombie",
+      "external_branch_targets": []
+    },
+    {
+      "id": "recycle-guard",
+      "function": "Board::ProcessDeleteQueue",
+      "va": "0x41bba9",
+      "bytes": "389fec000000",
+      "window_bytes": 6,
+      "instructions": ["cmpb %bl, 0xec(%edi)"],
+      "continuation_va": "0x41bbaf",
+      "register": "edi",
+      "store": {"kind": "guard_compare"},
+      "object_class": "zombie_pool",
+      "external_branch_targets": [],
+      "branch_note": "continuation 0x41BBAF is the original `je 0x41BB58`; the shim restores the compare flags before jumping back"
+    },
+    {
+      "id": "recycle-commit",
+      "function": "Board::ProcessDeleteQueue",
+      "va": "0x41bc23",
+      "bytes": "e930ffffff",
+      "window_bytes": 5,
+      "instructions": ["jmp 0x41bb58"],
+      "continuation_va": "0x41bb58",
+      "register": "edi",
+      "store": {"kind": "free_commit"},
+      "object_class": "zombie_pool",
+      "external_branch_targets": [],
+      "branch_note": "the shim records the completed free and then jumps to the original jmp target 0x41BB58"
+    }
+  ]
+}

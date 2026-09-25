@@ -52,6 +52,21 @@ SEQUENCE_DOMAIN = "lvz.measurement.capture-sequence"
 PROBE_NAME = "zombie-initialize-exit"
 PROBE_SCHEMA = "lvz.spawn.v1"
 KIND_INITIALIZATION = "zombie_initialized"
+# Issue #111 lifecycle probes (same file, versioned records). The v2 records
+# carry exact-store capture facts with raw before/after values; the v1 stream
+# stays byte-compatible and older trajectories remain readable.
+PROBE_MODE = "lvz.lifecycle-probes.v1"
+PROBE_EVENT_SCHEMA = "lvz.lifecycle-event.v2"
+PROBE_KINDS = ("zombie_phase_transition", "zombie_removal_marked",
+               "zombie_slot_recycle_candidate", "zombie_slot_recycle_commit")
+_PROBE_EVENT_KEYS = {"schema", "kind", "capture_sequence", "version", "version_phase", "engine_call_id",
+                     "entity", "object", "probe", "complete"}
+_PROBE_OBJECT_KEYS = {"class", "on_board", "wave", "board"}
+_PROBE_PHASE_KEYS = {"site", "before", "after"}
+_PROBE_REMOVAL_KEYS = {"source", "before", "after"}
+_PROBE_RECYCLE_CANDIDATE_KEYS = {"state", "slot", "free_head_before", "count_before"}
+_PROBE_RECYCLE_COMMIT_KEYS = {"state", "slot", "candidate_capture_sequence", "free_head_after", "count_after"}
+_PROBE_PROBE_KEYS = {"name", "schema", "sequence_domain"}
 CAPABILITY_KEY = "lifecycle_recording"
 _MAX_RECORD_BYTES = 32 << 20
 # ZombieInitialize's native entry stack is bounded by kDepthLimit in
@@ -296,6 +311,9 @@ def _check_envelope(record: dict, index: int, capability: dict) -> list[str]:
 
 
 def _check_event(event: dict, label: str, problems: list[str]) -> None:
+    if isinstance(event, dict) and event.get("schema") == PROBE_EVENT_SCHEMA:
+        _check_probe_event(event, label, problems)
+        return
     if not _exact_keys(event, _EVENT_KEYS, f"{label} event", problems):
         return
     _require(event.get("schema") == EVENT_SCHEMA, f"{label}: event schema is not {EVENT_SCHEMA}", problems)
@@ -314,6 +332,72 @@ def _check_event(event: dict, label: str, problems: list[str]) -> None:
     _check_invocation(event.get("invocation"), label, problems)
     _check_entity(event, event.get("entity"), label, problems)
     _check_before_after(event, label, problems)
+
+
+def _check_probe_event(event: dict, label: str, problems: list[str]) -> None:
+    """Strict contract for one v2 exact-store lifecycle fact."""
+    kind = event.get("kind")
+    expected = set(_PROBE_EVENT_KEYS)
+    if kind == "zombie_phase_transition":
+        expected.add("phase")
+    elif kind == "zombie_removal_marked":
+        expected.add("removal")
+    else:
+        expected.add("recycle")
+    if not _exact_keys(event, expected, f"{label} probe event", problems):
+        return
+    _require(kind in PROBE_KINDS, f"{label}: unsupported probe kind {kind!r}", problems)
+    _require(_is_int(event.get("capture_sequence")) and event["capture_sequence"] > 0,
+             f"{label}: capture_sequence must be a positive integer", problems)
+    _require(event.get("complete") is True, f"{label}: event is not marked complete", problems)
+    _check_version(event, label, problems)
+    _require(event.get("version_phase") in ("controlled_boundary", "uncontrolled_update"),
+             f"{label}: probe version_phase must be controlled_boundary or uncontrolled_update", problems)
+    entity = event.get("entity")
+    if not _exact_keys(entity, _ENTITY_KEYS, f"{label} probe event.entity", problems):
+        return
+    identifier = entity.get("id")
+    _require(_is_int(identifier) and identifier > 0, f"{label}: entity id must be a positive integer", problems)
+    if _is_int(identifier):
+        _require(entity.get("slot") == (identifier & 0xFFFF), f"{label}: entity slot must be the low 16 bits", problems)
+        _require(entity.get("generation") == (identifier >> 16),
+                 f"{label}: entity generation must be the high 16 bits", problems)
+    obj = event.get("object")
+    if _exact_keys(obj, _PROBE_OBJECT_KEYS, f"{label} probe event.object", problems):
+        _require(obj.get("class") == "zombie", f"{label}: object class must be zombie", problems)
+        _require(obj.get("on_board") is True, f"{label}: published probe facts must be on-board", problems)
+        _require(_is_int(obj.get("wave")), f"{label}: object wave must be an integer", problems)
+        _require(_is_int(obj.get("board")) and obj["board"] > 0, f"{label}: object board must be a live pointer value", problems)
+    probe = event.get("probe")
+    _require(isinstance(probe, dict) and _exact_keys(probe, _PROBE_PROBE_KEYS, f"{label} probe event.probe", problems)
+             and probe.get("schema") == PROBE_EVENT_SCHEMA and probe.get("sequence_domain") == SEQUENCE_DOMAIN,
+             f"{label}: probe declaration does not match {PROBE_EVENT_SCHEMA}", problems)
+    if kind == "zombie_phase_transition":
+        phase = event.get("phase")
+        if _exact_keys(phase, _PROBE_PHASE_KEYS, f"{label} probe event.phase", problems):
+            _require(isinstance(phase.get("site"), str) and phase["site"], f"{label}: phase site required", problems)
+            _require(_is_int(phase.get("before")) and _is_int(phase.get("after")),
+                     f"{label}: phase before/after must be raw integers", problems)
+    elif kind == "zombie_removal_marked":
+        removal = event.get("removal")
+        if _exact_keys(removal, _PROBE_REMOVAL_KEYS, f"{label} probe event.removal", problems):
+            _require(_is_int(removal.get("before")) and _is_int(removal.get("after")),
+                     f"{label}: removal before/after must be raw integers", problems)
+    else:
+        recycle = event.get("recycle")
+        expected = _PROBE_RECYCLE_CANDIDATE_KEYS if kind == "zombie_slot_recycle_candidate" \
+            else _PROBE_RECYCLE_COMMIT_KEYS
+        if _exact_keys(recycle, expected, f"{label} probe event.recycle", problems):
+            if kind == "zombie_slot_recycle_candidate":
+                _require(recycle.get("state") == "candidate", f"{label}: candidate state mismatch", problems)
+                for key in ("slot", "free_head_before", "count_before"):
+                    _require(_is_int(recycle.get(key)), f"{label}: recycle {key} must be an integer", problems)
+            else:
+                _require(recycle.get("state") == "committed", f"{label}: commit state mismatch", problems)
+                _require(_is_int(recycle.get("candidate_capture_sequence")) and recycle["candidate_capture_sequence"] > 0,
+                         f"{label}: commit must reference a candidate capture sequence", problems)
+                for key in ("slot", "free_head_after", "count_after"):
+                    _require(_is_int(recycle.get(key)), f"{label}: recycle {key} must be an integer", problems)
 
 
 def _check_classification(classification, label: str, problems: list[str]) -> None:
@@ -340,8 +424,12 @@ def _check_version(event: dict, label: str, problems: list[str]) -> None:
                          f"{label}: event.version.{key} must be a non-negative integer", problems)
         _require(call_id is None or (_is_int(call_id) and call_id > 0),
                  f"{label}: engine_call_id must be null or a positive integer", problems)
+    elif phase == "uncontrolled_update":
+        # Gameplay stores outside a controlled call have no honest call id.
+        _require(version is None, f"{label}: uncontrolled probe event must carry a null version", problems)
+        _require(call_id is None, f"{label}: uncontrolled probe event must carry a null engine_call_id", problems)
     else:
-        problems.append(f"{label}: version_phase must be initialization or controlled_boundary")
+        problems.append(f"{label}: version_phase must be initialization, controlled_boundary or uncontrolled_update")
 
 
 def _check_invocation(invocation, label: str, problems: list[str]) -> None:
@@ -429,6 +517,54 @@ def _sequence_problems(records: list[dict]) -> tuple[list[str], dict]:
                       "unique_sequences": len(set(sequences)), "gaps": gaps,
                       "rule": "strictly increasing within one run/session/sequence_domain; gaps allowed, "
                               "duplicates and decreases are refused"}
+
+
+def _probe_contract(manifest: dict, records: list[dict]) -> list[str]:
+    """Validate the v2 probe capability and candidate/commit pairing."""
+    problems: list[str] = []
+    events = [record.get("event") for record in records]
+    probe_events = [event for event in events
+                    if isinstance(event, dict) and event.get("schema") == PROBE_EVENT_SCHEMA]
+    block = manifest.get("lifecycle_probes")
+    if block is None:
+        if probe_events:
+            problems.append("lifecycle probe records exist without an enabled lifecycle_probes capability")
+        return problems
+    if not isinstance(block, dict) or block.get("mode") != PROBE_MODE:
+        problems.append("unsupported lifecycle_probes capability mode")
+        return problems
+    if block.get("enabled") is not True:
+        if probe_events:
+            problems.append("lifecycle probe records exist while the capability is disabled")
+        return problems
+    if block.get("record_schema") != PROBE_EVENT_SCHEMA:
+        problems.append("lifecycle_probes record_schema must be lvz.lifecycle-event.v2")
+    if not isinstance(block.get("probe_set"), list) or not block["probe_set"]:
+        problems.append("lifecycle_probes probe_set must declare the installed probes")
+    session = block.get("session_id")
+    if not _is_int(session) or session <= 0:
+        problems.append("lifecycle_probes session_id must be a positive integer")
+    if not _valid_build(block.get("build")):
+        problems.append("lifecycle_probes build identity is incomplete")
+    if not probe_events:
+        return problems
+    candidates: dict[int, object] = {}
+    for event in probe_events:
+        kind = event.get("kind")
+        sequence = event.get("capture_sequence")
+        if kind == "zombie_slot_recycle_candidate":
+            candidates[sequence] = "open"
+        elif kind == "zombie_slot_recycle_commit":
+            recycle = event.get("recycle") if isinstance(event.get("recycle"), dict) else {}
+            reference = recycle.get("candidate_capture_sequence")
+            if reference not in candidates:
+                problems.append(f"recycle commit {sequence} references unknown candidate {reference!r}")
+            else:
+                candidates[reference] = "committed"
+    for sequence, state in candidates.items():
+        if state == "open":
+            problems.append(f"recycle candidate {sequence} has no commit in this stream")
+    return problems
 
 
 def _nesting_problems(records: list[dict], *, strict: bool) -> list[str]:
@@ -720,6 +856,7 @@ def _validate(directory: Path, *, manifest: dict | None, recorder: str | Path | 
     sequence_problems, sequence_summary = _sequence_problems(records)
     problems += sequence_problems
     problems += _nesting_problems(records, strict=not live_prefix)
+    problems += _probe_contract(manifest, records)
 
     report["records"] = {
         "count": len(records),

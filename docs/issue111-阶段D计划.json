@@ -17,48 +17,55 @@
   },
   "mode_switch": {
     "same_build_for_all_runs": true,
-    "env_var": "LVZ_LIFECYCLE_RECORDING",
-    "gates": "lifecycle persistence adapter only (lifecycle-events.jsonl plus close receipt)",
-    "not_gated": "the ZombieInitialize probe and the legacy lvz.spawn.v1 projection are installed by the audit host in both modes",
+    "env_var": "LVZ_LIFECYCLE_PROBES",
+    "gates": "the production lifecycle store probes (5 phase stores, mDead removal store, recycle guard/commit pair) and their lvz.lifecycle-event.v2 records",
+    "not_gated": "lifecycle persistence adapter (LVZ_LIFECYCLE_RECORDING=1 in both probe arms) and the ZombieInitialize v1 probe/legacy lvz.spawn.v1 projection",
     "modes": [
       {
         "name": "off",
         "value": "0",
-        "purpose": "manifest declares lifecycle capability enabled=false and no lifecycle file exists"
+        "purpose": "same build installs no new store probes; manifest lifecycle_probes.enabled=false; no v2 records"
       },
       {
         "name": "on",
         "value": "1",
-        "purpose": "lifecycle persistence enabled; lifecycle-events.jsonl plus atomic close receipt"
+        "purpose": "store probes installed; manifest lifecycle_probes.enabled=true with sites/build/session; v2 facts recorded through the single drain"
       }
     ],
     "limitations": [
-      "off/on cannot measure instrumented-vs-uninstrumented gameplay because the probe is installed in both modes",
-      "a true instrumentation off/on comparison needs a separate build without the probe (new build identity); no build-time switch exists",
-      "death/removal/recycle facts are not covered by either mode until those capture points pass the candidate-review gate"
-    ],
-    "comparison_rule": "Compare common evidence only (boundary state deltas, checksums, RNG, actions, outcomes). The lifecycle_recording capability block and lifecycle files are mode metadata and are excluded from gameplay comparison."
+      "the off/on contrast measures the probe installation effect on one build; no claim is made about a build without any recorder parts",
+      "probe presence can perturb timing, so every trajectory comparison is reported as equality or first divergence, never as a hard pass",
+      "phase/mDead/recycle facts are observed at store granularity; they do not by themselves prove the caller branch or the kill cause"
+    ]
   },
   "runs": [
     {
-      "name": "issue111-d-off-a",
-      "mode": "off",
-      "role": "persistence-adapter-off control A"
+      "name": "issue111-d-probe-off-a",
+      "probe_mode": "off",
+      "recording": "1",
+      "role": "probe-off cold start A (control)",
+      "mode": "off"
     },
     {
-      "name": "issue111-d-off-b",
-      "mode": "off",
-      "role": "persistence-adapter-off control B (repeatability)"
+      "name": "issue111-d-probe-off-b",
+      "probe_mode": "off",
+      "recording": "1",
+      "role": "probe-off cold start B (independent repeat)",
+      "mode": "off"
     },
     {
-      "name": "issue111-d-on-a",
-      "mode": "on",
-      "role": "persistence-adapter-on cold start A"
+      "name": "issue111-d-probe-on-a",
+      "probe_mode": "on",
+      "recording": "1",
+      "role": "probe-on cold start A",
+      "mode": "on"
     },
     {
-      "name": "issue111-d-on-b",
-      "mode": "on",
-      "role": "persistence-adapter-on cold start B (repeatability)"
+      "name": "issue111-d-probe-on-b",
+      "probe_mode": "on",
+      "recording": "1",
+      "role": "probe-on cold start B (independent repeat)",
+      "mode": "on"
     }
   ],
   "evaluation_child_mapping": {
@@ -77,8 +84,8 @@
   "comparisons": [
     {
       "name": "control_repeatability",
-      "left": "issue111-d-off-a",
-      "right": "issue111-d-off-b",
+      "left": "issue111-d-probe-off-a",
+      "right": "issue111-d-probe-off-b",
       "require": "common boundary/state/RNG/action equality within the frozen window",
       "tool": "tools/issue111_lifecycle_compare.py",
       "normalization": [
@@ -89,43 +96,30 @@
       "limits": "facts, counters and sequence values are never stripped"
     },
     {
-      "name": "mode_repeatability",
-      "left": "issue111-d-on-a",
-      "right": "issue111-d-on-b",
-      "require": "common boundary/state/RNG/action equality plus valid lifecycle receipt in every on child run",
+      "name": "probe_repeatability",
+      "left": "issue111-d-probe-on-a",
+      "right": "issue111-d-probe-on-b",
+      "require": "common boundary/state/RNG/action equality plus valid v2 probe receipts and healthy counters in both on children",
       "tool": "tools/issue111_lifecycle_compare.py",
       "normalization": [
         "run_id",
         "branch_id",
         "session_id only"
       ],
-      "limits": "facts, counters and sequence values are never stripped"
+      "limits": "raw phase/removal/recycle facts are compared by sequence, never deduplicated"
     },
     {
-      "name": "persistence_adapter_non_perturbation",
-      "left": "issue111-d-off-a",
-      "right": "issue111-d-on-a",
-      "require": "first divergence located and reported on common evidence; not a pass/fail on event-stream difference alone; the probe is present in both modes",
+      "name": "probe_installation_effect",
+      "left": "issue111-d-probe-off-a",
+      "right": "issue111-d-probe-on-a",
+      "require": "first divergence on common evidence located and reported with its coordinate range; not a pass/fail",
       "tool": "tools/issue111_lifecycle_compare.py",
       "normalization": [
         "run_id",
         "branch_id",
         "session_id only"
       ],
-      "limits": "facts, counters and sequence values are never stripped"
-    },
-    {
-      "name": "tick940_unknown_path",
-      "left": "issue111-d-on-a",
-      "right": "issue111-d-on-b",
-      "require": "scan the whole declared window for removed-without-death-stage entities and report coordinates; must not assume 33 objects; capture-level claims stay unavailable without reviewed death/removal hooks",
-      "tool": "tools/issue111_lifecycle_compare.py",
-      "normalization": [
-        "run_id",
-        "branch_id",
-        "session_id only"
-      ],
-      "limits": "facts, counters and sequence values are never stripped"
+      "limits": "v2-only facts are expected in the on arm and are reported as the intended difference"
     }
   ],
   "resource_limits": {
@@ -135,10 +129,10 @@
     "tick_cap": 2000
   },
   "verdicts": [
-    "capture completeness: valid lifecycle receipts plus strict closed audit for every expected child run; death/removal capture is unavailable until the candidate-review gate closes",
-    "persistence-adapter non-perturbation (never instrumentation non-perturbation): resource/contract gate is enforced by the run entry, common evidence equality or first divergence with range",
-    "two-run repeatability: on-a children vs on-b children on common evidence",
-    "first-kill sufficiency: reported by tools/issue111_lifecycle_report.py; false while death/removal capture points are missing"
+    "capture completeness: valid lifecycle receipts plus strict closed audit for every expected child run; probe arms additionally require the lifecycle_probes capability and zero blocking counters",
+    "probe installation effect: probe-off vs probe-on equality or first divergence with range (never instrumentation-free non-perturbation)",
+    "two-run repeatability: off-a vs off-b and on-a vs on-b on common evidence",
+    "first-kill sufficiency: reported by tools/issue111_lifecycle_report.py from raw v2 facts (earlier unclassified removal blocks the proof); false while no death-confirming capture exists in the frozen window"
   ],
   "forbidden": [
     "overwriting or modifying the four issue #99 trajectories, reports or seals",

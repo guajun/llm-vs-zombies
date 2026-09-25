@@ -29,6 +29,7 @@ using Json = nlohmann::json;
 inline constexpr const char* kLifecycleMode = "lvz.lifecycle-recording.v1";
 inline constexpr const char* kLifecycleEnvelopeSchema = "lvz.lifecycle-record.v1";
 inline constexpr const char* kLifecycleEventSchema = "lvz.lifecycle-event.v1";
+inline constexpr const char* kLifecycleProbeEventSchema = "lvz.lifecycle-event.v2";
 inline constexpr const char* kLifecycleReceiptSchema = "lvz.lifecycle-close-receipt.v1";
 inline constexpr const char* kLifecycleSequenceDomain = "lvz.measurement.capture-sequence";
 inline constexpr const char* kLifecycleEventsFile = "lifecycle-events.jsonl";

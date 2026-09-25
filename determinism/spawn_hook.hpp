@@ -29,6 +29,16 @@ SpawnBatch DrainSpawnBatch();
 nlohmann::json DrainSpawnEvents();
 nlohmann::json SpawnHookStatus();
 
+// Snapshot of the controlled boundary the audit host last announced. Probes
+// that run inside the game update copy these numbers at capture time so a
+// drained record never borrows a later boundary.
+struct CaptureBoundary {
+    uint64_t tick = 0, revision = 0, engineCallId = 0;
+    uint32_t segment = 0;
+    bool valid = false;
+};
+CaptureBoundary CurrentCaptureBoundary() noexcept;
+
 #ifdef LVZ_SPAWN_HOOK_TESTING
 // Only compiled into the standalone ABI test. Not exposed by the runtime DLL.
 bool InstallSpawnHookForTest(uintptr_t entry, uintptr_t epilogue,

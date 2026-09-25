@@ -302,6 +302,13 @@ Json SpawnHookStatus() {
         {"original_game_live_validated",false},
         {"measurement",lvz::measurement::Host().Health()}};
 }
+CaptureBoundary CurrentCaptureBoundary() noexcept {
+    CaptureBoundary result;
+    result.tick=currentBoundary.tick;result.revision=currentBoundary.revision;
+    result.segment=currentBoundary.segment;result.engineCallId=currentBoundary.engineCallId;
+    result.valid=currentBoundary.valid;
+    return result;
+}
 }
 
 extern "C" void __cdecl LvzSpawnEnter(void* frame) noexcept {

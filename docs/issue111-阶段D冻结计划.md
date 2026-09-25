@@ -6,16 +6,17 @@
 
 ## 1. 目的与边界
 
-在经典十二炮短窗口内验证：生命周期**持久化适配器**（`LVZ_LIFECYCLE_RECORDING` 打开/关闭）是否
+在经典十二炮短窗口内验证：生产 store 探针（`LVZ_LIFECYCLE_PROBES` 打开/关闭，同构建、持久化
+`LVZ_LIFECYCLE_RECORDING=1` 在两个探针臂都开启）是否
 引入可观测差异、同一模式的两次冷启动是否可复现，并为 tick 940 的未知消失路径给出边界坐标与
 覆盖限制。
 
 **重要语义修正（不得含糊）：**
 
-- `LVZ_LIFECYCLE_RECORDING` 只控制 lifecycle-events/close-receipt 的落盘；`ZombieInitialize`
-  探针与 legacy `lvz.spawn.v1` 投影在 off/on 两种模式下**都安装**。因此本对照只能测
+- `LVZ_LIFECYCLE_PROBES` 只控制 5 个 phase store、mDead store、回收 guard/commit 的生产探针
+  安装；`ZombieInitialize` v1 探针、legacy `lvz.spawn.v1` 投影和持久化在两条臂**都开启**。因此本对照测
   **持久化适配器增量开销**，不能当作“新增插桩关闭/开启”验收，也不能覆盖死亡/移除/回收。
-- 真正的 instrumentation off/on 需要一份**不含探针的构建**（新的 recorder 构建身份）；当前没有
+- 这不等于“无插桩构建”对照：两条臂都含 recorder 其它部件。如需真正无插桩对照，仍需另一份构建身份；
   构建期开关，这属于缺口，待维护者决定是否为本 issue 增加第二种构建，而不是用本 switch 冒充。
 - 死亡/移除/回收的生产事实取决于 [`issue111-原生候选证据.md`](issue111-原生候选证据.md) 的维护者
   审查。审查未通过时，D 只使用初始化探针，tick 940 的捕获级结论输出 `unavailable`。
@@ -45,10 +46,10 @@
 
 | suite | 模式 | 用途 |
 |---|---|---|
-| `issue111-d-off-a` | `LVZ_LIFECYCLE_RECORDING=0` | 持久化关闭对照 A |
-| `issue111-d-off-b` | `0` | 对照复跑 |
-| `issue111-d-on-a` | `1` | 持久化开启冷启动 A |
-| `issue111-d-on-b` | `1` | 持久化开启冷启动 B |
+| `issue111-d-probe-off-a` | `LVZ_LIFECYCLE_PROBES=0`，`LVZ_LIFECYCLE_RECORDING=1` | 探针关闭对照冷启动 A（仅差探针安装） |
+| `issue111-d-probe-off-b` | 同上 | 探针关闭对照冷启动 B（独立复跑） |
+| `issue111-d-probe-on-a` | `LVZ_LIFECYCLE_PROBES=1`，`LVZ_LIFECYCLE_RECORDING=1` | 探针开启冷启动 A |
+| `issue111-d-probe-on-b` | 同上 | 探针开启冷启动 B（独立复跑） |
 
 比较：
 
@@ -102,7 +103,7 @@ python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-o
 | 判定 | 通过条件 | 失败处理 |
 |---|---|---|
 | 采集机制完整性 | 每个子运行 lifecycle 严格校验 valid（含关闭回执）且审计严格读取 closed、计数平衡、无探针故障 | 保留失败现场，报告故障坐标，不封存为合格证据 |
-| 持久化适配器非扰动（仅此范围） | off/on 在声明范围内共同证据逐边界一致，或首个分叉被定位并解释；不声称插桩本身无扰动 | 报告首个分叉与比较范围；不因事件流差异本身判失败 |
+| 探针安装效应（仅此范围） | probe off/on 在声明范围内共同证据逐边界一致，或首个分叉被定位并解释；不声称无插桩非扰动 | 报告首个分叉与比较范围；v2 事实只出现在 on 臂，属预期差异 |
 | 两次重复性 | on-a 子运行 == on-b 子运行（同一模式、声明范围内） | 定位环境/审计噪声；不挑选时段 |
 | 死亡/移除覆盖 | 仅在候选证据通过维护者审查并实现 hook 后判定；当前为 `unavailable` | 不勾选 #99/#105 正向门槛；建立最小后续任务 |
 | 首次击杀证据充分性 | 由 `tools/issue111_lifecycle_report.py` 判定；当前 `first_kill_proven=false` | 如实输出缺口，不缩减标准 |

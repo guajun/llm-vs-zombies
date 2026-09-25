@@ -225,3 +225,19 @@ python -m unittest discover -s tests -q
 - 实验编排读写 `LVZ_LIFECYCLE_RECORDING` 的便捷入口（可选，不阻塞本 PR）。
 - 未做 fsync/掉电语义声明：receipt 证明写入者的 flush+close 成功与内容绑定，与现有 JSONL 证据
   同一持久化级别。
+
+## v2 生产探针记录（`lvz.lifecycle-event.v2`）
+
+当 manifest 含有启用的 `lifecycle_probes` capability 时，同一个
+`lifecycle-events.jsonl` 还包含 store 粒度的探针事实（envelope 仍为
+`lvz.lifecycle-record.v1`）：
+
+- `zombie_phase_transition`（5 个 phase store；记录 site、原始 before/after）；
+- `zombie_removal_marked`（mDead store；removal 不是 kill）；
+- `zombie_slot_recycle_candidate` / `zombie_slot_recycle_commit`（guard 与 free 提交配对，
+  commit 记录 `candidate_capture_sequence` 与 free head/count）。
+
+校验规则（`lifecycle_events.validate`）：v2 记录必须伴随
+`lifecycle_probes.enabled=true`、`record_schema=lvz.lifecycle-event.v2`、probe set、session 与
+build 身份；重复的 phase store 原样保留（不做 dedup）；candidate 必须有 commit、commit 必须
+引用已知 candidate，否则文件判 failed。旧 v1 轨迹与 unavailable 判定保持兼容。

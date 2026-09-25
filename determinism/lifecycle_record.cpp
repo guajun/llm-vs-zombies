@@ -37,9 +37,14 @@ void LifecycleRecorder::Open(const std::filesystem::path& auditDir, LifecycleIde
 void LifecycleRecorder::Write(const Json& event) {
     if (!Opened())
         throw std::runtime_error("Lifecycle recorder is not open");
-    if (!event.is_object() || event.value("schema", "") != kLifecycleEventSchema
-        || event.value("kind", "") != "zombie_initialized")
-        throw std::runtime_error("Lifecycle recorder accepts only complete initialization events");
+    const std::string schema = event.is_object() ? event.value("schema", "") : std::string();
+    const std::string kind = event.is_object() ? event.value("kind", "") : std::string();
+    const bool initialization = schema == kLifecycleEventSchema && kind == "zombie_initialized";
+    const bool probe_event = schema == kLifecycleProbeEventSchema
+        && (kind == "zombie_phase_transition" || kind == "zombie_removal_marked"
+            || kind == "zombie_slot_recycle_candidate" || kind == "zombie_slot_recycle_commit");
+    if (!event.is_object() || (!initialization && !probe_event))
+        throw std::runtime_error("Lifecycle recorder accepts only complete lifecycle events");
     const auto& sequence = event.at("capture_sequence");
     if (!sequence.is_number_unsigned() || sequence.get<uint64_t>() == 0)
         throw std::runtime_error("Lifecycle event has no positive capture_sequence");

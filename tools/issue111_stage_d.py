@@ -80,18 +80,21 @@ def check(doc: dict, root: Path) -> list[str]:
             problems.append(f"resource_limits.{key} must be a positive integer")
 
     switch = doc.get("mode_switch")
-    if not isinstance(switch, dict) or switch.get("env_var") != "LVZ_LIFECYCLE_RECORDING":
-        problems.append("mode_switch must declare the LVZ_LIFECYCLE_RECORDING env switch")
+    if not isinstance(switch, dict) or switch.get("env_var") != "LVZ_LIFECYCLE_PROBES":
+        problems.append("mode_switch must declare the LVZ_LIFECYCLE_PROBES env switch (true probe off/on)")
     modes = {mode.get("name"): mode.get("value") for mode in switch.get("modes", [])
              if isinstance(mode, dict)} if isinstance(switch, dict) else {}
     if modes != MODE_VALUES:
         problems.append("mode_switch.modes must define off=0 and on=1")
     if isinstance(switch, dict):
         not_gated = str(switch.get("not_gated", ""))
-        if "ZombieInitialize" not in not_gated and "probe" not in not_gated:
-            problems.append("mode_switch.not_gated must state that the probe is installed in both modes")
+        if "ZombieInitialize" not in not_gated or "RECORDING" not in not_gated:
+            problems.append("mode_switch.not_gated must state that the v1 probe and persistence stay enabled in both arms")
+        gate_scope = str(switch.get("gates", ""))
+        if "probe" not in gate_scope:
+            problems.append("mode_switch.gates must scope the switch to the new store probes")
         if not isinstance(switch.get("limitations"), list) or not switch["limitations"]:
-            problems.append("mode_switch.limitations must state what the persistence switch cannot test")
+            problems.append("mode_switch.limitations must state what the probe switch cannot measure")
 
     mapping = doc.get("evaluation_child_mapping")
     if not isinstance(mapping, dict) or not isinstance(mapping.get("per_suite"), list) or not mapping["per_suite"]:
@@ -123,6 +126,8 @@ def check(doc: dict, root: Path) -> list[str]:
             names.append(name)
         if run.get("mode") not in MODE_VALUES:
             problems.append(f"runs[{index}].mode must be off or on")
+        if run.get("recording") != "1":
+            problems.append(f"runs[{index}].recording must stay 1 so only the probe set differs")
     comparisons = doc.get("comparisons")
     if not isinstance(comparisons, list) or not comparisons:
         problems.append("comparisons must be a non-empty list")
@@ -135,10 +140,11 @@ def check(doc: dict, root: Path) -> list[str]:
             if item.get(side) not in names:
                 problems.append(f"comparisons[{index}].{side} is not a declared run")
     comparison_names = {item.get("name") for item in comparisons if isinstance(item, dict)}
-    if "persistence_adapter_non_perturbation" not in comparison_names:
-        problems.append("comparisons must name persistence_adapter_non_perturbation")
+    for required in ("control_repeatability", "probe_repeatability", "probe_installation_effect"):
+        if required not in comparison_names:
+            problems.append(f"comparisons must name {required}")
     if any(isinstance(name, str) and "instrumentation_non_perturbation" in name for name in comparison_names):
-        problems.append("comparisons must not claim instrumentation off/on from the persistence switch")
+        problems.append("comparisons must not claim an instrument-free build from the probe switch")
     if not isinstance(doc.get("verdicts"), list) or not doc["verdicts"]:
         problems.append("verdicts must be a non-empty list")
     commands = doc.get("commands")
