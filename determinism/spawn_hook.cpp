@@ -1,4 +1,5 @@
 #include "spawn_hook.hpp"
+#include "measurement.hpp"
 #include "memory.hpp"
 #include "model.hpp"
 #include <minhook/MinHook.h>
@@ -50,6 +51,8 @@ struct EntryData {
     uint8_t variant=0;
     bool parentPresent=false, parentReadable=false, readable=false;
     uint32_t gameClock=0;
+    uint64_t captureSequence=0, parentCaptureSequence=0;
+    uint32_t depth=0;
     MtState mt{};
     Boundary boundary{};
 };
@@ -92,10 +95,17 @@ uint32_t GameClock(uintptr_t zombie) noexcept {
     return tick;
 }
 void Enter(SavedRegisters* frame) noexcept {
-    if(GetCurrentThreadId()!=gameThread) { ++wrongThread; return; }
-    if(depth>=kDepthLimit) { ++depth; ++overflow; return; }
+    if(GetCurrentThreadId()!=gameThread) { ++wrongThread; lvz::measurement::Host().OnWrongThread(); return; }
+    if(depth>=kDepthLimit) { ++depth; ++overflow; lvz::measurement::Host().OnOverflow(); return; }
+    const uint32_t enterDepth=depth;
     auto& item=stack[depth++];
     item=EntryData{};
+    // Shared order domain: allocate before the record is enqueued at exit, so
+    // nested initializers keep parent-before-child order and the parent link
+    // below is well defined. Faults later may leave gaps; monotonicity holds.
+    item.captureSequence=lvz::measurement::Host().NextSequence();
+    item.depth=enterDepth;
+    item.parentCaptureSequence=enterDepth?stack[enterDepth-1].captureSequence:0;
     const auto* args=reinterpret_cast<const uint32_t*>(frame+1);
     // Original ABI: row in EAX; return address, this, type, variant, parent, wave on stack.
     item.zombie=args[1]; item.row=static_cast<int32_t>(frame->eax);
@@ -110,20 +120,20 @@ void Enter(SavedRegisters* frame) noexcept {
     if(!item.readable) ++faults;
 }
 void Leave(SavedRegisters* frame) noexcept {
-    if(GetCurrentThreadId()!=gameThread) { ++wrongThread; return; }
-    if(!depth) { ++faults; return; }
+    if(GetCurrentThreadId()!=gameThread) { ++wrongThread; lvz::measurement::Host().OnWrongThread(); return; }
+    if(!depth) { ++faults; lvz::measurement::Host().OnNestingMismatch(); return; }
     if(depth>kDepthLimit) { --depth; return; }
     const auto& item=stack[--depth];
-    if(!item.readable || frame->edi!=item.zombie) { ++faults; return; }
-    if(count==kCapacity) { ++overflow; return; }
+    if(!item.readable || frame->edi!=item.zombie) { ++faults; lvz::measurement::Host().OnIncomplete(); return; }
+    if(count==kCapacity) { ++overflow; lvz::measurement::Host().OnOverflow(); return; }
     auto& record=queue[count];
     record.entry=item; record.ordinal=ordinal++;
     record.gameClockAfter=GameClock(item.zombie);
     if(!Copy(item.zombie,record.zombie) || !Copy(mtAddress,record.mtAfter)
         || record.mtAfter.cursor>625 || Word(record.zombie,0x158)!=item.generationId) {
-        ++faults;return;
+        ++faults; lvz::measurement::Host().OnIncomplete(); return;
     }
-    ++count;++captured;
+    ++count;++captured; lvz::measurement::Host().OnCaptured();
 }
 Json Fields(const Record& record) {
     Json result=Json::object();
@@ -170,6 +180,7 @@ bool Install(uintptr_t entry,uintptr_t epilogue,uintptr_t mt,std::string& error,
     }
     if(status==MH_OK) {
         gameThread=GetCurrentThreadId();entryAddress=entry;exitAddress=epilogue;mtAddress=mt;
+        lvz::measurement::Host().Open(gameThread);
         depth=count=0;ordinal=captured=0;wrongThread=0;faults=0;overflow=0;currentBoundary={};
         status=MH_EnableHook(reinterpret_cast<void*>(epilogue));
         if(status==MH_OK) status=MH_EnableHook(reinterpret_cast<void*>(entry));
@@ -181,6 +192,50 @@ bool Install(uintptr_t entry,uintptr_t epilogue,uintptr_t mt,std::string& error,
         error=std::string("Spawn hook installation failed: ")+MH_StatusToString(status);return false;
     }
     Copy(entry,entryPatch);Copy(epilogue,exitPatch);installed=true;error.clear();return true;
+}
+Json LegacyEvent(const Record& record) {
+    const auto& input=record.entry;
+    Json boundary=nullptr;
+    if(input.boundary.valid) boundary={{"tick",input.boundary.tick},{"revision",input.boundary.revision},{"segment",input.boundary.segment}};
+    return {{"schema","lvz.spawn.v1"},{"kind","zombie_initialized"},
+        {"phase","zombie_initialize_exit"},{"ordinal",record.ordinal},{"boundary",boundary},
+        {"engine_call_id",input.boundary.engineCallId?Json(input.boundary.engineCallId):Json(nullptr)},
+        {"id",Word(record.zombie,0x158)},{"slot",Word(record.zombie,0x158)&0xffffu},
+        {"generation",Word(record.zombie,0x158)>>16},{"caller_rva",input.callerRva},
+        {"inputs",{{"row0",input.row},{"type",input.type},{"variant_byte",input.variant},
+            {"wave_raw",input.wave},{"parent_id",input.parentPresent?Json(input.parentId):Json(nullptr)}}},
+        {"initial",{{"row0",static_cast<int32_t>(Word(record.zombie,0x1c))},
+            {"type",Word(record.zombie,0x24)},{"x_bits",Word(record.zombie,0x2c)},
+            {"y_bits",Word(record.zombie,0x30)},{"speed_bits",Word(record.zombie,0x34)},
+            {"variant",record.zombie[0x50]},{"raw_scalar_fields",Fields(record)}}},
+        {"game_clock_before",input.gameClock},{"game_clock_after",record.gameClockAfter},
+        {"global_mt_before",EncodeMt(input.mt)},{"global_mt_after",EncodeMt(record.mtAfter)}};
+}
+Json LifecycleEvent(const Record& record) {
+    const auto& input=record.entry;
+    const uint32_t id=Word(record.zombie,0x158);
+    Json version=nullptr;
+    uint64_t engineCallId=0;
+    if(input.boundary.valid) {
+        version={{"epoch",input.boundary.segment},{"tick",input.boundary.tick},{"revision",input.boundary.revision}};
+        engineCallId=input.boundary.engineCallId;
+    }
+    Json invocation=nullptr;
+    if(input.depth) invocation={{"depth",input.depth},{"parent_capture_sequence",input.parentCaptureSequence}};
+    return {{"schema","lvz.lifecycle-event.v1"},{"kind","zombie_initialized"},
+        {"capture_sequence",input.captureSequence},
+        {"version",version},
+        {"version_phase",input.boundary.valid?"controlled_boundary":"initialization"},
+        {"engine_call_id",input.boundary.valid&&engineCallId?Json(engineCallId):Json(nullptr)},
+        {"invocation",invocation},
+        {"entity",{{"id",id},{"slot",id&0xffffu},{"generation",id>>16}}},
+        {"before_after",{{"before",nullptr},{"after",{{"id",id},{"slot",id&0xffffu},
+            {"generation",id>>16},{"row0",static_cast<int32_t>(Word(record.zombie,0x1c))},
+            {"type",Word(record.zombie,0x24)},{"game_clock",record.gameClockAfter}}}}},
+        {"classification",{{"class","initialization"},{"cause","unknown"}}},
+        {"probe",{{"name","zombie-initialize-exit"},{"schema","lvz.spawn.v1"},
+            {"sequence_domain","lvz.measurement.capture-sequence"}}},
+        {"complete",true}};
 }
 }
 
@@ -208,29 +263,22 @@ void SetSpawnBoundary(uint64_t tick,uint64_t revision,uint32_t segment,uint64_t 
     RequireOwner();currentBoundary={tick,revision,segment,true,engineCallId};
 }
 void ClearSpawnBoundary() {RequireOwner();currentBoundary={};}
-Json DrainSpawnEvents() {
+SpawnBatch DrainSpawnBatch() {
     RequireOwner();
     if(depth) throw std::runtime_error("Cannot drain while ZombieInitialize is running");
-    Json out=Json::array();
+    SpawnBatch batch;
+    batch.count=count;
     for(size_t index=0;index<count;++index) {
-        const auto& record=queue[index];const auto& input=record.entry;
-        Json boundary=nullptr;
-        if(input.boundary.valid) boundary={{"tick",input.boundary.tick},{"revision",input.boundary.revision},{"segment",input.boundary.segment}};
-        out.push_back({{"schema","lvz.spawn.v1"},{"kind","zombie_initialized"},
-            {"phase","zombie_initialize_exit"},{"ordinal",record.ordinal},{"boundary",boundary},
-            {"engine_call_id",input.boundary.engineCallId?Json(input.boundary.engineCallId):Json(nullptr)},
-            {"id",Word(record.zombie,0x158)},{"slot",Word(record.zombie,0x158)&0xffffu},
-            {"generation",Word(record.zombie,0x158)>>16},{"caller_rva",input.callerRva},
-            {"inputs",{{"row0",input.row},{"type",input.type},{"variant_byte",input.variant},
-                {"wave_raw",input.wave},{"parent_id",input.parentPresent?Json(input.parentId):Json(nullptr)}}},
-            {"initial",{{"row0",static_cast<int32_t>(Word(record.zombie,0x1c))},
-                {"type",Word(record.zombie,0x24)},{"x_bits",Word(record.zombie,0x2c)},
-                {"y_bits",Word(record.zombie,0x30)},{"speed_bits",Word(record.zombie,0x34)},
-                {"variant",record.zombie[0x50]},{"raw_scalar_fields",Fields(record)}}},
-            {"game_clock_before",input.gameClock},{"game_clock_after",record.gameClockAfter},
-            {"global_mt_before",EncodeMt(input.mt)},{"global_mt_after",EncodeMt(record.mtAfter)}});
+        const auto& record=queue[index];
+        batch.legacy.push_back(LegacyEvent(record));
+        batch.lifecycle.push_back(LifecycleEvent(record));
     }
-    count=0;return out;
+    count=0;
+    lvz::measurement::Host().OnDelivered(batch.count);
+    return batch;
+}
+Json DrainSpawnEvents() {
+    return DrainSpawnBatch().legacy;
 }
 Json SpawnHookStatus() {
     if(installed) RequireOwner();
@@ -239,7 +287,8 @@ Json SpawnHookStatus() {
         {"active_initializers",depth},
         {"healthy",wrongThread.load()==0&&faults.load()==0&&overflow.load()==0&&depth==0},
         {"phase","ZombieInitialize exit, before caller resumes"},
-        {"original_game_live_validated",false}};
+        {"original_game_live_validated",false},
+        {"measurement",lvz::measurement::Host().Health()}};
 }
 }
 
