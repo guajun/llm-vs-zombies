@@ -90,7 +90,8 @@ class EvidenceDocumentTests(unittest.TestCase):
 
     def test_semantic_fields_and_interception_plan_are_required(self):
         facts = {item["fact"] for item in self.doc["interception_plan"]}
-        self.assertEqual(facts, {"zombie_removal_unclassified", "zombie_death_stage_enter", "zombie_slot_recycled"})
+        self.assertEqual(facts, {"zombie_phase_transition_raw", "zombie_removal_marked",
+                                 "zombie_slot_recycle_committed"})
         self.assertTrue(self.doc["residual_questions"])
         doc = copy.deepcopy(self.doc)
         doc["candidates"][0].pop("semantic_gate")
@@ -98,6 +99,28 @@ class EvidenceDocumentTests(unittest.TestCase):
         problems = self.problems(doc)
         self.assertTrue(any("semantic_gate" in problem for problem in problems))
         self.assertTrue(any("interception_plan" in problem for problem in problems))
+
+    def test_gatling_projectile_is_a_documented_false_positive(self):
+        by_id = {candidate["id"]: candidate for candidate in self.doc["candidates"]}
+        false_positive = by_id["false-positive-gatling-projectile"]
+        self.assertIn("Projectile", false_positive["semantic_gate"])
+        self.assertIn("UpdateZombieGatlingHead", false_positive["function_name"])
+        for strategy in self.doc["interception_plan"]:
+            self.assertNotIn(false_positive["entry_va"], strategy["strategy"])
+            self.assertNotIn(false_positive["function_name"], strategy["strategy"])
+        self.assertIn("0x530602", " ".join(
+            candidate["semantic_gate"] for candidate in self.doc["candidates"]
+            if candidate["id"] == "zombie-removal-dienoloot"))
+
+    def test_object_class_filter_uses_the_wave_marker_not_pool_membership(self):
+        notes = " ".join(self.doc["protocol_notes"])
+        self.assertIn("does NOT prove IsOnBoard", notes)
+        for strategy in self.doc["interception_plan"]:
+            self.assertIn("0x6C", strategy["board_filter"])
+        functions = {candidate["function_name"] for candidate in self.doc["candidates"]}
+        self.assertIn("Zombie::DieNoLoot", functions)
+        self.assertIn("Zombie::DropLoot", functions)
+        self.assertIn("Zombie::StopZombieSound", functions)
 
 
 class PeVerificationTests(unittest.TestCase):

@@ -120,7 +120,8 @@ class ExperimentEntryTests(unittest.TestCase):
     def test_run_creates_suite_through_real_backend_and_detects_launch_failure(self):
         self.prepare()
         with mock.patch.object(evaluation, "live_session", side_effect=RuntimeError("mocked game launch")):
-            report = experiment.run_experiment(self.root, "issue111-d-on-a")
+            report = experiment.run_experiment(self.root, "issue111-d-on-a",
+                                               disk_free=1 << 40, game_processes=[])
         suite = self.root / "experiments" / "runs" / "issue111-d-on-a"
         self.assertTrue(suite.is_dir())
         self.assertTrue((suite / "evaluation.json").is_file())
@@ -149,7 +150,8 @@ class ExperimentEntryTests(unittest.TestCase):
                 return {"statistics": {"failed_cases": 0, "completed_cases": 1}}
 
         self.assertIsNone(__import__("os").environ.get(experiment.MODE_ENV))
-        result = experiment.run_experiment(self.root, "issue111-d-off-a", suite_runner=FakeSuite())
+        result = experiment.run_experiment(self.root, "issue111-d-off-a", suite_runner=FakeSuite(),
+                                           disk_free=1 << 40, game_processes=[])
         self.assertEqual(result["statistics"]["failed_cases"], 0)
         self.assertEqual(captured["env"], "0")
         self.assertIsNone(__import__("os").environ.get(experiment.MODE_ENV))
@@ -161,8 +163,18 @@ class ExperimentEntryTests(unittest.TestCase):
         suite = self.root / "experiments" / "runs" / name
         suite.mkdir(parents=True)
         plan = load_plan(self.root)
+        cases = []
+        for seed in seeds:
+            cases.append({
+                "seed": seed, "status": "completed",
+                "cold_starts": [
+                    {"run": f"{name}-s{seed}-c0", "kind": "source", "passed": True},
+                    {"run": f"{name}-s{seed}-c1", "kind": "replay", "passed": True},
+                ],
+                "sessions": [{"child": f"{name}-s{seed}-c0"}],
+            })
         suite_report = {"schema": "lvz.evaluation.v1", "source": "live_engine",
-                        "plan": asdict(plan), "cases": [{"seed": seed, "status": "completed"} for seed in seeds],
+                        "plan": asdict(plan), "cases": cases,
                         "statistics": {"seed_cases": len(seeds), "completed_cases": len(seeds), "failed_cases": 0}}
         (suite / "evaluation.json").write_text(json.dumps(suite_report), encoding="utf-8")
         (suite / "plan.json").write_text(json.dumps(asdict(plan)), encoding="utf-8")
@@ -240,6 +252,60 @@ class ExperimentEntryTests(unittest.TestCase):
         self.plan_path().write_text(self.plan_path().read_text(encoding="utf-8") + "\n", encoding="utf-8")
         with self.assertRaises(experiment.ExperimentError):
             experiment.seal(self.root, "issue111-d-on-f")
+
+    def test_run_enforces_the_resource_contract_before_the_backend(self):
+        self.prepare(name="issue111-d-off-a", mode="off")
+        called = {"backend": False}
+
+        def runner():
+            called["backend"] = True
+            return {"statistics": {"failed_cases": 0, "completed_cases": 1}}
+
+        with self.assertRaises(experiment.ExperimentError):
+            experiment.run_experiment(self.root, "issue111-d-off-a", suite_runner=runner,
+                                      disk_free=1, game_processes=[])
+        self.assertFalse(called["backend"])
+        with self.assertRaises(experiment.ExperimentError):
+            experiment.run_experiment(self.root, "issue111-d-off-a", suite_runner=runner,
+                                      disk_free=1 << 40, game_processes=["PlantsVsZombies.exe"])
+        self.assertFalse(called["backend"])
+        experiment.run_experiment(self.root, "issue111-d-off-a", suite_runner=runner,
+                                  disk_free=1 << 40, game_processes=[])
+        self.assertTrue(called["backend"])
+
+    def test_child_manifest_must_be_well_formed_and_build_bound(self):
+        self._complete_suite(name="issue111-d-on-g")
+        child = self.root / "experiments" / "runs" / "issue111-d-on-g-s42-c0"
+        manifest = json.loads((child / "manifest.json").read_text(encoding="utf-8"))
+        manifest["implementation"] = {}
+        (child / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        report = experiment.check(self.root, "issue111-d-on-g")
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("recorder_sha256" in problem for problem in report["problems"]))
+
+    def test_capability_build_must_match_the_run_manifest(self):
+        self._complete_suite(name="issue111-d-on-h")
+        child = self.root / "experiments" / "runs" / "issue111-d-on-h-s42-c1"
+        manifest = json.loads((child / "audit" / "manifest.json").read_text(encoding="utf-8"))
+        manifest["lifecycle_recording"]["build"]["sha256"] = "c" * 64
+        (child / "audit" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        report = experiment.check(self.root, "issue111-d-on-h")
+        self.assertFalse(report["ok"])
+
+    def test_seal_is_idempotent_and_verifiable_but_never_silently_replaced(self):
+        self._complete_suite(name="issue111-d-on-i")
+        first = experiment.seal(self.root, "issue111-d-on-i")
+        again = experiment.seal(self.root, "issue111-d-on-i")
+        self.assertEqual(first["seal_id"], again["seal_id"])
+        self.assertTrue(experiment.verify_seal(self.root, "issue111-d-on-i")["ok"])
+        suite = self.root / "experiments" / "runs" / "issue111-d-on-i"
+        report = json.loads((suite / "evaluation.json").read_text(encoding="utf-8"))
+        report["created_at"] = "changed-after-seal"
+        (suite / "evaluation.json").write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaises(experiment.ExperimentError):
+            experiment.seal(self.root, "issue111-d-on-i")
+        with self.assertRaises(experiment.ExperimentError):
+            experiment.verify_seal(self.root, "issue111-d-on-i")
 
     # --- CLI --------------------------------------------------------------
 

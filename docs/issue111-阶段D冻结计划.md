@@ -54,8 +54,9 @@
 
 1. `off-a` vs `off-b`：对照可复现；
 2. `on-a` vs `on-b`：新模式可复现（每个子运行都须有有效回执）；
-3. `off-a` vs `on-a`：**持久化适配器**共同证据比较；报告首个分叉与比较范围，不能用事件流不同
-   本身判失败，也不能声称证明了所有隐藏状态无扰动；
+3. `off-a` vs `on-a`：**持久化适配器**共同证据比较；用 `tools/issue111_lifecycle_compare.py` 比较
+   lifecycle 流（只归一化 run_id/branch_id/session_id，不剥离事实/计数/序号），并报告首个分叉
+   与比较范围；不能用事件流不同本身判失败，也不能声称证明了所有隐藏状态无扰动；
 4. tick 940：在声明窗口内扫描“无死亡阶段即消失/释放”的实体，逐条给坐标；不得预设 33 个对象；
    捕获级结论在 hook 审查通过前保持 `unavailable`。
 
@@ -80,9 +81,15 @@ python tools/issue111_stage_d.py --root . doctor --require-game
 python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --skip-build
 python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-on-a
 python tools/issue111_lifecycle_report.py experiments/runs/issue111-d-on-a --out work/issue111-d/on-a.json
+python tools/issue111_lifecycle_compare.py experiments/runs/issue111-d-off-a experiments/runs/issue111-d-on-a
 python tools/issue111_lifecycle_experiment.py --root . check --run issue111-d-on-a
 python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-on-a
+python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-on-a
 ```
+
+`run` 在启动前强制执行冻结的 plan/资源合同（plan 身份、tick 上限、磁盘预留、单一游戏进程），
+不依赖用户手动跑 doctor；`check`/`seal` 要求 suite 完成、每个子运行严格审计与模式一致；现有 seal
+不会被静默替换，`verify` 可只读复核 seal 与当前证据是否一致。
 
 `prepare` 只锁定 plan 字节/归一化身份、root、模式与预期子运行名，并写 suite 旁的
 `<name>.lifecycle.json`；它不创建 suite 目录（`run_suite` 要求输出目录不存在）。`run` 校验锁定

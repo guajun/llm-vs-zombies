@@ -134,9 +134,10 @@ class Fixture:
     """One synthetic run directory: <root>/audit plus an optional run manifest."""
 
     def __init__(self, root, *, cap=..., sequences=DEFAULT_SEQUENCES, run_manifest=None, launcher=None,
-                 write_receipt=True, run_id=RUN_ID):
+                 write_receipt=True, run_id=RUN_ID, branch_id=BRANCH_ID):
         self.root = Path(root)
         self.run_id = run_id
+        self.branch_id = branch_id
         self.audit = self.root / "audit"
         self.audit.mkdir(parents=True, exist_ok=True)
         self.cap = capability() if cap is ... else cap
@@ -145,7 +146,7 @@ class Fixture:
             manifest["lifecycle_recording"] = self.cap
         self.manifest_bytes = (json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
         (self.audit / "manifest.json").write_bytes(self.manifest_bytes)
-        self.items = [envelope(index, event(*sequence), run_id=self.run_id)
+        self.items = [envelope(index, event(*sequence), run_id=self.run_id, branch=self.branch_id)
                       for index, sequence in enumerate(sequences)]
         self.events_bytes = envelopes_bytes(self.items)
         self.receipt = self.receipt_for(self.events_bytes)
@@ -158,6 +159,7 @@ class Fixture:
         if isinstance(self.cap, dict) and isinstance(self.cap.get("build"), dict):
             build = self.cap["build"]
         overrides.setdefault("run_id", self.run_id)
+        overrides.setdefault("branch", self.branch_id)
         return receipt_for(events_bytes, manifest_sha256=hashlib.sha256(self.manifest_bytes).hexdigest(),
                            build=build, **overrides)
 

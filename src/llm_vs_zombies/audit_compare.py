@@ -2231,10 +2231,29 @@ class AuditTail:
         return self._requests.get(request_id, [])
 
 
+def lifecycle_identity_normalized_manifest(manifest: dict) -> dict:
+    """Normalize only the permitted lifecycle identity fields for comparison.
+
+    ``session_id`` is a per-process identity and may differ between two cold
+    runs; every other capability/build/counter fact stays in the comparison.
+    """
+    if not isinstance(manifest, dict):
+        return manifest
+    block = manifest.get(lifecycle_events.CAPABILITY_KEY)
+    if not isinstance(block, dict):
+        return manifest
+    normalized = copy.deepcopy(manifest)
+    normalized[lifecycle_events.CAPABILITY_KEY]["session_id"] = 0
+    return normalized
+
+
 def compare_audits(expected: AuditLog, actual: AuditLog, *,
                    request_map: dict[str, str] | None = None) -> dict:
-    if expected.manifest != actual.manifest:
-        return {"equal": False, "reason": "audit_manifest", "difference": first_difference(expected.manifest, actual.manifest)}
+    expected_manifest = lifecycle_identity_normalized_manifest(expected.manifest)
+    actual_manifest = lifecycle_identity_normalized_manifest(actual.manifest)
+    if expected_manifest != actual_manifest:
+        return {"equal": False, "reason": "audit_manifest",
+                "difference": first_difference(expected_manifest, actual_manifest)}
     unname_epoch = lambda value: {"tick": value["tick"], "revision": value["revision"]}
     difference = first_difference(render_semantics(expected.warm_render, map_version=unname_epoch),
                                   render_semantics(actual.warm_render, map_version=unname_epoch))

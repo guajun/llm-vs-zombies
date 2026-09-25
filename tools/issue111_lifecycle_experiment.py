@@ -34,6 +34,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -175,13 +177,71 @@ def _read_prepared(root: Path, name: str) -> dict:
         plan_path = root / plan_path
     if not plan_path.is_file() or sha256_file(plan_path) != metadata["plan"]["sha256"]:
         raise ExperimentError("evaluation plan bytes changed since prepare")
-    if _plan_identity(_load_plan(plan_path)) != metadata["plan"]["normalized_sha256"]:
+    parsed = _load_plan(plan_path)
+    if _plan_identity(parsed) != metadata["plan"]["normalized_sha256"]:
         raise ExperimentError("evaluation plan normalized identity changed since prepare")
+    expected = expected_children(name, parsed)
+    if metadata.get("expected_children") != expected:
+        raise ExperimentError("prepared child-run list does not match the validated plan")
+    if Path(metadata.get("suite", "")).resolve() != run_directory(root, name).resolve():
+        raise ExperimentError("prepared suite path does not match the run name")
     return metadata
 
 
-def run_experiment(root: Path, name: str, *, suite_runner=None) -> dict:
-    """Invoke the real evaluation suite with the explicit mode environment."""
+def _running_game_processes() -> list[str]:
+    if sys.platform != "win32":
+        return []
+    try:
+        output = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                                timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return ["tasklist_unavailable"]
+    return [line.split(",")[0].strip('"') for line in output.stdout.splitlines()
+            if "plantsvszombies" in line.lower()]
+
+
+def _stage_d_contract(root: Path, metadata: dict, plan) -> tuple[dict, list[str]]:
+    """Cross-check the prepared plan against the frozen stage-D resource contract."""
+    problems: list[str] = []
+    contract: dict = {}
+    candidate = root / "docs" / "issue111-阶段D计划.json"
+    if not candidate.is_file():
+        candidate = ROOT / "docs" / "issue111-阶段D计划.json"
+    if candidate.is_file():
+        try:
+            contract = json.loads(candidate.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            problems.append(f"stage-D plan is unreadable: {exc}")
+            contract = {}
+    based_on = contract.get("based_on") if isinstance(contract, dict) else None
+    prepared_relative = metadata["plan"]["path"]
+    if isinstance(based_on, dict):
+        frozen_plan = str(based_on.get("plan", ""))
+        if Path(prepared_relative).as_posix().endswith(frozen_plan) or prepared_relative == frozen_plan:
+            if plan.tick_budget != based_on.get("tick_budget"):
+                problems.append("evaluation plan tick_budget does not match the frozen stage-D cap")
+            if plan.stop_when != based_on.get("stop_when"):
+                problems.append("evaluation plan stop_when does not match the frozen stage-D endpoint")
+            if plan.scenario != based_on.get("scenario"):
+                problems.append("evaluation plan scenario does not match the frozen stage-D plan")
+            limits = contract.get("resource_limits") or {}
+            if plan.tick_budget > (limits.get("tick_cap") or plan.tick_budget):
+                problems.append("evaluation plan tick_budget exceeds the stage-D tick cap")
+            contract["applies"] = True
+            contract["min_free_bytes"] = max(plan.min_free_bytes, limits.get("min_free_bytes") or 0)
+    if not contract.get("applies"):
+        contract["min_free_bytes"] = plan.min_free_bytes
+    return contract, problems
+
+
+def run_experiment(root: Path, name: str, *, suite_runner=None,
+                   disk_free: int | None = None, game_processes: list[str] | None = None) -> dict:
+    """Invoke the real evaluation suite with the explicit mode environment.
+
+    The frozen plan/resource contract is enforced here, not left to an optional
+    doctor command: plan identities, stage-D tick cap/reserve, disk reserve and
+    a single-game-process rule are checked before the backend starts.
+    """
     root = Path(root).resolve()
     metadata = _read_prepared(root, name)
     suite = Path(metadata["suite"])
@@ -191,11 +251,20 @@ def run_experiment(root: Path, name: str, *, suite_runner=None) -> dict:
         candidate = root / "experiments" / "runs" / child
         if candidate.exists():
             raise ExperimentError(f"expected child run already exists: {candidate}")
+    plan = _load_plan(plan_abspath(root, metadata))
+    contract, problems = _stage_d_contract(root, metadata, plan)
+    free = shutil.disk_usage(root).free if disk_free is None else disk_free
+    if free < contract.get("min_free_bytes", 0):
+        problems.append(f"disk free {free} is below the required reserve {contract.get('min_free_bytes')}")
+    processes = _running_game_processes() if game_processes is None else game_processes
+    if processes:
+        problems.append(f"a game process is already running: {processes}")
+    if problems:
+        raise ExperimentError("resource/contract gate failed: " + "; ".join(problems))
     from llm_vs_zombies import evaluation
     previous = os.environ.get(MODE_ENV)
     os.environ[MODE_ENV] = metadata["env"]["value"]
     try:
-        plan = _load_plan(plan_abspath(root, metadata))
         runner = suite_runner
         if runner is None:
             def runner():
@@ -208,6 +277,10 @@ def run_experiment(root: Path, name: str, *, suite_runner=None) -> dict:
             os.environ[MODE_ENV] = previous
 
 
+def _valid_sha256(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
 def _child_facts(root: Path, name: str, mode: str, child: str) -> tuple[dict | None, list[str]]:
     from llm_vs_zombies.audit_compare import AuditLog, EvidenceError
     directory = root / "experiments" / "runs" / child
@@ -216,25 +289,29 @@ def _child_facts(root: Path, name: str, mode: str, child: str) -> tuple[dict | N
     if not directory.is_dir():
         return None, [f"child run directory is missing: {directory}"]
     run_manifest = directory / "manifest.json"
-    if run_manifest.is_file():
-        facts["run_manifest_sha256"] = sha256_file(run_manifest)
-        try:
-            manifest = json.loads(run_manifest.read_bytes())
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            manifest = None
-        if isinstance(manifest, dict):
-            if isinstance(manifest.get("run_id"), str) and manifest["run_id"] != child:
-                problems.append(f"{child}: run manifest identity does not match its directory")
-            implementation = manifest.get("implementation")
-            if isinstance(implementation, dict):
-                facts["build"] = implementation.get("recorder_sha256")
+    if not run_manifest.is_file():
+        return facts, [f"{child}: run manifest.json is missing"]
+    facts["run_manifest_sha256"] = sha256_file(run_manifest)
+    try:
+        manifest = json.loads(run_manifest.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return facts, [f"{child}: run manifest is unreadable: {exc}"]
+    if not isinstance(manifest, dict):
+        return facts, [f"{child}: run manifest is not an object"]
+    if manifest.get("run_id") != child:
+        problems.append(f"{child}: run manifest identity does not match its directory")
+    implementation = manifest.get("implementation")
+    build = implementation.get("recorder_sha256") if isinstance(implementation, dict) else None
+    if not _valid_sha256(build):
+        problems.append(f"{child}: run manifest has no well-formed recorder_sha256")
     else:
-        problems.append(f"{child}: run manifest.json is missing")
+        facts["build"] = build
     audit = directory / "audit"
     if not (audit / "manifest.json").is_file():
         return facts, problems + [f"{child}: audit/manifest.json is missing"]
     try:
         strict = AuditLog(audit, require_closed=True)
+        strict.verify_files()
     except (EvidenceError, OSError, UnicodeError, ValueError) as exc:
         return facts, problems + [f"{child}: strict audit verification failed: {exc}"]
     facts["audit"] = {"manifest_sha256": sha256_file(audit / "manifest.json"),
@@ -245,6 +322,12 @@ def _child_facts(root: Path, name: str, mode: str, child: str) -> tuple[dict | N
         if lifecycle_mode != "enabled":
             problems.append(f"{child}: expected lifecycle capability enabled, found {lifecycle_mode}")
         else:
+            declared = strict.manifest.get(lifecycle_events.CAPABILITY_KEY) or {}
+            declared_build = (declared.get("build") or {}).get("sha256") if isinstance(declared, dict) else None
+            if not _valid_sha256(declared_build):
+                problems.append(f"{child}: capability has no well-formed build identity")
+            elif facts["build"] is not None and declared_build != facts["build"]:
+                problems.append(f"{child}: capability build does not match the run manifest recorder_sha256")
             try:
                 report = lifecycle_events.validate(audit, manifest=strict.manifest, require_close=True)
             except lifecycle_events.LifecycleError as exc:
@@ -320,9 +403,24 @@ def check(root: Path, name: str) -> dict:
         if statistics.get("completed_cases") != len(plan.seeds):
             problems.append(f"suite completed_cases={statistics.get('completed_cases')!r} "
                             f"does not match {len(plan.seeds)} seed(s)")
-        for case in suite_report.get("cases") or []:
-            if case.get("status") != "completed":
-                problems.append(f"suite case seed {case.get('seed')!r} status is {case.get('status')!r}")
+        cases = suite_report.get("cases")
+        if not isinstance(cases, list) or {case.get("seed") for case in cases if isinstance(case, dict)} != set(plan.seeds):
+            problems.append("suite cases do not cover exactly the prepared seeds")
+        else:
+            for case in cases:
+                seed = case.get("seed")
+                if case.get("status") != "completed":
+                    problems.append(f"suite case seed {seed!r} status is {case.get('status')!r}")
+                if case.get("error") is not None:
+                    problems.append(f"suite case seed {seed!r} retains an error")
+                attempts = case.get("cold_starts")
+                if not isinstance(attempts, list) or not attempts:
+                    problems.append(f"suite case seed {seed!r} has no cold-start evidence")
+                elif not all(attempt.get("passed") is True for attempt in attempts):
+                    problems.append(f"suite case seed {seed!r} has an unpassed cold-start attempt")
+                sessions = case.get("sessions")
+                if not isinstance(sessions, list) or not sessions:
+                    problems.append(f"suite case seed {seed!r} has no retained child sessions")
     children: list[dict] = []
     builds: set[str] = set()
     for child in metadata["expected_children"]:
@@ -334,6 +432,8 @@ def check(root: Path, name: str) -> dict:
             children.append(facts)
     if len(builds) > 1:
         problems.append(f"child runs do not share one recorder build: {sorted(builds)}")
+    if not builds:
+        problems.append("no child run exposes a recorder build identity")
     report["children"] = children
     report["build"] = next(iter(builds)) if len(builds) == 1 else None
     report["ok"] = not problems
@@ -350,10 +450,8 @@ def _load_plan_from_report(suite_report: dict):
                    for key, item in value.items()}).validate()
 
 
-def seal(root: Path, name: str) -> dict:
-    """Re-check, compress child audits and bind all identities in one seal."""
-    root = Path(root).resolve()
-    report = check(root, name)
+def _seal_document(root: Path, name: str) -> dict:
+    report = seal_check(root, name)
     if not report.get("ok"):
         raise ExperimentError("run is not sealable: " + "; ".join(report["problems"]))
     metadata = _read_prepared(root, name)
@@ -361,7 +459,7 @@ def seal(root: Path, name: str) -> dict:
         audit = root / "experiments" / "runs" / child / "audit"
         if not (audit / evidence_codec.RECEIPT).is_file():
             evidence_codec.compress_evidence(audit)
-    # Re-run the proof against the compressed evidence.
+    # Re-run the proof against the compressed evidence (strict read + digest).
     sealed = check(root, name)
     if not sealed.get("ok"):
         raise ExperimentError("sealed evidence does not re-verify: " + "; ".join(sealed["problems"]))
@@ -380,9 +478,49 @@ def seal(root: Path, name: str) -> dict:
         "children": sealed["children"],
     }
     document["seal_id"] = sha256_bytes(canonical(document))
+    return document
+
+
+def seal_check(root: Path, name: str) -> dict:
+    """``check`` as used by the seal path (kept for call-site clarity)."""
+    return check(root, name)
+
+
+def seal(root: Path, name: str) -> dict:
+    """Check, compress child audits and bind all identities in one seal.
+
+    If a seal already exists it must reproduce the current evidence exactly;
+    the stored seal is never silently replaced by a different document.
+    """
+    root = Path(root).resolve()
+    document = _seal_document(root, name)
     target = seal_path(root, name)
+    if target.is_file():
+        try:
+            existing = json.loads(target.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ExperimentError(f"existing seal is unreadable: {exc}") from exc
+        if existing.get("seal_id") != document["seal_id"]:
+            raise ExperimentError("existing seal does not match the current evidence; refusing to replace it")
+        return existing
     target.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return document
+
+
+def verify_seal(root: Path, name: str) -> dict:
+    """Read-only: verify an existing seal against the current evidence."""
+    root = Path(root).resolve()
+    target = seal_path(root, name)
+    if not target.is_file():
+        raise ExperimentError(f"seal is missing: {target}")
+    try:
+        existing = json.loads(target.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ExperimentError(f"seal is unreadable: {exc}") from exc
+    document = _seal_document(root, name)
+    if existing.get("seal_id") != document["seal_id"]:
+        raise ExperimentError("existing seal does not match the current evidence")
+    return {"schema": SEAL_SCHEMA, "run": name, "ok": True, "seal_id": existing["seal_id"]}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -401,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
     check_parser.add_argument("--run", required=True)
     seal_parser = sub.add_parser("seal", help="check, compress child audits and write the seal")
     seal_parser.add_argument("--run", required=True)
+    verify_parser = sub.add_parser("verify", help="read-only verification of an existing seal")
+    verify_parser.add_argument("--run", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
@@ -409,8 +549,10 @@ def main(argv: list[str] | None = None) -> int:
             report = run_experiment(args.root, args.name)
         elif args.command == "check":
             report = check(args.root, args.run)
-        else:
+        elif args.command == "seal":
             report = seal(args.root, args.run)
+        else:
+            report = verify_seal(args.root, args.run)
     except ExperimentError as exc:
         print(json.dumps({"schema": REPORT_SCHEMA, "ok": False, "problems": [str(exc)]},
                          ensure_ascii=False, indent=2), file=sys.stderr)

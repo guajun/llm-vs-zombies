@@ -2,79 +2,81 @@
 
 日期：2026-09-26。本文件与机器可读的
 [`issue111-原生候选证据.json`](issue111-原生候选证据.json) 一起记录：在**不启动游戏、不安装 hook、
-不写目标文件**的前提下，从锁定引擎与固定 AvZ 框架得到死亡/移除/回收候选原生路径的完整控制流、
-调用者分类与 ABI-safe 拦截方案。
+不写目标文件**的前提下，从锁定引擎、固定 AvZ 框架与固定 commit 的公开反编译得到的完整控制流、
+对象身份判定与 ABI-safe 精确拦截方案。
 
-**Junior 关卡状态：OPEN。** 候选仍是 `candidate_review_required`；`docs/issue111-捕获点表.json`
-三行仍保持 `review_required`、ABI `unknown`、无地址。本文件不能作为已验收实现；但语义判断与
-拦截路线由执行者基于静态证据给出，不需要维护者替我们挑地址。
+**Junior 关卡状态：OPEN。** 捕获点表三行仍保持 `review_required`、ABI `unknown`、无地址。
+本文件是**设计证据**，不是已验收实现；但常规 hook 机制由执行者按证据决定，不需要用户挑选地址。
 
-## 1. 目标身份与复核方法
+## 1. 来源与复核
 
 | 项 | 值 |
 |---|---|
-| 引擎（local-engine 提取版） | `sha256 f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322` |
-| 包装器（原版 exe） | `sha256 9397ca2dc3a4560eba5f87aef40fd800786ba0312716729ccbdbda185abee27d` |
-| 装载基址 | `0x400000`（`determinism/evidence.json` 记录的锁定镜像） |
-| AvZ 参考 | `c42676c269b5b482a1eb9203a5b979e9d8a2a5c7`：`inc/avz_pvz_struct.h`（State@0x28、Hp@0xC8、IsDisappeared@0xEC、AtWave@0x6C）、`src/avz_asm.cpp`（`KillZombie=0x5302F0`、`RemoveZombie=0x530510`、`KillZombiesPreview=0x40DF70`）、`inc/avz_types.h`（类型枚举） |
-| 反汇编 | 锁定 LLVM-MinGW 20260908 的 `llvm-objdump 23`，只读反汇编 `.text` |
-| 复核命令 | `python tools/issue111_native_candidates.py check`、`python tools/issue111_native_candidates.py verify --exe <locked exe>` |
+| 引擎 | `sha256 f9669af…`（local-engine 提取版，基址 0x400000） |
+| AvZ | `c42676c269b5b482a1eb9203a5b979e9d8a2a5c7` |
+| 公开反编译（研究辅助） | `https://github.com/Patoke/re-plants-vs-zombies` @ `c4692036c5e11d227c8fb7c593b734dac96da028`，`Zombie.cpp`（原地址注释；锁定二进制仍为权威） |
+| 社区内存表 | `https://wiki.pvz1.com/doku.php?id=技术:内存基址`（+0x28 状态/动画、+0x6C 波次、+0xBA 头/非濒死、+0xBD 水中、抛射物也有 +0x28） |
+| 复核 | `python tools/issue111_native_candidates.py check`；`verify --exe <locked exe>` 本机 11/11 字节 match |
 
-本机 `verify`：镜像 SHA-256 匹配，9 个候选的 32 字节签名全部 `match`。仓库只保存哈希与字节。
+反编译只引用短结论，不 vendoring 第三方源码。
 
-## 2. 候选摘要
+## 2. 关键语义修正
 
-| 候选 | 入口 VA / RVA | ABI | 语义结论 |
-|---|---|---|---|
-| `zombie-removal-unclassified` | `0x530510` / `0x130510` | thiscall，`ECX=AZombie*` | 唯一 `+0xEC=1` 写点（`0x530602`）；棋盘与预览清理共用，必须做棋盘池过滤；本身不区分死亡/非死亡 |
-| `zombie-slot-recycled` | `0x41BAD0` / `0x1BAD0`（free 序列 `0x41BBF4-0x41BC23`） | 入口 `ESI=Board*`，单一调用者 `0x4526F0`（`game_total_loop 0x452650`） | 唯一僵尸池释放：`free_head(board+0x9C) <-> slot+0x158`、`count(board+0xA0)--`，按 `+0xEC` 每次 update 扫一次 |
-| `zombie-death-state-falling` | `0x533240` / `0x133240`，写点 `0x533377` | `EAX=AZombie*` | State∈{1,2,3} 直接返回；有附件/效果前置时才写 `State=1`，否则该函数本身走 `0x530510` 移除 |
-| `zombie-death-state-ash` | `0x532B70` / `0x132B70`，写点 `0x532F5F` | thiscall，`ECX=AZombie*` | 入口拒绝已消失/State==2；写 `State=2`+`StateCountdown=0x12C`，随后调 `0x530170`；部分类型再走 `KillZombie`；附件是独立池实体需按完整 ID 去重 |
-| `zombie-death-state-mower` | `0x5327E0` / `0x1327E0`，写点 `0x532A62` | `EDI=AZombie*`（调用者 `0x4586D2` 从 `0x8(%EBP)` 载入） | 割草机路径：入口拒绝已消失/State==3；写 `State=3` 后跳 `0x530170`；调用者随后另调 `0x530510` 移除 |
-| `zombie-death-state-variant-a` | `0x527750` / `0x127750`，写点 `0x5279F4` | `EAX=AZombie*` | 类型 0x1D（29 = 机枪豌豆僵尸）专属分支；`+0xBA` 保护；写 `State=1` 并重置行/位置/计时字段；**不**移除、**不**调 `0x530170` |
-| `zombie-death-state-variant-b` | `0x52EC00` / `0x12EC00`，写点 `0x52EC92` | `EAX=AZombie*` + 栈标志 bit 0x20 | 标志置位分支写 `State=1`+`StateCountdown=0x118`+效果；标志清零分支走 `0x530510`+`0x530170` 移除 |
-| `zombie-death-effect-shared-aftermath` | `0x530170` / `0x130170` | `EAX=AZombie*` | 棋盘死亡收尾：AtWave -2/-3 提前返回；多数死亡路径调用，但 variant-a 与 falling 的移除分支不调用 → **不能单独作为死亡阶段事实** |
-| `zombie-detach-helper` | `0x530850` / `0x130850` | cdecl，栈上传 `AZombie*` | 移除（返回地址 `0x530520`）与回收 free（返回地址 `0x41BBFF`）前都会调用，可作 ABI-safe 回收触发点 |
+- `0x527750 = UpdateZombieGatlingHead` 是**假阳性**：`0x527952` 调 `AddProjectile(0x41DF60)` 并把返回的
+  **抛射物**放进 ESI，`0x5279F4` 的 `movl $1, 0x28(%esi)` 写的是抛射物字段，不是僵尸 phase。
+  该条目保留为对象身份过滤的负例。
+- `0x530510 = DieNoLoot`：唯一 `+0xEC=1` 写点（`0x530602`），停声、删 reanimation、设置 mDead；
+  **不**写 phase、**不**释放槽位。`0x5302F0 = DieWithLoot = DieNoLoot + DropLoot`。
+- `0x530170 = DropLoot`：只做掉落/图鉴/奖励结算（`IsOnBoard()` 不过即返回），**不是死亡确认**。
+- `0x530850 = StopZombieSound`：停 dancer/box/digger 音效并可能遍历棋盘；入口**不能**当作回收标记。
+- `0x530310 = BobsledDie`、`0x5303A0 = BobsledBurn`（此前误标为附件 ash 变体）。
+- `0x532B70 = ApplyBurn`（phase 2 + countdown 0x12C + DropLoot，部分路径 DieWithLoot）。
+- `0x5327E0 = MowDown`（phase 3 后 tail-jump DropLoot；catapult/zamboni 直接 DieWithLoot）。
+- `0x533240 = PlayDeathAnim`（phase 1；无死亡动画等分支改走 DieNoLoot）。
+- `0x52E9A0 = ZamboniDeath`（spike 分支用**寄存器写** phase，`0x52EA38`，此前即时值扫描漏掉；
+  否则内联 DieWithLoot）。`0x52EC00 = CatapultDeath`（栈标志 bit 0x20 = DAMAGE_SPIKE 选分支）。
+- `0x41BAD0` 是棋盘回收 sweep；僵尸分支 `0x41BBA9` 读 `+0xEC`，free 序列 `0x41BBF4-0x41BC23`
+  更新 `free_head(board+0x9C) <-> slot+0x158` 与 `count(board+0xA0)`；`0x41BC23` 是 5 字节 jmp，
+  正好在 free 之后，可作可执行的 commit 观测点。
+- **IsOnBoard**：来源 `mFromWave(+0x6C) != -2 && != -3`。预览对象可能也在 Board 池里，
+  **池指针本身不证明在棋盘上**；对象身份过滤要用“池/stride 归类 + +0x6C 波次标记”。
 
-## 3. 语义判断与拦截方案
+## 3. 生产设计（执行者方案，供维护者审查）
 
-### 3.1 棋盘 vs 预览
+### 3.1 原始 phase 转换（不做过早 dedup）
 
-- 预览清理路径：`0x40DF70`（pinned AvZ `KillZombiesPreview` 的目标）及其兄弟 `0x40DEA0`/`0x40DF00`，
-  加上早期内联列表 `0x401970`；`0x40DF70` 的分支只处理 AtWave==-2 的预览对象。
-- 棋盘路径：区域效果 `0x421B10`、割草机 `0x458540`、按 ID/池查找 `0x460060`、各类 update/分支
-  `0x52xxxx`、`KillZombie 0x5302F0` 与附件变体 `0x530310`/`0x5303A0`。
-- 所有生产 hook 统一用**棋盘池成员过滤**：读 `zombie+4` 的 board 指针，再验证
-  `zombie == pool.block(board+0x90) + (id&0xffff)*0x15c` 且 `id != 0`；预览/静态对象不满足。
-  该判据只依赖已在审计中验证的池布局，不需要维护者选择地址。
+- 在僵尸 `+0x28` 的**精确 store 指令**上做 instruction-granular MinHook：`0x533377`(1)、`0x532F5F`(2)、
+  `0x532A62`(3)、`0x52EC92`(1)、`0x52EA38`(寄存器值)，以及对象归类后发现的其它僵尸 store。
+- 每个 hook 记录 store 处的僵尸指针（各站点寄存器：EDI/ESI）、store VA、前后 phase 原始值与
+  `capture_sequence`；不按完整 ID/stage 去重，重复事实原样保留。
+- 离线分类把 phase 1/2/3 归为死亡阶段并输出过滤计数（其他 phase 转换单独计数）；这样不会用
+  dedup 掩盖重复或多段事实。
+- 短 store（3 字节）用 MinHook 的重定位窗口（向后复制到 ≥5 字节）处理；实现前必须验证窗口内
+  没有分支目标。函数入口/出口做 net-diff 的方案已否决：无法定位内部 store 相对嵌套移除的顺序。
 
-### 3.2 State 转换 vs 重复
+### 3.2 移除标记
 
-- 五个写点所在函数都有入口幂等保护（State 已是死亡阶段、`+0xEC` 已置位或类型/前置条件不符时
-  直接返回或改走移除）；静态上 `movl $1/2/3, 0x28(reg)` 的写点扫描（全 `.text`）只找到这 5 处。
-- 因此死亡阶段事实按“入口读 State → 出口读 State，仅 0→{1,2,3} 变化时发一条”实现，并以
-  `(run, session, 完整 ID, stage)` 去重；附件重复写按完整 ID 折叠为一次。
-- `zombie-death-effect-shared-aftermath` 只作为可选的配对/收尾标记；缺失它不推翻 State 事实。
+- 在 `0x530602` 的 `movb $0x1, 0xec(%edi)`（7 字节）精确拦截，记录 mDead 0→1 与类型；
+  可另发 DieNoLoot 入口事件做来源标注，但事实以 store 为准。
 
-### 3.3 ABI-safe 拦截（执行者决定，供审查）
+### 3.3 回收提交
 
-| 事实 | 策略 | 理由 | 已否决方案 |
-|---|---|---|---|
-| 移除 | `0x530510` 入口 hook（`ECX=this`），棋盘池过滤 | 唯一 `+0xEC` 写点；入口 hook 不需要中段补丁 | 逐调用者 hook（30+ 脆弱点）；用 `0x530170` 代替（并非所有路径调用） |
-| 死亡阶段 | 五个 State 写函数各做 入口+出口 hook（`EAX`/`ECX`/`EDI` 适配），仅发 0→{1,2,3} 变化 | 复用现有寄存器保存 shim；函数边界清晰、各有幂等保护 | 只 hook `0x530170`（漏 variant-a 与 falling 移除分支）；逐条 state-store 指令 hook（5+ 点、无统一 ABI） |
-| 回收 | `0x530850` 入口 hook（cdecl），按返回地址过滤：`0x41BBFF`=回收 free，`0x530520`=移除 | 只在入口读栈上的返回地址，无需中段补丁；sweep 是唯一僵尸池释放路径 | hook `0x41BAD0` 按 stride 过滤（同时处理植物/格子项）；`0x41BBF9` 中段 MinHook（6 字节窗口、风险高） |
+- 在 sweep 内配对：`0x41BBA9`（7 字节 guard，EDI=僵尸，记录完整 ID 的 candidate）与
+  `0x41BC23`（5 字节 jmp，free-list 更新后，记录 slot/free_head/count 的 commit）。
+- 离线按同一次 sweep 迭代配对；**绝不**在入口处声称回收完成，也**不**用 StopZombieSound 入口当标记。
 
-字节签名、调用者全表与控制流细节在 JSON 中逐条登记；`tools/issue111_native_candidates.py verify`
-可对任意锁定副本复核 32 字节签名。
+### 3.4 对象身份过滤
 
-## 4. 仍需动态/维护者确认的残余问题
+- 把对象指针归类到棋盘池（僵尸 stride 0x15c @board+0x90、抛射物 0x94 @board+0xC8、植物 0x14c
+  @board+0xAC、格子/硬币），再读 `+0x6C`；只有“僵尸池 + wave ∉ {-2,-3}”才算棋盘僵尸。
+  该过滤同时用于 phase/removal/recycle 三类事件，并写入每条事件。
 
-1. 预览对象的 `+4` 字段在运行时的实际值未动态验证；当前仅以池成员过滤作为静态判据。
-2. variant-a（类型 29）与 variant-b 的静态形态符合死亡动画，但未动态观察；需要真机确认它们不是
-   位移/重生路径，以及标志位选择的语义。
-3. 立即值扫描未发现数据驱动的 State 写点，但不能静态排除计算型写入。
-4. `0x52FE50`（掉落/结算）与 `+0xBA`/`+0xBD` 标志的确切语义未解码，影响 variant/附件分类。
-5. 附件 `+0xF4` 是独立池槽；一个完整实体可能产生多条 State 写，折叠规则需维护者确认。
+## 4. 仍未解决/需动态确认
 
-这些确认完成前不实现生产 hook、不跑游戏；D 阶段使用初始化探针，捕获级死亡/移除结论输出
-`unavailable`。
+1. `0x52EA38` 的 EBX 值为 PHASE_ZOMBIE_DYING 是源码交叉结论，需在实现时读寄存器值并在夹具中验证。
+2. 僵尸 `+0x28` 的 store 全集需在对象归类后复核（即时值/寄存器扫描找到大量非僵尸写点）。
+3. 回收 sweep 的源函数身份（Board.cpp）与“唯一 free 路径”需进一步复核。
+4. 预览对象是否可能通过“僵尸池 + wave ∉ {-2,-3}”过滤，需真机/夹具确认。
+5. 附件 `+0xF4` 是独立池实体，离线分类需定义同一逻辑实体的折叠规则。
+
+以上确认前不实现生产 hook、不跑游戏；D 阶段只使用已合并的初始化探针，捕获级结论 `unavailable`。

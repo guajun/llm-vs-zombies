@@ -88,7 +88,8 @@ class DocumentedCommandTests(unittest.TestCase):
         import issue111_lifecycle_experiment as experiment
 
         tools = {name: __import__(name) for name in
-                 ("issue111_stage_d", "issue111_lifecycle_experiment", "issue111_lifecycle_report")}
+                 ("issue111_stage_d", "issue111_lifecycle_experiment", "issue111_lifecycle_report",
+                  "issue111_lifecycle_compare")}
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "experiments" / "plans").mkdir(parents=True)
