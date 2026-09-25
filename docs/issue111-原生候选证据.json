@@ -1,0 +1,397 @@
+{
+  "schema": "lvz.native-candidates.v1",
+  "issue": 111,
+  "generated": "2026-09-26",
+  "status": "candidate_review_required",
+  "reviewed_by": null,
+  "target": {
+    "name": "PvZ 1.0.0.1051 EN (local-engine extracted executable)",
+    "sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322",
+    "wrapper_sha256": "9397ca2dc3a4560eba5f87aef40fd800786ba0312716729ccbdbda185abee27d",
+    "image_base": "0x400000",
+    "avz_commit": "c42676c269b5b482a1eb9203a5b979e9d8a2a5c7",
+    "avz_reference": "inc/avz_pvz_struct.h (State @0x28, Hp @0xC8, IsDisappeared @0xEC, AtWave @0x6C) and src/avz_asm.cpp (KillZombie=0x5302F0, RemoveZombie=0x530510)"
+  },
+  "method": "Read-only static disassembly of the locked executable (llvm-objdump 23 from the pinned LLVM-MinGW 20260908 toolchain), cross-referenced with the pinned AvZ framework constants. No game process, no live memory inspection, no hook installed.",
+  "protocol_notes": [
+    "All VA values are absolute addresses in the locked image loaded at 0x400000; RVA = VA - 0x400000.",
+    "The AvZ framework independently hard-codes KillZombie=0x5302F0 and RemoveZombie=0x530510; this disassembly is consistent with those entry points.",
+    "A byte-pattern scan of the full .text for `movb $1, 0xec(reg)` found exactly one site: 0x530602 inside 0x530510.",
+    "No production hook may be implemented from this file alone; the issue's junior gate requires maintainer review of these candidates first."
+  ],
+  "candidates": [
+    {
+      "id": "zombie-removal-unclassified",
+      "status": "candidate_review_required",
+      "entry_va": "0x530510",
+      "rva": "0x130510",
+      "function_start_va": "0x530510",
+      "bytes32": "558bec83e4f851578bf957e8300300008b8f1001000085c97441a1b89e6a008b",
+      "head": [
+        "530510: pushl\t%ebp",
+        "530511: movl\t%esp, %ebp",
+        "530513: andl\t$-0x8, %esp",
+        "530516: pushl\t%ecx",
+        "530517: pushl\t%edi",
+        "530518: movl\t%ecx, %edi"
+      ],
+      "abi": "thiscall: ECX = AZombie*; plain `call`, no stack args; callee restores ESP",
+      "semantics": "Marks a zombie as removed and detaches it; the slot is freed later by the 0x41BAD0 sweep.",
+      "observed": [
+        "Detaches movement/grid state via 0x530850 and attached references at +0x110/+0x118/+0x144/+0x150.",
+        "Sets the AvZ IsDisappeared() byte at +0xEC to 1.",
+        "A byte-pattern scan of the full .text found exactly one `movb $1, 0xec(reg)` site: 0x530602 here.",
+        "Calls 0x52FE50 (drop/loot housekeeping) and type-specific handlers for types 0x0D, 0x14, 0x19.",
+        "Returns without freeing the pool slot; the slot is freed later by 0x41BAD0 once +0xEC is set."
+      ],
+      "callers": [
+        "0x4019a8",
+        "0x4019dd",
+        "0x40dedf",
+        "0x40df58",
+        "0x40df9a",
+        "0x4134e4",
+        "0x413523",
+        "0x421dda",
+        "0x429ea1",
+        "0x45866d",
+        "0x46030a",
+        "0x524884",
+        "0x52528b",
+        "0x525bba",
+        "0x526cd2",
+        "0x527740",
+        "0x52a571",
+        "0x52aee2",
+        "0x52afba",
+        "0x52b2a0",
+        "0x52b30a",
+        "0x52eb8c",
+        "0x52ed39",
+        "0x5302fa",
+        "0x53035e",
+        "0x530390"
+      ],
+      "candidate_classification": "Primary candidate for the `zombie-removal-unclassified` fact: one shared function marks any removed zombie, including death removals; a consumer must pair it with a prior death-stage observation to classify a death removal.",
+      "coverage_limits": [
+        "Does not distinguish death from non-death removal by itself (KillZombie 0x5302F0 calls it first).",
+        "Callers include preview/UI-looking paths (0x4019A8/0x4019DD) that may not be board zombies.",
+        "Not yet verified whether every board removal reaches this function (bungee/flag/lawnmower paths need per-caller review)."
+      ],
+      "open_questions": [
+        "Confirm the +0xEC writer is unique across the whole image (only one byte-pattern site; data-driven writes still possible).",
+        "Confirm which callers are board removals vs preview/menu objects.",
+        "Decide whether classification needs the death-stage event or a caller/RVA field on the removal record."
+      ]
+    },
+    {
+      "id": "zombie-death-effect-shared-aftermath",
+      "status": "candidate_review_required",
+      "entry_va": "0x530170",
+      "rva": "0x130170",
+      "function_start_va": "0x530170",
+      "bytes32": "558bec83e4f883ec14538bd88b436c83f8fe56570f845301000083f8fd0f844a",
+      "head": [
+        "530170: pushl\t%ebp",
+        "530171: movl\t%esp, %ebp",
+        "530173: andl\t$-0x8, %esp",
+        "530176: subl\t$0x14, %esp",
+        "530179: pushl\t%ebx",
+        "53017a: movl\t%eax, %ebx"
+      ],
+      "abi": "register: EAX = AZombie*; callee saves used registers; plain ret",
+      "semantics": "Shared death-aftermath routine reached by multiple death paths after they set State.",
+      "observed": [
+        "Reads AtWave (+0x6C) and returns early for -2/-3 (preview/initial objects).",
+        "Marks the zombie type as seen via a global byte table, calls 0x52FE50 and type 0x13 handling.",
+        "Invoked by KillZombie (0x5302F0) after removal and by the State=2/State=3 routines after they set State."
+      ],
+      "callers": [
+        "0x421de1",
+        "0x458674",
+        "0x460311",
+        "0x525bc1",
+        "0x52a538",
+        "0x52aee9",
+        "0x52eb93",
+        "0x52ed40",
+        "0x530301",
+        "0x5317a4",
+        "0x532f70",
+        "0x533d75",
+        "0x533ed3",
+        "0x533f65",
+        "0x53530c",
+        "0x53679c"
+      ],
+      "candidate_classification": "Useful confirmation/aftermath marker, but not itself the State write; cannot distinguish the death stage.",
+      "coverage_limits": [
+        "Not proven to be called for every State 1/2/3 entry.",
+        "Early return on AtWave -2/-3 suggests board-only, to confirm.",
+        "Writes a global type-seen table; a probe must not duplicate or alter that side effect."
+      ],
+      "open_questions": [
+        "Confirm the EAX ABI at every caller (some call sites may pass the zombie differently).",
+        "Determine whether this fires once per death and whether State is final at entry."
+      ]
+    },
+    {
+      "id": "zombie-death-state-falling",
+      "status": "candidate_review_required",
+      "entry_va": "0x533240",
+      "rva": "0x133240",
+      "function_start_va": "0x533240",
+      "bytes32": "83ec08535556578bf88b472883f8010f843503000083f8020f842c03000083f8",
+      "head": [
+        "533240: subl\t$0x8, %esp",
+        "533243: pushl\t%ebx",
+        "533244: pushl\t%ebp",
+        "533245: pushl\t%esi",
+        "533246: pushl\t%edi",
+        "533247: movl\t%eax, %edi"
+      ],
+      "abi": "register: EAX = AZombie* (moved to EDI); no stack args observed at entry",
+      "semantics": "Candidate entry for the falling-death stage (State=1).",
+      "observed": [
+        "Branches on the current State; at 0x533377 writes State=1 (AvZ `falling`).",
+        "Spawns particle/effect strings after the write (0x66F3E8 push, 0x679748 constant).",
+        "Reads/updates speed and position fields, so it is not a pure state-write site."
+      ],
+      "callers": [
+        "0x52a564",
+        "0x53179d",
+        "0x536251"
+      ],
+      "candidate_classification": "Candidate entry for the State=1 falling stage; per-caller review is required to prove coverage.",
+      "coverage_limits": [
+        "Other functions also write State=1 (0x527750, 0x52EC00, 0x5DEC00); no single State=1 writer found.",
+        "Hook at entry needs a State check to avoid emitting non-death transitions.",
+        "Whether the write happens exactly once per entity and inside the controlled update is unverified."
+      ],
+      "open_questions": [
+        "Review all State=1 sites and decide whether one canonical death entry exists or a per-site hook is required.",
+        "Confirm which zombie types use this path."
+      ]
+    },
+    {
+      "id": "zombie-death-state-ash",
+      "status": "candidate_review_required",
+      "entry_va": "0x532b70",
+      "rva": "0x132b70",
+      "function_start_va": "0x532b70",
+      "bytes32": "558bec83e4f883ec0c53568bf133db389eec000000570f855e040000837e2802",
+      "head": [
+        "532b70: pushl\t%ebp",
+        "532b71: movl\t%esp, %ebp",
+        "532b73: andl\t$-0x8, %esp",
+        "532b76: subl\t$0xc, %esp",
+        "532b79: pushl\t%ebx",
+        "532b7a: pushl\t%esi"
+      ],
+      "abi": "thiscall: ECX = AZombie* (moved to ESI)",
+      "semantics": "Candidate entry for the ash-death stage (State=2).",
+      "observed": [
+        "At 0x532F5F writes State=2 (AvZ `ash`) and StateCountdown=0x12C, then calls the death-effect routine 0x530170.",
+        "Called for the zombie and its attached parts by 0x5303A0 (iterates +0xF4 slots for type 0x0D).",
+        "Checks the +0xEC disappeared byte before acting."
+      ],
+      "callers": [
+        "0x41d929",
+        "0x466528",
+        "0x5303d4",
+        "0x5303fb"
+      ],
+      "candidate_classification": "Candidate entry for the State=2 ash stage; shared by attachments, so a probe must deduplicate per full entity id.",
+      "coverage_limits": [
+        "0x41D929 / 0x466528 callers may operate on non-zombie objects with the same field offsets (pending review).",
+        "Multiple sub-objects of one zombie may each produce a State=2 write.",
+        "Relationship to the tick-940 disappeared-without-death observations is unknown; no mapping from a boundary disappearance to this function yet."
+      ],
+      "open_questions": [
+        "Confirm the object type of each caller before treating the entry as a zombie event.",
+        "Define the dedup key (full id) and whether repeated State=2 writes for one id are one fact or many."
+      ]
+    },
+    {
+      "id": "zombie-death-state-mower",
+      "status": "candidate_review_required",
+      "entry_va": "0x5327e0",
+      "rva": "0x1327e0",
+      "function_start_va": "0x5327e0",
+      "bytes32": "5180bfec0000000053560f854a0300008b472883f8030f843e0300008b4f2483",
+      "head": [
+        "5327e0: pushl\t%ecx",
+        "5327e1: cmpb\t$0x0, 0xec(%edi)",
+        "5327e8: pushl\t%ebx",
+        "5327e9: pushl\t%esi",
+        "5327ea: jne\t0x532b3a <.text+0x131b3a>",
+        "5327f0: movl\t0x28(%edi), %eax"
+      ],
+      "abi": "register: EDI = AZombie* (entry reads EDI directly; caller 0x4586D2 loads 0x8(%EBP) into EDI)",
+      "semantics": "Candidate entry for the mower-death stage (State=3).",
+      "observed": [
+        "At 0x532A62 writes State=3 (AvZ `mower`) and jumps to the death-effect routine 0x530170.",
+        "Entry checks +0xEC disappeared and skips when State is already 3.",
+        "Caller 0x4586D2 is a one-stack-arg routine (ret $4) consistent with a mower/board handler."
+      ],
+      "callers": [
+        "0x4586d2"
+      ],
+      "candidate_classification": "Candidate entry for the State=3 mower stage.",
+      "coverage_limits": [
+        "Only one caller found; needs confirmation that it is the lawnmower path and not a cheat/UI action.",
+        "The mower is a separate entity; whether this is the zombie's only mower entry is unverified."
+      ],
+      "open_questions": [
+        "Review caller 0x4586D2 context and the mower dispatch to confirm the branch.",
+        "Confirm the EDI ABI contract at all (current) callers."
+      ]
+    },
+    {
+      "id": "zombie-death-state-variant-a",
+      "status": "candidate_review_required",
+      "entry_va": "0x527750",
+      "rva": "0x127750",
+      "function_start_va": "0x527750",
+      "bytes32": "83ec3c535556578bf880bfba000000000f84320300008b476883f864756b8b07",
+      "head": [
+        "527750: subl\t$0x3c, %esp",
+        "527753: pushl\t%ebx",
+        "527754: pushl\t%ebp",
+        "527755: pushl\t%esi",
+        "527756: pushl\t%edi",
+        "527757: movl\t%eax, %edi"
+      ],
+      "abi": "register: EAX = AZombie* (moved to EDI)",
+      "semantics": "Alternate State=1 path that reinitializes row/position/timer fields; possibly a subtype-specific death or a reposition.",
+      "observed": [
+        "Writes State=1 at 0x5279F4 and reinitializes 0x1C/0x74/0x7C/0x84/0x80.",
+        "Guarded by byte +0xBA; caller 0x52B267."
+      ],
+      "callers": [
+        "0x52b267"
+      ],
+      "candidate_classification": "Candidate variant; must not be merged with 0x533240 without evidence.",
+      "coverage_limits": [
+        "Looks like a type-specific transition (position reset) and may be a respawn/reposition, not a death."
+      ],
+      "open_questions": [
+        "Identify the zombie subtype and whether this path is a death stage or a movement state.",
+        "Confirm the caller guard byte +0xBA meaning."
+      ]
+    },
+    {
+      "id": "zombie-death-state-variant-b",
+      "status": "candidate_review_required",
+      "entry_va": "0x52ec00",
+      "rva": "0x12ec00",
+      "function_start_va": "0x52ec00",
+      "bytes32": "558bec83e4f883ec08f645082056578bf80f84dc0000008b07d9ee80b8c50800",
+      "head": [
+        "52ec00: pushl\t%ebp",
+        "52ec01: movl\t%esp, %ebp",
+        "52ec03: andl\t$-0x8, %esp",
+        "52ec06: subl\t$0x8, %esp",
+        "52ec09: testb\t$0x20, 0x8(%ebp)",
+        "52ec0d: pushl\t%esi"
+      ],
+      "abi": "register: EAX = AZombie*; stack argument byte tested at 0x8(%EBP) & 0x20",
+      "semantics": "Another State=1 path; subtype coverage unverified.",
+      "observed": [
+        "Writes State=1 at 0x52EC92 and advances X position; caller 0x53151B.",
+        "Not reached from the same caller set as 0x533240."
+      ],
+      "callers": [
+        "0x53151b"
+      ],
+      "candidate_classification": "Candidate variant; unverified subtype coverage.",
+      "coverage_limits": [
+        "Whether the stack flag selects death or a non-death transition is unknown.",
+        "May overlap with 0x533240 for some types."
+      ],
+      "open_questions": [
+        "Enumerate the caller(s) and the flag meaning before proposing any production hook.",
+        "Check whether State=1 here is followed by 0x530170 or 0x530510."
+      ]
+    },
+    {
+      "id": "zombie-slot-recycled",
+      "status": "candidate_review_required",
+      "entry_va": "0x41bad0",
+      "rva": "0x1bad0",
+      "function_start_va": "0x41bad0",
+      "bytes32": "535533db33c05783cdff8d9b000000003bc375088b86ac000000eb05054c0100",
+      "head": [
+        "41bad0: pushl\t%ebx",
+        "41bad1: pushl\t%ebp",
+        "41bad2: xorl\t%ebx, %ebx",
+        "41bad4: xorl\t%eax, %eax",
+        "41bad6: pushl\t%edi",
+        "41bad7: orl\t$-0x1, %ebp"
+      ],
+      "abi": "register: ESI = Board* at entry (single caller 0x4526F0 inside game_total_loop 0x452650); EBX=0, EBP=-1 scratch",
+      "semantics": "Sweep that frees disappeared zombies from the board pool; the observable recycle point.",
+      "observed": [
+        "Sweeps plants (board+0xAC pool), grid items (board+0xC8 pool) and zombies (board+0x90 pool) in one pass.",
+        "Zombie branch at 0x41BBA9: if +0xEC != 0, detach via 0x404FC0/0x530850 and free the slot.",
+        "Free sequence 0x41BBF4-0x41BC23: free_head (board+0x9C) <-> slot+0x158 next index; count (board+0xA0) -= 1.",
+        "#110 observed disappeared 0->1 followed by slot release at a later boundary, consistent with this per-update sweep."
+      ],
+      "callers": [
+        "0x4526f0"
+      ],
+      "candidate_classification": "Primary candidate for the `zombie-slot-recycled` fact; the slot free write is the observable recycle point.",
+      "coverage_limits": [
+        "Function is shared: plants and grid items are freed in the same pass.",
+        "A hook needs a pool/stride filter (or a mid-function trampoline at 0x41BBF9).",
+        "The exact ordering between the disappeared write (0x530510) and this free within one tick is not yet proven statically."
+      ],
+      "open_questions": [
+        "Confirm ESI=Board at the single call site and that no other image path frees zombie slots.",
+        "Decide between a function-entry hook with a stride filter and a mid-function trampoline at 0x41BBF9.",
+        "Verify the free_head/count offsets against runtime pool behaviour (the audit already records free_head/next_key/count)."
+      ]
+    },
+    {
+      "id": "zombie-detach-helper",
+      "status": "candidate_review_required",
+      "entry_va": "0x530850",
+      "rva": "0x130850",
+      "function_start_va": "0x530850",
+      "bytes32": "558b6c24088b452483f8085657740983f8090f85930000008b4d008b91680700",
+      "head": [
+        "530850: pushl\t%ebp",
+        "530851: movl\t0x8(%esp), %ebp",
+        "530855: movl\t0x24(%ebp), %eax",
+        "530858: cmpl\t$0x8, %eax",
+        "53085b: pushl\t%esi",
+        "53085c: pushl\t%edi"
+      ],
+      "abi": "cdecl: AZombie* pushed on the stack, plain ret",
+      "semantics": "Detach helper called before removal and before slot free; auxiliary ordering marker only.",
+      "observed": [
+        "Called immediately before 0x530510 (0x53051B) and before the slot free (0x41BBFA).",
+        "Also called from other, non-removal paths (e.g. 0x413245, 0x461B61)."
+      ],
+      "callers": [
+        "0x413245",
+        "0x41bbfa",
+        "0x41e566",
+        "0x461b61",
+        "0x526b1d",
+        "0x528280",
+        "0x528427",
+        "0x52a53e",
+        "0x53051b",
+        "0x53197c"
+      ],
+      "candidate_classification": "Auxiliary ordering marker; not proposed as a capture point.",
+      "coverage_limits": [
+        "Called in non-removal contexts as well."
+      ],
+      "open_questions": [
+        "If used for ordering, review every caller."
+      ]
+    }
+  ]
+}

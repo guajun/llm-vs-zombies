@@ -1,0 +1,68 @@
+{
+  "schema": "lvz.issue111-stage-d-plan.v1",
+  "issue": 111,
+  "frozen": "2026-09-26",
+  "status": "frozen_pending_maintainer_review",
+  "based_on": {
+    "issue": 99,
+    "plan": "experiments/plans/issue99-shovel-control.json",
+    "stop_when": {"wave_at_least": 2},
+    "tick_budget": 2000,
+    "scenario": "jingdian12",
+    "seed": 42,
+    "historical_reference_tick": 1201,
+    "note": "The endpoint definition and tick hard cap are copied from the frozen #99 control plan and must not be changed to chase a reproduction number."
+  },
+  "mode_switch": {
+    "same_build_for_all_runs": true,
+    "env_var": "LVZ_LIFECYCLE_RECORDING",
+    "modes": [
+      {"name": "off", "value": "0", "purpose": "instrumentation-off control; manifest declares enabled=false and no lifecycle file exists"},
+      {"name": "on", "value": "1", "purpose": "new lifecycle recording; lifecycle-events.jsonl + atomic close receipt"}
+    ],
+    "comparison_rule": "Compare the common evidence only (boundary state deltas, checksums, RNG, actions, outcomes). The lifecycle_recording capability block/lifecycle files are mode metadata and are excluded from gameplay comparison."
+  },
+  "runs": [
+    {"name": "issue111-d-off-a", "mode": "off", "role": "instrumentation-off control A"},
+    {"name": "issue111-d-off-b", "mode": "off", "role": "instrumentation-off control B (repeatability)"},
+    {"name": "issue111-d-on-a", "mode": "on", "role": "lifecycle-on cold start A"},
+    {"name": "issue111-d-on-b", "mode": "on", "role": "lifecycle-on cold start B (repeatability)"}
+  ],
+  "comparisons": [
+    {"name": "control_repeatability", "left": "issue111-d-off-a", "right": "issue111-d-off-b", "require": "common boundary/state/RNG/action equality within the frozen window"},
+    {"name": "mode_repeatability", "left": "issue111-d-on-a", "right": "issue111-d-on-b", "require": "common boundary/state/RNG/action equality plus valid lifecycle receipt in both"},
+    {"name": "instrumentation_non_perturbation", "left": "issue111-d-off-a", "right": "issue111-d-on-a", "require": "first divergence located and reported; not a pass/fail on event-stream difference alone"},
+    {"name": "tick940_unknown_path", "left": "issue111-d-on-a", "right": "issue111-d-on-b", "require": "scan the whole declared window for removed-without-death-stage entities and report coordinates; must not assume 33 objects"}
+  ],
+  "resource_limits": {
+    "min_free_bytes": 4294967296,
+    "max_parallel_game_processes": 1,
+    "timeout_seconds": 900,
+    "tick_cap": 2000
+  },
+  "outputs": [
+    "per-run lifecycle report (tools/issue111_lifecycle_report.py) with coverage limits",
+    "off/on and A/B comparison JSON + Markdown with first-divergence coordinates",
+    "sealed run directories (gzip evidence codec) and a seal binding run hashes, build hashes and report hashes",
+    "explicit verdicts for capture completeness, non-perturbation range, repeatability and first-kill sufficiency"
+  ],
+  "forbidden": [
+    "overwriting or modifying the four issue #99 trajectories, reports or seals",
+    "starting more than one game process at a time",
+    "changing stop_when, tick_budget or the declared endpoint after seeing results",
+    "installing death/removal/recycle hooks before the candidate-review gate closes",
+    "treating event-stream differences alone as an instrumentation failure or as a gameplay fork",
+    "claiming a full-window first kill without exact spawn coverage and call-internal ordering"
+  ],
+  "required_reviews": [
+    "maintainer review of docs/issue111-原生候选证据.md before any death/removal/recycle production hook",
+    "maintainer acceptance that stage D may run with only the merged initialization probe if the candidate gate is still open; the tick-940 investigation then reports unavailable at capture level"
+  ],
+  "commands": {
+    "prepare": "python tools/issue111_lifecycle_experiment.py prepare --name <run> --plan experiments/plans/issue99-shovel-control.json --mode <off|on>",
+    "doctor": "python tools/issue111_stage_d.py doctor --root . --plan docs/issue111-阶段D计划.json",
+    "run": "python tools/issue111_lifecycle_experiment.py run --name <run> --plan experiments/plans/issue99-shovel-control.json --mode <off|on>",
+    "analyze": "python tools/issue111_lifecycle_report.py experiments/runs/<run> --out work/issue111-d/<run>.json",
+    "seal": "python tools/issue111_lifecycle_experiment.py seal --run experiments/runs/<run>"
+  }
+}
