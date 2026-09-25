@@ -419,10 +419,25 @@ def _request_content(request: dict) -> dict:
     return {key: value for key, value in request.items() if key != "branch"}
 
 
+RECORDER_SIDE_GAME_KEYS = ("lifecycle_recording", "lifecycle_probes")
+
+
+def _game_identity(manifest: dict) -> dict:
+    """The game identity excludes recorder-side capability declarations.
+
+    ``lifecycle_recording``/``lifecycle_probes`` are written by the recorder
+    adapter into its own audit manifest; the launcher hello cannot declare
+    them and they are validated by the lifecycle contract instead.
+    """
+    if not isinstance(manifest, dict):
+        return manifest
+    return {key: value for key, value in manifest.items() if key not in RECORDER_SIDE_GAME_KEYS}
+
+
 def _validate_steps(initial: dict, steps: list[dict], audit: AuditLog) -> None:
     if not steps:
         raise EvidenceError("trajectory has no executed requests")
-    if audit.manifest != initial["identity"]["game"]:
+    if _game_identity(audit.manifest) != initial["identity"]["game"]:
         raise EvidenceError("native audit target/coverage identity differs from hello")
     audit.validate_draw_initial(initial)
     audit.validate_audio_initial(initial)
