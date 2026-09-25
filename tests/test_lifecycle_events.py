@@ -337,6 +337,20 @@ class ValidatorTests(unittest.TestCase):
                 report = fixture.validate(require_close=False)
                 self.assertEqual(report["status"], "failed", report["problems"])
 
+    def test_live_nesting_reconstruction_is_bounded(self):
+        for identifier in (33, 2**64 - 1):
+            with self.subTest(identifier=identifier):
+                fixture = self.fixture()
+                fixture.refresh(items=[envelope(0, event(1, identifier, identifier - 1, identifier - 1))])
+                (fixture.audit / lifecycle_events.RECEIPT_FILE).unlink()
+                report = fixture.validate(require_close=False)
+                self.assertEqual(report["status"], "failed")
+                self.assertProblem(report, "native nesting bound")
+        fixture = self.fixture()
+        fixture.refresh(items=[envelope(0, event(1, 32, 31, 31))])
+        (fixture.audit / lifecycle_events.RECEIPT_FILE).unlink()
+        self.assertEqual(fixture.validate(require_close=False)["status"], "open")
+
     def test_live_prefix_tolerates_a_partial_audit_stream_tail(self):
         fixture = self.fixture()
         (fixture.audit / "events.jsonl").write_text(
@@ -393,6 +407,15 @@ class ValidatorTests(unittest.TestCase):
         report = fixture.validate()
         self.assertEqual(report["status"], "failed")
         self.assertProblem(report, "run manifest is present but is not an object")
+
+    def test_null_identity_files_are_not_absent(self):
+        for name in ("manifest.json", "launcher.json"):
+            with self.subTest(name=name):
+                fixture = self.fixture(name=name)
+                (fixture.root / name).write_text("null", encoding="utf-8")
+                report = fixture.validate()
+                self.assertEqual(report["status"], "failed")
+                self.assertProblem(report, "not an object")
 
     def test_missing_events_file_fails(self):
         fixture = self.fixture()

@@ -54,6 +54,9 @@ PROBE_SCHEMA = "lvz.spawn.v1"
 KIND_INITIALIZATION = "zombie_initialized"
 CAPABILITY_KEY = "lifecycle_recording"
 _MAX_RECORD_BYTES = 32 << 20
+# ZombieInitialize's native entry stack is bounded by kDepthLimit in
+# determinism/spawn_hook.cpp. Never allocate a stack from an unchecked id.
+_MAX_INVOCATION_DEPTH = 32
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 _ENVELOPE_KEYS = {"schema", "file_seq", "run_id", "branch_id", "session_id", "sequence_domain", "event"}
@@ -472,6 +475,9 @@ def _nesting_problems(records: list[dict], *, strict: bool) -> list[str]:
     next_id = 1
     for index, invocation_id, depth, parent in invocations:
         if invocation_id >= next_id:
+            if len(stack) + invocation_id - next_id + 1 > _MAX_INVOCATION_DEPTH:
+                problems.append(f"line {index + 1}: invocation entry gap exceeds the native nesting bound")
+                return problems
             stack.extend(range(next_id, invocation_id + 1))
             next_id = invocation_id + 1
         if not stack or stack[-1] != invocation_id:
@@ -793,7 +799,7 @@ def _run_identity_bindings(directory: Path, manifest: dict, capability: dict, re
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             problems.append(f"run manifest is present but unreadable: {exc}")
             run_manifest = None
-        if run_manifest is not None and not isinstance(run_manifest, dict):
+        if not isinstance(run_manifest, dict):
             problems.append("run manifest is present but is not an object")
         elif isinstance(run_manifest, dict):
             run_id = run_manifest.get("run_id")
@@ -812,7 +818,7 @@ def _run_identity_bindings(directory: Path, manifest: dict, capability: dict, re
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             problems.append(f"launcher evidence is present but unreadable: {exc}")
             launcher = None
-        if launcher is not None and not isinstance(launcher, dict):
+        if not isinstance(launcher, dict):
             problems.append("launcher evidence is present but is not an object")
         elif isinstance(launcher, dict) and isinstance(launcher.get("branch_id"), str):
             if launcher["branch_id"] != receipt.get("branch_id"):
