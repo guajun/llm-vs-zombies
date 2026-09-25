@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <nlohmann/json.hpp>
 
@@ -69,4 +70,12 @@ private:
 // The process-wide single host. Probe code calls this from inside the capture
 // point; the recorder adapter reads Health()/Close() on the owner thread.
 MeasurementHost& Host() noexcept;
+
+// Exception-safe shutdown sequence shared by audit::Shutdown and its offline
+// test. `body` drains probes and writes the close evidence; `cleanup` removes
+// hooks, flushes and closes files. The first error wins and is returned after
+// the session is finalized (Close on success, Abort when any failure was
+// recorded) and cleanup has always run.
+std::string RunMeasurementShutdown(const std::function<void()>& body,
+                                   const std::function<void()>& cleanup);
 }

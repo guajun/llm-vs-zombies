@@ -16,9 +16,10 @@
   `invocation_id` 与 `depth`，仅顶层 `parent_invocation_id` 为 null；旧 `ordinal` 保持单探针历史语义。
 - `DrainSpawnBatch()`：单一破坏性 drain，同时产出旧 `lvz.spawn.v1` 投影与新的
   `lvz.lifecycle-event.v1` 投影。
-- `determinism/audit.cpp` 最小接入：`Initialize` 开启会话、`Shutdown` 关闭会话、`DrainAndCheckSpawns`
-  单次 drain 并标记 delivered/persisted；写盘失败与关闭失败显式传播。
-- 离线夹具：`tests/determinism_measurement.cpp`（会话/关闭/终止/负例）与扩展的
+- `determinism/audit.cpp` 最小接入：`Initialize` 开启会话、`Shutdown` 用
+  `RunMeasurementShutdown` 做异常安全收尾（drain/写盘任一失败也必达 Abort + 卸钩/关文件，
+  首个错误在清理后传播）、`DrainAndCheckSpawns` 单次 drain 并记 delivered/persisted。
+- 离线夹具：`tests/determinism_measurement.cpp`（会话/关闭/终止/关闭序列/负例）与扩展的
   `tests/determinism_spawn_hook.cpp`（出口捕获顺序、嵌套 invocation、跨类型交错、drain 不重置、
   重装不重置、关闭后拒绝采集）。
 
@@ -55,8 +56,10 @@
 - `persisted` 只由记录适配器在写盘成功后递增；探针与 drain 只负责 `captured`/`delivered`。
 - 会话生命周期：`Open` 拒绝活跃会话重复开启并递增 session 身份；`Close` 在有 fault 或
   `captured != delivered || delivered != persisted` 时失败并保持 open；此时用 `Abort()` 终止为 failed
-  （不产生成功回执、保留故障与未交付计数），确保卸钩/文件清理可执行，清理后才允许新会话。
-  关闭/终止后所有分配/采集/台账修改被拒绝并计入 `refused`，回执成为稳定最终边界。
+  （不产生成功回执、保留故障与未交付计数）。`audit::Shutdown` 经
+  `RunMeasurementShutdown(body, cleanup)` 保证：body 内 drain/写盘任一异常都保存为首个错误，
+  会话仍被终止（失败路径不产生成功回执），cleanup 必达（卸钩、flush、关文件、initialized=false），
+  最后传播首个错误；有在途调用或 hook 所有权问题时保留 DLL 并明确报告。
 
 ## 4. 校验
 

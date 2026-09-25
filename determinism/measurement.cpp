@@ -124,6 +124,34 @@ bool MeasurementHost::BoundTo(uint32_t thread) const noexcept {
     return state_.load() == kOpen && owner_ == thread;
 }
 
+std::string RunMeasurementShutdown(const std::function<void()>& body,
+                                   const std::function<void()>& cleanup) {
+    std::string firstError;
+    try {
+        body();
+    } catch (const std::exception& exception) {
+        firstError = exception.what();
+    }
+    // Finalize the session: a clean body gets a successful close; any failure
+    // is terminated as failed/aborted with no success receipt and preserved
+    // fault/undelivered counts.
+    if (firstError.empty()) {
+        std::string closeError;
+        if (!Host().Close(&closeError)) {
+            Host().Abort();
+            firstError = "Measurement session close failed: " + closeError;
+        }
+    } else {
+        Host().Abort();
+    }
+    try {
+        cleanup();
+    } catch (const std::exception& exception) {
+        if (firstError.empty()) firstError = exception.what();
+    }
+    return firstError;
+}
+
 bool MeasurementHost::SessionOpen() const noexcept { return state_.load() == kOpen; }
 bool MeasurementHost::Closed() const noexcept { return state_.load() == kClosed; }
 bool MeasurementHost::Failed() const noexcept { return state_.load() == kFailed; }

@@ -116,7 +116,45 @@ int main() {
         Check(Host().Abort(&error), "Abort must finalize an incompletely persisted session");
         Check(Host().Failed() && !Host().CloseReceiptPresent(), "Abort must not fabricate a receipt");
 
-        std::cout << "measurement: shared capture_sequence, fault counters, session/close/abort lifecycle passed\n";
+        // --- Shutdown sequence: the body fault (drain overflow) must still
+        //     finalize the session and run cleanup before the error returns ---
+        Check(Host().Open(GetCurrentThreadId(), &error), "open drain-fault shutdown session");
+        bool cleanupRan = false;
+        const std::string drainError = lvz::measurement::RunMeasurementShutdown(
+            [&] { throw std::runtime_error("spawn_hook_fault: overflow"); },
+            [&] { cleanupRan = true; });
+        Check(drainError == "spawn_hook_fault: overflow", "the first error must be preserved");
+        Check(cleanupRan, "cleanup must run after a drain fault");
+        Check(Host().Failed() && !Host().CloseReceiptPresent(),
+              "a drain fault must finalize the session without a success receipt");
+
+        // --- Shutdown sequence: a write failure (delivered but not persisted)
+        //     also terminates the session as failed ---
+        Check(Host().Open(GetCurrentThreadId(), &error), "open write-failure shutdown session");
+        cleanupRan = false;
+        const std::string writeError = lvz::measurement::RunMeasurementShutdown(
+            [&] {
+                Host().OnCaptured();
+                Host().OnDelivered(1);
+                throw std::runtime_error("event write failed");
+            },
+            [&] { cleanupRan = true; });
+        Check(writeError == "event write failed", "the first write error must be preserved");
+        Check(cleanupRan, "cleanup must run after a write failure");
+        Check(Host().Failed() && !Host().CloseReceiptPresent(),
+              "a write failure must not produce a success receipt");
+
+        // --- Shutdown sequence: a clean body closes with a success receipt ---
+        Check(Host().Open(GetCurrentThreadId(), &error), "open clean shutdown session");
+        cleanupRan = false;
+        const std::string cleanError = lvz::measurement::RunMeasurementShutdown(
+            [&] { Host().OnCaptured(); Host().OnDelivered(1); Host().OnPersisted(1); },
+            [&] { cleanupRan = true; });
+        Check(cleanError.empty(), "a clean shutdown must have no error");
+        Check(cleanupRan, "cleanup must run on a clean shutdown");
+        Check(Host().Closed() && Host().CloseReceiptPresent(), "a clean shutdown must emit a success receipt");
+
+        std::cout << "measurement: shared capture_sequence, fault counters, session/close/abort/shutdown lifecycle passed\n";
         return 0;
     } catch (const std::exception& exception) {
         std::cerr << exception.what() << '\n';
