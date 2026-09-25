@@ -147,6 +147,13 @@ python tools/issue111_lifecycle_check.py <run-or-audit-dir> --recorder build/rec
   显式 null，受控边界事件为版本对象；bool/float/字符串不得冒充整数。
 - 嵌套检查：`invocation_id` 必须为连续会话计数且不重复；按出口顺序重建 LIFO 栈，逐条验证
   declared depth、parent 及“父先于子退出”不可能性（合法的先子后父退出与序号间隙保留）。
+- 进行中的录制（无 receipt 且 `require_close=False`）：允许前缀语义——未完成祖先与尚未写出的
+  invocation id 不报错，最后一条未 flush 的记录与 `audit/events.jsonl` 的未完成行也容忍；但重复
+  ID、深度/父引用矛盾、乱序退出仍然拒绝。receipt 一旦存在（即使调用方传
+  `require_close=False`）或按关闭读取时，仍要求连续 invocation、LIFO 收口与完整行。
+- 存储/解码失败（manifest 非 UTF-8、gzip 截断/损坏、codec receipt 非法）在公共边界转换为
+  `LifecycleError`，CLI `--json` 退 2 并输出合法 JSON，严格读取器转 `EvidenceError`；run/launcher
+  身份文件“存在但损坏”报绑定失败，不再静默忽略。
 - 探针故障：`audit/events.jsonl` 出现 `spawn_hook_fault` 或 `spawn_hook_closed.healthy!=true`，
   或该文件不可读/不完整，均 disqualify success；不会静默忽略。
 - `claims.first_kill_proven` 恒为 false，`first_kill_gate=unverified`，并列出尚未实现的
@@ -180,6 +187,10 @@ python -m unittest discover -s tests -q
   dict/list/null/bool/float 类型表（不崩溃）、LIFO 嵌套的重复 ID/深度失配/父先退/交叉嵌套、
   receipt 计数/摘要/manifest/身份/计数/健康/persistence 失配、run/branch/recorder 绑定、探针故障与
   审计流不可读、gzip seal 往返、CLI 退出码 0/1/2；
+- live 前缀：子先退出的未完成前缀 → 父到达 → 写回执转严格 valid；矛盾前缀仍失败；无回执时容忍
+  生命周期/审计流的未完成尾行，receipt 存在时即使 `require_close=False` 也严格拒绝；
+- 存储/解码：非 UTF-8 manifest、非法 codec receipt、截断/损坏 gzip、损坏的 present run/launcher
+  身份文件都结构化失败（CLI 退 2 或 failed），不泄漏 `UnicodeDecodeError`/`OSError`/`zlib.error`；
 - 严格读取器集成：同一条 lifecycle stream 分别用 `AuditLog(require_closed=True)`、
   `AuditTail.verify_closed()` 验证合法（含压缩）、语义非法事件、摘要损坏、腐败 receipt 与探针故障
   都必须报 `EvidenceError`，而进行中的录制在 receipt 出现前保持可读。

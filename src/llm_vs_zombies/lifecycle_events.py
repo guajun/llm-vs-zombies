@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import zlib
 from pathlib import Path
 
 from . import evidence_codec
@@ -200,42 +201,46 @@ def _record_event(record) -> dict | None:
     return event if isinstance(event, dict) else None
 
 
-def _scan_probe_events(store: evidence_codec.EvidenceStore) -> dict:
+def _scan_probe_events(store: evidence_codec.EvidenceStore, *, allow_partial_tail: bool) -> dict:
     """Scan the audit events stream for explicit probe faults.
 
     The lifecycle receipt remains the success barrier; this scan proves the
     capture probe itself was healthy. A present but unreadable stream is
-    reported as a problem instead of being silently ignored.
+    reported as a problem instead of being silently ignored. Storage/container
+    failures propagate to the public boundary as a contract error; only a
+    live reader may tolerate a final partially flushed line.
     """
     report = {"present": False, "scanned": False, "fault_events": 0, "closed_unhealthy": False,
               "problems": []}
     if not _present(store, "events.jsonl"):
         return report
     report["present"] = True
-    try:
-        with store.open("events.jsonl") as stream:
-            while line := stream.readline(_MAX_RECORD_BYTES + 1):
-                if len(line) > _MAX_RECORD_BYTES or not line.endswith(b"\n"):
-                    report["problems"].append("audit events.jsonl is not a complete JSONL stream")
+    with store.open("events.jsonl") as stream:
+        while line := stream.readline(_MAX_RECORD_BYTES + 1):
+            if len(line) > _MAX_RECORD_BYTES:
+                report["problems"].append("audit events.jsonl record exceeds the reader bound")
+                break
+            if not line.endswith(b"\n"):
+                if allow_partial_tail:
                     break
-                try:
-                    value = json.loads(line)
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    report["problems"].append("audit events.jsonl has an unreadable record")
-                    break
-                if not isinstance(value, dict):
-                    report["problems"].append("audit events.jsonl contains a non-object record")
-                    break
-                kind = value.get("kind")
-                if kind == _PROBE_FAULT_KIND:
-                    report["fault_events"] += 1
-                elif kind == _PROBE_CLOSE_KIND:
-                    payload = value.get("payload")
-                    if not isinstance(payload, dict) or payload.get("healthy") is not True:
-                        report["closed_unhealthy"] = True
-        report["scanned"] = True
-    except (OSError, LifecycleError, evidence_codec.CodecError) as exc:
-        report["problems"].append(f"audit events.jsonl is unreadable: {exc}")
+                report["problems"].append("audit events.jsonl is not a complete JSONL stream")
+                break
+            try:
+                value = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                report["problems"].append("audit events.jsonl has an unreadable record")
+                break
+            if not isinstance(value, dict):
+                report["problems"].append("audit events.jsonl contains a non-object record")
+                break
+            kind = value.get("kind")
+            if kind == _PROBE_FAULT_KIND:
+                report["fault_events"] += 1
+            elif kind == _PROBE_CLOSE_KIND:
+                payload = value.get("payload")
+                if not isinstance(payload, dict) or payload.get("healthy") is not True:
+                    report["closed_unhealthy"] = True
+    report["scanned"] = True
     return report
 
 
@@ -423,7 +428,7 @@ def _sequence_problems(records: list[dict]) -> tuple[list[str], dict]:
                               "duplicates and decreases are refused"}
 
 
-def _nesting_problems(records: list[dict]) -> list[str]:
+def _nesting_problems(records: list[dict], *, strict: bool) -> list[str]:
     """Prove the invocation forest is LIFO-consistent.
 
     Invocation ids are allocated at call entry and every record is written at
@@ -431,6 +436,11 @@ def _nesting_problems(records: list[dict]) -> list[str]:
     contiguous entry counter 1..N. Reconstructing that stack strictly checks
     duplicates, depth, the declared parent, parent-before-child order and
     crossed/impossible nesting at once.
+
+    ``strict=False`` validates a live prefix: unfinished ancestors and
+    not-yet-written ids are expected, so only contradictions (duplicates,
+    wrong depth/parent, out-of-order pop) are rejected. A completed stream
+    (receipt present, or a closed read) is always strict.
     """
     problems: list[str] = []
     invocations: list[tuple[int, int, object, object]] = []
@@ -452,11 +462,12 @@ def _nesting_problems(records: list[dict]) -> list[str]:
                             invocation.get("parent_invocation_id")))
     if not invocations:
         return problems
-    expected_ids = list(range(1, len(invocations) + 1))
-    if sorted(seen) != expected_ids:
-        problems.append("invocation ids must be the contiguous session counter starting at 1; "
-                        f"found {sorted(seen)}")
-        return problems
+    if strict:
+        expected_ids = list(range(1, len(invocations) + 1))
+        if sorted(seen) != expected_ids:
+            problems.append("invocation ids must be the contiguous session counter starting at 1; "
+                            f"found {sorted(seen)}")
+            return problems
     stack: list[int] = []
     next_id = 1
     for index, invocation_id, depth, parent in invocations:
@@ -475,7 +486,7 @@ def _nesting_problems(records: list[dict]) -> list[str]:
             problems.append(f"line {index + 1}: invocation {invocation_id} parent {parent!r} does not match "
                             f"the LIFO parent {expected_parent!r}")
         stack.pop()
-    if stack:
+    if strict and stack:
         problems.append(f"invocation nesting is still open at end of stream: {stack}")
     return problems
 
@@ -601,23 +612,33 @@ def _display(value) -> str:
 
 def validate(directory: str | Path, *, manifest: dict | None = None,
              recorder: str | Path | None = None, require_close: bool = True) -> dict:
-    """Validate one audit directory and return a JSON-serializable report.
+    """Public boundary for lifecycle validation.
 
-    ``status`` is ``valid``, ``unavailable``, ``disabled``, ``open`` or
-    ``failed``. ``open`` is only returned with ``require_close=False`` when the
-    present records satisfy the contract but the close receipt does not exist
-    yet (a live reader). A malformed capability raises :class:`LifecycleError`
-    instead of returning a report, because that is a contract error rather
-    than a classification of a trajectory.
+    Supported storage/decode failures (missing/truncated/corrupt gzip, an
+    unreadable codec receipt, invalid UTF-8, unreadable JSON identity files)
+    are converted to :class:`LifecycleError` so the CLI reports a contract
+    error and strict readers surface ``EvidenceError``. Programming errors are
+    deliberately not swallowed.
     """
     directory = Path(directory)
+    try:
+        return _validate(directory, manifest=manifest, recorder=recorder, require_close=require_close)
+    except LifecycleError:
+        raise
+    except (OSError, EOFError, zlib.error, UnicodeError, json.JSONDecodeError,
+            evidence_codec.CodecError) as exc:
+        raise LifecycleError(f"lifecycle evidence is unreadable: {exc}") from exc
+
+
+def _validate(directory: Path, *, manifest: dict | None, recorder: str | Path | None,
+              require_close: bool) -> dict:
     if manifest is None:
         manifest_path = directory / "manifest.json"
         if not manifest_path.is_file():
             raise LifecycleError(f"audit manifest is missing: {manifest_path}")
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            manifest = json.loads(manifest_path.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise LifecycleError(f"audit manifest is unreadable: {exc}") from exc
     classification = mode(manifest)
     store = evidence_codec.EvidenceStore(directory, error=LifecycleError)
@@ -681,13 +702,18 @@ def validate(directory: str | Path, *, manifest: dict | None = None,
         report["problems"].append("declared lifecycle recording has no lifecycle-events.jsonl")
         return report
     events_bytes = _read_plain(store, EVENTS_FILE)
-    records, problems = _decode_records(events_bytes, allow_partial_tail=not require_close)
+    # A live reader may see any prefix of the writer's record stream and a
+    # partially flushed tail; a present receipt (or a closed read) makes the
+    # file strict: complete nesting, contiguous invocation ids and no partial
+    # record may be tolerated.
+    live_prefix = not require_close and not receipt_present
+    records, problems = _decode_records(events_bytes, allow_partial_tail=live_prefix)
     problems += [problem for index, record in enumerate(records)
                  for problem in _check_envelope(record, index, block)]
     problems += _identity_problems(records, block, None)
     sequence_problems, sequence_summary = _sequence_problems(records)
     problems += sequence_problems
-    problems += _nesting_problems(records)
+    problems += _nesting_problems(records, strict=not live_prefix)
 
     report["records"] = {
         "count": len(records),
@@ -696,7 +722,7 @@ def validate(directory: str | Path, *, manifest: dict | None = None,
                               for record in records}),
         **sequence_summary,
     }
-    probe = _scan_probe_events(store)
+    probe = _scan_probe_events(store, allow_partial_tail=live_prefix)
     report["probe_events"] = {key: probe[key] for key in ("present", "scanned", "fault_events",
                                                           "closed_unhealthy", "problems")}
     if probe["fault_events"]:
@@ -763,10 +789,13 @@ def _run_identity_bindings(directory: Path, manifest: dict, capability: dict, re
     run_manifest_path = directory.parent / "manifest.json"
     if run_manifest_path.is_file():
         try:
-            run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            run_manifest = json.loads(run_manifest_path.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            problems.append(f"run manifest is present but unreadable: {exc}")
             run_manifest = None
-        if isinstance(run_manifest, dict):
+        if run_manifest is not None and not isinstance(run_manifest, dict):
+            problems.append("run manifest is present but is not an object")
+        elif isinstance(run_manifest, dict):
             run_id = run_manifest.get("run_id")
             if isinstance(run_id, str) and run_id and run_id != receipt.get("run_id"):
                 problems.append("run manifest run_id does not match the lifecycle close receipt")
@@ -779,10 +808,13 @@ def _run_identity_bindings(directory: Path, manifest: dict, capability: dict, re
     launcher_path = directory.parent / "launcher.json"
     if launcher_path.is_file():
         try:
-            launcher = json.loads(launcher_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            launcher = json.loads(launcher_path.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            problems.append(f"launcher evidence is present but unreadable: {exc}")
             launcher = None
-        if isinstance(launcher, dict) and isinstance(launcher.get("branch_id"), str):
+        if launcher is not None and not isinstance(launcher, dict):
+            problems.append("launcher evidence is present but is not an object")
+        elif isinstance(launcher, dict) and isinstance(launcher.get("branch_id"), str):
             if launcher["branch_id"] != receipt.get("branch_id"):
                 problems.append("launcher branch identity does not match the lifecycle close receipt")
     if recorder is not None:

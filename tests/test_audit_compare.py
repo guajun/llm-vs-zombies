@@ -279,6 +279,31 @@ class AuditTests(unittest.TestCase):
             with self.assertRaises(EvidenceError):
                 tail.verify_closed()
 
+        # 8. Corrupt compressed lifecycle evidence is a storage contract error,
+        #    surfaced as EvidenceError rather than a raw gzip/OS exception.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
+            self._enable_lifecycle(directory, capability(), [envelope(0, event(1, 1))],
+                                   receipt_for=receipt_for, envelopes_bytes=envelopes_bytes)
+            evidence_codec.compress_evidence(directory)
+            container = directory / (lifecycle_events.EVENTS_FILE + ".gz")
+            raw = bytearray(container.read_bytes())
+            raw[15] ^= 0xFF
+            container.write_bytes(bytes(raw))
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory, require_closed=True)
+
+        # 9. A live strict reader accepts an unfinished-ancestor prefix; the
+        #    closed reader still refuses it without a receipt.
+        with tempfile.TemporaryDirectory() as temp:
+            directory, manifest = prepared(temp)
+            self._enable_lifecycle(directory, capability(), [envelope(0, event(1, 2, 1, 1))],
+                                   receipt_for=receipt_for, envelopes_bytes=envelopes_bytes)
+            (directory / lifecycle_events.RECEIPT_FILE).unlink()
+            AuditLog(directory)  # open prefix, not a closed success
+            with self.assertRaises(EvidenceError):
+                AuditLog(directory, require_closed=True)
+
     def test_controlled_births_bind_to_update_or_next_action_boundary(self):
         for phase, expected in (("update", [0, 1]), ("action", [1, 0])):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temp:

@@ -295,6 +295,105 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertProblem(report, "truncated")
 
+    def test_receipt_present_remains_strict_even_when_called_live(self):
+        fixture = self.fixture()
+        data = fixture.events_bytes.splitlines(keepends=True)
+        fixture.write_events(b"".join(data[:-1])[:-1])  # truncated last record, receipt unchanged
+        report = fixture.validate(require_close=False)
+        self.assertEqual(report["status"], "failed")
+        self.assertProblem(report, "truncated")
+
+    def test_live_child_first_prefix_then_parent_then_close(self):
+        fixture = self.fixture(sequences=((1, 2, 1, 1), (3, 1, 0, None)))
+        full = fixture.items
+        # Only the nested child exited so far: invocation 1 is still open on
+        # disk and must not be treated as a contradiction.
+        fixture.refresh(items=full[:1])
+        (fixture.audit / lifecycle_events.RECEIPT_FILE).unlink()
+        report = fixture.validate(require_close=False)
+        self.assertEqual(report["status"], "open")
+        self.assertEqual(report["problems"], [])
+        # The parent reaches disk later; the prefix is still open, not closed.
+        fixture.refresh(items=full)
+        (fixture.audit / lifecycle_events.RECEIPT_FILE).unlink()
+        self.assertEqual(fixture.validate(require_close=False)["status"], "open")
+        # Only the receipt closes the session and re-enables strict nesting.
+        fixture.write_receipt(fixture.receipt)
+        self.assertEqual(fixture.validate()["status"], "valid")
+        self.assertEqual(fixture.validate(require_close=False)["status"], "valid")
+
+    def test_live_prefix_still_rejects_contradictions(self):
+        cases = {
+            "duplicate id": [envelope(0, event(1, 2, 1, 1)), envelope(1, event(2, 2, 1, 1))],
+            "parent already exited": [envelope(0, event(1, 1)), envelope(1, event(2, 2, 1, 1))],
+            "depth mismatch": [envelope(0, event(1, 2, 2, 1))],
+            "wrong sibling parent": [envelope(0, event(1, 2, 1, 1)), envelope(1, event(2, 3, 1, 2))],
+        }
+        for label, items in cases.items():
+            with self.subTest(case=label):
+                fixture = self.fixture()
+                fixture.refresh(items=items)
+                (fixture.audit / lifecycle_events.RECEIPT_FILE).unlink()
+                report = fixture.validate(require_close=False)
+                self.assertEqual(report["status"], "failed", report["problems"])
+
+    def test_live_prefix_tolerates_a_partial_audit_stream_tail(self):
+        fixture = self.fixture()
+        (fixture.audit / "events.jsonl").write_text(
+            json.dumps({"schema": "lvz.audit.v1", "seq": 0, "kind": "pre_step", "payload": {}}) + "\n"
+            + '{"schema":"lvz.audit.v1"', encoding="utf-8")
+        (fixture.audit / lifecycle_events.RECEIPT_FILE).unlink()
+        self.assertEqual(fixture.validate(require_close=False)["status"], "open")
+        report = fixture.validate()
+        self.assertEqual(report["status"], "failed")
+        self.assertProblem(report, "not a complete JSONL stream")
+
+    def test_storage_and_decode_failures_are_contract_errors(self):
+        with self.subTest(case="invalid utf8 manifest"):
+            fixture = self.fixture(name="invalid-utf8")
+            (fixture.audit / "manifest.json").write_bytes(b"\xff\xfe\x00")
+            with self.assertRaises(lifecycle_events.LifecycleError):
+                fixture.validate()
+        with self.subTest(case="corrupt codec receipt"):
+            fixture = self.fixture(name="codec-receipt")
+            evidence_codec.compress_evidence(fixture.audit)
+            (fixture.audit / "evidence-codec.json").write_text("{}", encoding="utf-8")
+            with self.assertRaises(lifecycle_events.LifecycleError):
+                fixture.validate()
+        with self.subTest(case="truncated gzip"):
+            fixture = self.fixture(name="truncated-gzip")
+            evidence_codec.compress_evidence(fixture.audit)
+            container = fixture.audit / (lifecycle_events.EVENTS_FILE + ".gz")
+            container.write_bytes(container.read_bytes()[:-5])
+            with self.assertRaises(lifecycle_events.LifecycleError):
+                fixture.validate()
+        with self.subTest(case="corrupt gzip payload"):
+            fixture = self.fixture(name="corrupt-gzip")
+            evidence_codec.compress_evidence(fixture.audit)
+            container = fixture.audit / (lifecycle_events.EVENTS_FILE + ".gz")
+            raw = bytearray(container.read_bytes())
+            raw[15] ^= 0xFF
+            container.write_bytes(bytes(raw))
+            with self.assertRaises(lifecycle_events.LifecycleError):
+                fixture.validate()
+
+    def test_malformed_present_identity_files_report_binding_failure(self):
+        fixture = self.fixture()
+        (fixture.root / "manifest.json").write_bytes(b"\xff")
+        report = fixture.validate()
+        self.assertEqual(report["status"], "failed")
+        self.assertProblem(report, "run manifest is present but unreadable")
+        fixture = self.fixture(name="run2")
+        (fixture.root / "launcher.json").write_text("{not json", encoding="utf-8")
+        report = fixture.validate()
+        self.assertEqual(report["status"], "failed")
+        self.assertProblem(report, "launcher evidence is present but unreadable")
+        fixture = self.fixture(name="run3")
+        (fixture.root / "manifest.json").write_text("[1, 2]", encoding="utf-8")
+        report = fixture.validate()
+        self.assertEqual(report["status"], "failed")
+        self.assertProblem(report, "run manifest is present but is not an object")
+
     def test_missing_events_file_fails(self):
         fixture = self.fixture()
         (fixture.audit / lifecycle_events.EVENTS_FILE).unlink()
@@ -673,6 +772,13 @@ class CliTests(unittest.TestCase):
         manifest["lifecycle_recording"] = None
         (fixture.audit / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         self.assertEqual(self.run_tool(fixture.root).returncode, 2)
+
+    def test_cli_storage_error_is_exit_2_with_valid_json(self):
+        fixture = Fixture(Path(self._temp.name) / "run")
+        (fixture.audit / "manifest.json").write_bytes(b"\xff\xfe\x00")
+        result = self.run_tool(fixture.root)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "invalid")
 
     def test_cli_missing_path_is_contract_error(self):
         self.assertEqual(self.run_tool(Path(self._temp.name) / "absent").returncode, 2)
