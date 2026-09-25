@@ -49,6 +49,8 @@ MODE_SCHEMA = "lvz.lifecycle-experiment.v1"
 REPORT_SCHEMA = "lvz.lifecycle-experiment-report.v1"
 SEAL_SCHEMA = "lvz.lifecycle-seal.v1"
 MODE_ENV = "LVZ_LIFECYCLE_RECORDING"
+FROZEN_HOSTED_SCRIPT = "logger/avz/hosted/jing_dian_12.cpp"
+FROZEN_HOSTED_SCRIPT_SHA256 = "ff7f049a0607c6518e0a755fe7a81c5823035e03a822d409a6a97be8647cd171"
 MODE_VALUES = {"off": "0", "on": "1"}
 PROBES_ENV = "LVZ_LIFECYCLE_PROBES"
 PROBES_VALUES = {"off": "0", "on": "1"}
@@ -125,8 +127,15 @@ def plan_abspath(root: Path, metadata: dict) -> Path:
     return path if path.is_absolute() else Path(root) / path
 
 
-def _hosted_identity(root: Path, receipt: Path) -> dict:
-    """Verify the hosted-build receipt against the actual script and DLL bytes."""
+def _hosted_identity(root: Path, receipt: Path, *, verify_current: bool) -> dict:
+    """Read and (on pre-launch) verify the hosted-build receipt.
+
+    Prepared metadata validation only checks the stored identity; the mutable
+    current script/DLL are re-hashed by run's pre-launch path.
+    """
+    receipt = Path(receipt)
+    if not receipt.is_absolute():
+        receipt = root / receipt
     receipt = receipt.resolve()
     if not receipt.is_file():
         raise ExperimentError(f"hosted-build receipt is missing: {receipt}")
@@ -136,23 +145,30 @@ def _hosted_identity(root: Path, receipt: Path) -> dict:
         raise ExperimentError(f"hosted-build receipt is unreadable: {exc}") from exc
     if not isinstance(document, dict) or document.get("schema") != "lvz.hosted-build.v1":
         raise ExperimentError("hosted-build receipt schema is not lvz.hosted-build.v1")
-    script = root / document.get("hosted_script", "") if isinstance(document.get("hosted_script"), str)         else None
-    if script is None:
-        script = root / "logger" / "avz" / "hosted" / "jing_dian_12.cpp"
+    script = root / FROZEN_HOSTED_SCRIPT
     if not script.is_file():
-        raise ExperimentError(f"hosted script is missing: {script}")
+        raise ExperimentError(f"frozen hosted script is missing: {script}")
     script_sha = sha256_file(script)
+    if script_sha != FROZEN_HOSTED_SCRIPT_SHA256:
+        raise ExperimentError("frozen hosted script bytes changed")
     if document.get("hosted_script_sha256") != script_sha:
-        raise ExperimentError("hosted-build receipt does not match the actual script bytes")
-    dll = root / "build" / "recorder.dll"
-    if not dll.is_file():
-        raise ExperimentError("hosted recorder.dll is missing")
-    dll_sha = sha256_file(dll)
-    if document.get("recorder_sha256") != dll_sha:
-        raise ExperimentError("hosted-build receipt does not match the actual recorder.dll bytes")
+        raise ExperimentError("hosted-build receipt does not match the frozen script bytes")
+    if not str(document.get("hosted_script", "")).replace("\\", "/").endswith(FROZEN_HOSTED_SCRIPT):
+        raise ExperimentError("hosted-build receipt was built from a different script")
+    if verify_current:
+        dll = root / "build" / "recorder.dll"
+        if not dll.is_file():
+            raise ExperimentError("hosted recorder.dll is missing")
+        dll_sha = sha256_file(dll)
+        if document.get("recorder_sha256") != dll_sha:
+            raise ExperimentError("hosted-build receipt does not match the actual recorder.dll bytes")
+        dll_sha = dll_sha
+    else:
+        dll_sha = document.get("recorder_sha256")
+    if not _valid_sha256(dll_sha):
+        raise ExperimentError("hosted-build receipt has no recorder build identity")
     return {"receipt": str(receipt.relative_to(root)) if receipt.is_relative_to(root) else str(receipt),
-            "receipt_sha256": sha256_file(receipt), "script": str(script.relative_to(root))
-            if script.is_relative_to(root) else str(script),
+            "receipt_sha256": sha256_file(receipt), "script": FROZEN_HOSTED_SCRIPT,
             "script_sha256": script_sha, "recorder_sha256": dll_sha}
 
 
@@ -171,7 +187,9 @@ def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = 
         raise ExperimentError("expected recorder build must be a lowercase sha256")
     hosted = None
     if hosted_build is not None:
-        hosted = _hosted_identity(root, Path(hosted_build))
+        hosted = _hosted_identity(root, Path(hosted_build), verify_current=True)
+        if build_sha256 is not None and build_sha256 != hosted["recorder_sha256"]:
+            raise ExperimentError("explicit recorder pin conflicts with the hosted-build identity")
         build_sha256 = hosted["recorder_sha256"]
     plan_path = Path(plan).resolve()
     parsed = _load_plan(plan_path)
@@ -253,10 +271,10 @@ def _read_prepared(root: Path, name: str) -> dict:
     if hosted is not None:
         if not isinstance(hosted, dict):
             raise ExperimentError("lifecycle mode file has a malformed hosted identity")
-        current = _hosted_identity(root, Path(hosted.get("receipt", "")))
-        if current["script_sha256"] != hosted.get("script_sha256")                 or current["recorder_sha256"] != hosted.get("recorder_sha256"):
-            raise ExperimentError("hosted script or recorder.dll changed since prepare")
-        pin = current["recorder_sha256"]
+        stored = _hosted_identity(root, Path(hosted.get("receipt", "")), verify_current=False)
+        if stored["script_sha256"] != hosted.get("script_sha256")                 or stored["recorder_sha256"] != hosted.get("recorder_sha256"):
+            raise ExperimentError("prepared hosted identity changed on disk")
+        pin = stored["recorder_sha256"]
     single_cold = metadata.get("single_cold", False)
     if type(single_cold) is not bool:
         raise ExperimentError("lifecycle mode file has a malformed single_cold flag")
@@ -351,6 +369,12 @@ def run_experiment(root: Path, name: str, *, suite_runner=None,
     try:
         runner = suite_runner
         if runner is None:
+            hosted = metadata.get("hosted")
+            if isinstance(hosted, dict):
+                current = _hosted_identity(root, Path(hosted.get("receipt", "")), verify_current=True)
+                if current["recorder_sha256"] != hosted.get("recorder_sha256"):
+                    raise ExperimentError("hosted recorder.dll changed since prepare; refusing to launch")
+
             def runner():
                 return evaluation.run_suite(root, plan, suite, run_builds=metadata["run_builds"],
                                             single_cold=metadata.get("single_cold", False))

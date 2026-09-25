@@ -40,28 +40,28 @@
   },
   "runs": [
     {
-      "name": "issue111-d-hosted-off-a",
+      "name": "issue111-d-hosted-v2-off-a",
       "probe_mode": "off",
       "recording": "1",
       "role": "probe-off cold start A (control)",
       "mode": "off"
     },
     {
-      "name": "issue111-d-hosted-off-b",
+      "name": "issue111-d-hosted-v2-off-b",
       "probe_mode": "off",
       "recording": "1",
       "role": "probe-off cold start B (independent repeat)",
       "mode": "off"
     },
     {
-      "name": "issue111-d-hosted-on-a",
+      "name": "issue111-d-hosted-v2-on-a",
       "probe_mode": "on",
       "recording": "1",
       "role": "probe-on cold start A",
       "mode": "on"
     },
     {
-      "name": "issue111-d-hosted-on-b",
+      "name": "issue111-d-hosted-v2-on-b",
       "probe_mode": "on",
       "recording": "1",
       "role": "probe-on cold start B (independent repeat)",
@@ -76,8 +76,8 @@
   "comparisons": [
     {
       "name": "control_repeatability",
-      "left": "issue111-d-hosted-off-a",
-      "right": "issue111-d-hosted-off-b",
+      "left": "issue111-d-hosted-v2-off-a",
+      "right": "issue111-d-hosted-v2-off-b",
       "require": "common boundary/state/RNG/action equality within the frozen window",
       "tool": "tools/issue111_lifecycle_compare.py --scope both",
       "normalization": [
@@ -90,8 +90,8 @@
     },
     {
       "name": "probe_repeatability",
-      "left": "issue111-d-hosted-on-a",
-      "right": "issue111-d-hosted-on-b",
+      "left": "issue111-d-hosted-v2-on-a",
+      "right": "issue111-d-hosted-v2-on-b",
       "require": "common boundary/state/RNG/action equality plus valid v2 probe receipts and healthy counters in both on children",
       "tool": "tools/issue111_lifecycle_compare.py --scope both",
       "normalization": [
@@ -104,8 +104,8 @@
     },
     {
       "name": "probe_installation_effect",
-      "left": "issue111-d-hosted-off-a",
-      "right": "issue111-d-hosted-on-a",
+      "left": "issue111-d-hosted-v2-off-a",
+      "right": "issue111-d-hosted-v2-on-a",
       "require": "strict audit (captured state/render/engine-call/particle) AND strict action/request/result AND initial/final outcome equality, or a located first difference; the v2 probe stream and probe counters are compared separately",
       "tool": "tools/issue111_lifecycle_compare.py --scope common",
       "normalization": [
@@ -146,22 +146,22 @@
   "commands": [
     "python tools/issue111_stage_d.py --root . check",
     "python tools/issue111_stage_d.py --root . doctor --require-game",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-hosted-off-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --hosted-build build/hosted-build.json",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-hosted-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --hosted-build build/hosted-build.json",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-hosted-off-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --hosted-build build/hosted-build.json",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-hosted-on-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --hosted-build build/hosted-build.json",
-    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-hosted-off-a",
-    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-hosted-on-a",
-    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-hosted-off-b",
-    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-hosted-on-b",
-    "python tools/issue111_lifecycle_experiment.py --root . check --run issue111-d-hosted-on-a",
-    "python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-hosted-on-a",
-    "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-hosted-on-a",
-    "python tools/issue111_lifecycle_experiment.py --root . check --run issue111-d-hosted-off-a",
-    "python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-hosted-off-a",
-    "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-hosted-off-a",
-    "python tools/issue111_lifecycle_report.py experiments/runs/issue111-d-hosted-on-a-s42-c0 --out work/issue111-d/probe-on-a-c0.json",
-    "python tools/issue111_lifecycle_compare.py --scope common experiments/runs/issue111-d-hosted-off-a-s42-c0 experiments/runs/issue111-d-hosted-on-a-s42-c0"
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-hosted-v2-off-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --hosted-build build/hosted-build.json",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-hosted-v2-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --hosted-build build/hosted-build.json",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-hosted-v2-off-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --single-cold --skip-build --hosted-build build/hosted-build.json",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-hosted-v2-on-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --single-cold --skip-build --hosted-build build/hosted-build.json",
+    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-hosted-v2-off-a",
+    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-hosted-v2-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-hosted-v2-off-b",
+    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-hosted-v2-on-b",
+    "python tools/issue111_lifecycle_experiment.py --root . check --run issue111-d-hosted-v2-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-hosted-v2-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-hosted-v2-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . check --run issue111-d-hosted-v2-off-a",
+    "python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-hosted-v2-off-a",
+    "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-hosted-v2-off-a",
+    "python tools/issue111_lifecycle_report.py experiments/runs/issue111-d-hosted-v2-on-a-s42-c0 --out work/issue111-d/probe-on-a-c0.json",
+    "python tools/issue111_lifecycle_compare.py --scope common experiments/runs/issue111-d-hosted-v2-off-a-s42-c0 experiments/runs/issue111-d-hosted-v2-on-a-s42-c0"
   ],
   "run_environment": {
     "issue111-d-probe-off-a": {
@@ -189,7 +189,7 @@
     "--scope common now requires the strict audit comparison, the strict action/request/result and outcome comparison (engine_replay._trace_steps, native request cross-check when present) and fails closed if either input is missing; the lifecycle stream is compared separately only for same-mode pairs"
   ],
   "single_cold": true,
-  "pinned_recorder_sha256": "11b3dce625015e0528c547d362871090f0a95a77bbfdd98f2063ffa9923fa855",
+  "pinned_recorder_sha256": "a6e7dcf06060a4d3c3a87545b5e3044f2a47786b09cc2a293a42c9deeb9fb8ad",
   "hosted_build_receipt": "build/hosted-build.json",
   "hosted_script": "logger/avz/hosted/jing_dian_12.cpp",
   "hosted_script_sha256": "ff7f049a0607c6518e0a755fe7a81c5823035e03a822d409a6a97be8647cd171"

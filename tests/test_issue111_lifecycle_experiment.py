@@ -427,3 +427,45 @@ class ConsumerExampleTests(unittest.TestCase):
                 [sys.executable, str(ROOT / "examples" / "issue111_lifecycle_consume.py"),
                  str(Path(temp) / "absent")], capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 2)
+
+
+class HostedPreflightTests(unittest.TestCase):
+    def test_hosted_pin_conflict_root_and_changed_build(self):
+        import os
+        import shutil
+        from tests.test_issue111_lifecycle_experiment import build_root
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = build_root(Path(temp.name))
+        script_dir = root / "logger" / "avz" / "hosted"
+        script_dir.mkdir(parents=True)
+        shutil.copy2(ROOT / experiment.FROZEN_HOSTED_SCRIPT, script_dir / "jing_dian_12.cpp")
+        (root / "build").mkdir(exist_ok=True)
+        (root / "build" / "recorder.dll").write_bytes(b"dll-v1")
+        receipt = {"schema": "lvz.hosted-build.v1",
+                   "hosted_script": str(script_dir / "jing_dian_12.cpp"),
+                   "hosted_script_sha256": hashlib.sha256(
+                       (script_dir / "jing_dian_12.cpp").read_bytes()).hexdigest(),
+                   "recorder_sha256": hashlib.sha256(b"dll-v1").hexdigest()}
+        (root / "build" / "hosted-build.json").write_text(json.dumps(receipt), encoding="utf-8")
+        plan = root / "experiments" / "plans" / "d.json"
+        metadata = experiment.prepare(root, "issue111-d-hosted-on-a", plan, "on", run_builds=False,
+                                      probes="on", single_cold=True,
+                                      hosted_build=root / "build" / "hosted-build.json")
+        self.assertEqual(metadata["expected_recorder_sha256"], receipt["recorder_sha256"])
+        with self.assertRaises(experiment.ExperimentError):
+            experiment.prepare(root, "issue111-d-hosted-on-b", plan, "on", run_builds=False, probes="on",
+                               single_cold=True, build_sha256="a" * 64,
+                               hosted_build=root / "build" / "hosted-build.json")
+        previous = os.getcwd()
+        os.chdir(ROOT)
+        try:
+            parsed = experiment._read_prepared(root, "issue111-d-hosted-on-a")
+            self.assertEqual(parsed["expected_recorder_sha256"], receipt["recorder_sha256"])
+        finally:
+            os.chdir(previous)
+        (root / "build" / "recorder.dll").write_bytes(b"dll-v2")
+        parsed = experiment._read_prepared(root, "issue111-d-hosted-on-a")
+        self.assertEqual(parsed["expected_recorder_sha256"], receipt["recorder_sha256"])
+        with self.assertRaises(experiment.ExperimentError):
+            experiment.run_experiment(root, "issue111-d-hosted-on-a", disk_free=1 << 40, game_processes=[])
