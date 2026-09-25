@@ -110,6 +110,12 @@ void* readerHandler = nullptr;
 std::atomic<uint64_t> readerHandlersAdded{0}, readerHandlersRemoved{0};
 std::atomic<uint32_t> inFlightCallbacks{0};
 std::atomic<uint32_t> inFlightForTest{0};
+std::atomic<uint32_t> protectCallCounter{0};
+struct CallsiteOverride { uint32_t address = 0; uint8_t bytes[5]{}; uint8_t length = 0; };
+std::array<CallsiteOverride, 4> callsiteOverrides{};
+std::atomic<uint32_t> callsiteOverrideCount{0};
+std::atomic<uint32_t> protectFailAfter{0};
+std::atomic<bool> modulePinned{false};
 
 bool ProtectReaderInstalled() noexcept {
     if (readerHandler) return true;
@@ -133,6 +139,11 @@ bool ReleaseReaderProtection() noexcept {
     readerHandlersRemoved.fetch_add(1);
     return true;
 }
+
+// Full-shim lifetime bracket: every shim calls Enter before any observation
+// and Exit after the displaced instruction and all observers ran.
+extern "C" void __cdecl LvzProbeEnter() noexcept { inFlightCallbacks.fetch_add(1); }
+extern "C" void __cdecl LvzProbeExit() noexcept { inFlightCallbacks.fetch_sub(1); }
 
 struct InFlightGuard {
     InFlightGuard() noexcept { inFlightCallbacks.fetch_add(1); }
@@ -230,6 +241,10 @@ struct Record {
     uint8_t site = 0;
     uint8_t onBoard = 0;
     uint8_t boundaryValid = 0;
+    uint8_t frameValid = 0;
+    uint8_t callsiteMatch = 0;
+    uint32_t frameReturn = 0;
+    uint32_t outerReturn = 0;
     uint32_t entity = 0;
     uint32_t slot = 0;
     uint32_t board = 0;
@@ -266,6 +281,11 @@ struct TlsCapture {
     int32_t before = 0;
     ObjectInfo info{};
     CaptureBoundary boundary{};
+    uint32_t frame = 0;
+    uint32_t frameReturn = 0;
+    uint32_t outerReturn = 0;
+    uint8_t frameValid = 0;
+    uint8_t callsiteMatch = 0;
 };
 thread_local TlsCapture tlsCapture;
 
@@ -373,6 +393,7 @@ uint32_t lvzContinuation5 = static_cast<uint32_t>(0x530609);
 uint32_t lvzContinuation6 = static_cast<uint32_t>(0x41bbaf);
 uint32_t lvzCommitTarget = static_cast<uint32_t>(0x41bb58);
 
+void __cdecl LvzProbeSetRemovalFrame(uint32_t frame) noexcept;
 void __cdecl LvzProbeBeforePhase(uint32_t site, uint32_t zombie, uint32_t target) noexcept;
 void __cdecl LvzProbeAfterPhase(uint32_t site, uint32_t zombie, uint32_t target) noexcept;
 void __cdecl LvzProbeRecycleGuard(uint32_t zombie, uint32_t deadBranch) noexcept;
@@ -383,13 +404,15 @@ void __cdecl LvzProbeRecycleCommit(uint32_t zombie, uint32_t board) noexcept;
     "movl %esp, %eax\n\tandl $-16, %esp\n\tsubl $544, %esp\n\t"                                  \
     "movl %esp, %ebp\n\tmovl %eax, 528(%ebp)\n\t"                                                \
     "fxsave (%ebp)\n\t"                                                                          \
-    "movl %fs:0x34, %eax\n\tmovl %eax, 532(%ebp)\n\tcld\n\t"
+    "movl %fs:0x34, %eax\n\tmovl %eax, 532(%ebp)\n\tcld\n\t"                      \
+    "call _LvzProbeEnter\n\t"
 
 #define LVZ_PROBE_RELOAD_OBSERVED_REGS                                                           \
     "movl 528(%ebp), %eax\n\t"                                                                   \
     "movl 0(%eax), %edi\n\tmovl 4(%eax), %esi\n\tmovl 16(%eax), %ebx\n\t"
 
 #define LVZ_PROBE_EPILOGUE(CONT)                                                                 \
+    "call _LvzProbeExit\n\t"                                                                     \
     "fxrstor (%ebp)\n\t"                                                                         \
     "movl 532(%ebp), %eax\n\tmovl %eax, %fs:0x34\n\t"                                            \
     "movl 528(%ebp), %esp\n\tpopal\n\tpopfl\n\tjmp *" #CONT "\n\t"
@@ -429,6 +452,8 @@ __attribute__((naked)) void LvzPhaseShim4() {
 __attribute__((naked)) void LvzRemovalShim5() {
     __asm__ volatile(
         LVZ_PROBE_PROLOGUE
+        "movl 528(%ebp), %eax\n\tmovl 8(%eax), %edx\n\tpushl %edx\n\t"
+        "call _LvzProbeSetRemovalFrame\n\taddl $4, %esp\n\t"
         "leal 0xec(%edi), %edx\n\tpushl %edx\n\tpushl %edi\n\tpushl $5\n\t"
         "call _LvzProbeBeforePhase\n\taddl $12, %esp\n\tfxrstor (%ebp)\n\t"
         "movl 528(%ebp), %eax\n\tmovl 0(%eax), %edi\n\t"
@@ -495,6 +520,7 @@ void ResetState() {
     counterPairMismatch = counterOverwrittenPending = counterFaults = 0;
     queueCapacityOverride.store(0);
     virtualProtectFailureForTest.store(0);
+    protectCallCounter.store(0);
     inFlightForTest.store(0);
     everInstalled = false;
 }
@@ -530,7 +556,54 @@ bool BytesMatch(uintptr_t address, const uint8_t* bytes, size_t count) noexcept 
 
 bool VirtualProtectWithInjection(void* address, size_t size, DWORD protection, DWORD& previous) noexcept {
     if (virtualProtectFailureForTest.load()) return false;
+    const uint32_t call = protectCallCounter.fetch_add(1) + 1;
+    const uint32_t failAfter = protectFailAfter.load();
+    if (failAfter && call >= failAfter) return false;
     return VirtualProtect(address, size, protection, &previous) != 0;
+}
+
+bool CallsiteBytesValid() noexcept {
+    // Locked f966... disassembly: ApplyBurn 0x532FC2 `call 0x5302F0`
+    // (return 0x532FC7) and DieWithLoot 0x5302FA `call 0x530510`
+    // (return 0x5302FF). The frame chain alone is not trusted; both pinned
+    // callsite byte sequences must match before a removal is classified.
+    struct Expected { uint32_t address; uint8_t bytes[5]; };
+    static const std::array<Expected, 2> kExpected = {{
+        {0x532FC2, {0xe8, 0x29, 0xd3, 0xff, 0xff}},
+        {0x5302FA, {0xe8, 0x11, 0x02, 0x00, 0x00}},
+    }};
+    const uint32_t overrideCount = callsiteOverrideCount.load();
+    for (const auto& expected : kExpected) {
+        const CallsiteOverride* entry = nullptr;
+        for (uint32_t index = 0; index < overrideCount && index < callsiteOverrides.size(); ++index) {
+            if (callsiteOverrides[index].address == expected.address) {
+                entry = &callsiteOverrides[index];
+                break;
+            }
+        }
+        if (entry != nullptr) {
+            if (entry->length != 5 || std::memcmp(entry->bytes, expected.bytes, 5) != 0) return false;
+            continue;
+        }
+        for (size_t offset = 0; offset < 5; ++offset) {
+            uint8_t byte = 0;
+            if (!SafeRead8(expected.address + offset, byte) || byte != expected.bytes[offset]) return false;
+        }
+    }
+    return true;
+}
+
+void CaptureFrameFacts(TlsCapture& capture) noexcept {
+    const uint32_t frame = capture.frame;
+    if (!frame) return;
+    uint32_t savedFrame = 0, returnedIntoDieWithLoot = 0, returnedIntoApplyBurn = 0;
+    if (!SafeRead32(frame, savedFrame) || !savedFrame) return;
+    if (!SafeRead32(frame + 4, returnedIntoDieWithLoot)) return;
+    if (!SafeRead32(savedFrame + 4, returnedIntoApplyBurn)) return;
+    capture.frameReturn = returnedIntoDieWithLoot;
+    capture.outerReturn = returnedIntoApplyBurn;
+    capture.frameValid = 1;
+    capture.callsiteMatch = CallsiteBytesValid() ? 1 : 0;
 }
 
 bool ApplyPatch(size_t index, std::string& error) {
@@ -611,6 +684,11 @@ std::string RestoreFailure(const std::string& first) {
 }
 }  // namespace
 
+extern "C" void __cdecl LvzProbeSetRemovalFrame(uint32_t frame) noexcept {
+    LastErrorGuard guard;
+    tlsCapture.frame = frame;
+}
+
 extern "C" void __cdecl LvzProbeBeforePhase(uint32_t site, uint32_t zombie, uint32_t address) noexcept {
     LastErrorGuard guard;
     InFlightGuard flight;
@@ -646,6 +724,10 @@ extern "C" void __cdecl LvzProbeBeforePhase(uint32_t site, uint32_t zombie, uint
         tlsCapture = TlsCapture{};
         return;
     }
+    if (kSites[site].kind == 3) {
+        capture.frame = tlsCapture.frame;
+        CaptureFrameFacts(capture);
+    }
     capture.valid = true;
     capture.site = site;
     capture.zombie = zombie;
@@ -669,6 +751,10 @@ extern "C" void __cdecl LvzProbeAfterPhase(uint32_t site, uint32_t zombie, uint3
     Record record;
     Fill(record, kSites[site].kind == 3 ? 2 : 0, static_cast<uint8_t>(site), tlsCapture.info);
     record.before = tlsCapture.before;
+    record.frameValid = tlsCapture.frameValid;
+    record.frameReturn = tlsCapture.frameReturn;
+    record.outerReturn = tlsCapture.outerReturn;
+    record.callsiteMatch = tlsCapture.callsiteMatch;
     record.boundaryValid = tlsCapture.boundary.valid ? 1 : 0;
     record.tick = tlsCapture.boundary.tick;
     record.revision = tlsCapture.boundary.revision;
@@ -790,6 +876,20 @@ extern "C" void __cdecl LvzProbeRecycleCommit(uint32_t zombie, uint32_t board) n
     recyclePending = RecyclePending{};
 }
 
+bool LifecycleProbeResourcesOwned() noexcept {
+    return LifecycleProbesInstalled() || ReaderProtectionInstalled() || InFlightCount() != 0;
+}
+
+bool PinLifecycleProbeModule() noexcept {
+    static int moduleAnchor = 0;
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                            reinterpret_cast<LPCWSTR>(&moduleAnchor), &module))
+        return false;
+    modulePinned.store(true);
+    return true;
+}
+
 bool LifecycleProbesInstalled() noexcept {
     for (const uint8_t state : siteState)
         if (state == kSiteOwned) return true;
@@ -887,6 +987,27 @@ bool LvzProbeReaderProtectionInstalledForTest() noexcept { return ReaderProtecti
 uint64_t LvzProbeReaderHandlersAddedForTest() noexcept { return readerHandlersAdded.load(); }
 uint64_t LvzProbeReaderHandlersRemovedForTest() noexcept { return readerHandlersRemoved.load(); }
 void LvzProbeSetInFlightForTest(uint32_t value) noexcept { inFlightForTest.store(value); }
+void LvzProbeSetVirtualProtectFailureAfterForTest(uint32_t callIndex) noexcept {
+    protectCallCounter.store(0);
+    protectFailAfter.store(callIndex);
+}
+bool LvzProbeHostModulePinnedForTest() noexcept { return modulePinned.load(); }
+void LvzProbeSetCallsiteBytesForTest(uint32_t address, const uint8_t* bytes, uint32_t count) noexcept {
+    if (count != 5) return;
+    const uint32_t countNow = callsiteOverrideCount.load();
+    for (uint32_t index = 0; index < countNow && index < callsiteOverrides.size(); ++index) {
+        if (callsiteOverrides[index].address == address) {
+            std::memcpy(callsiteOverrides[index].bytes, bytes, 5);
+            return;
+        }
+    }
+    if (countNow >= callsiteOverrides.size()) return;
+    callsiteOverrides[countNow].address = address;
+    std::memcpy(callsiteOverrides[countNow].bytes, bytes, 5);
+    callsiteOverrides[countNow].length = 5;
+    callsiteOverrideCount.store(countNow + 1);
+}
+void LvzProbeClearCallsiteBytesForTest() noexcept { callsiteOverrideCount.store(0); }
 #endif
 
 bool RemoveLifecycleProbes(std::string& error) {
@@ -1026,7 +1147,12 @@ Json DrainLifecycleProbeBatch() {
             case 2:
                 base["kind"] = "zombie_removal_marked";
                 base["removal"] = {{"source", "dienoloot_mdead_store"},
-                                   {"before", record.before}, {"after", record.after}};
+                                   {"before", record.before}, {"after", record.after},
+                                   {"frame", {{"return_into_diewithloot",
+                                               record.frameValid ? Json(record.frameReturn) : Json(nullptr)},
+                                              {"return_into_applyburn",
+                                               record.frameValid ? Json(record.outerReturn) : Json(nullptr)},
+                                              {"callsite_bytes_match", record.callsiteMatch != 0}}}};
                 break;
             case 3:
                 base["kind"] = "zombie_slot_recycle_candidate";

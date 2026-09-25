@@ -310,7 +310,18 @@ def run_experiment(root: Path, name: str, *, suite_runner=None,
             def runner():
                 return evaluation.run_suite(root, plan, suite, run_builds=metadata["run_builds"],
                                             single_cold=metadata.get("single_cold", False))
-        return runner()
+        result = runner()
+        if suite.is_dir():
+            binding = {"schema": "lvz.lifecycle-plan-binding.v1",
+                       "raw_plan_sha256": metadata["plan"]["sha256"],
+                       "plan": metadata["plan"]["path"],
+                       "mode": metadata["mode"],
+                       "probes": (metadata.get("probes") or {}).get("mode"),
+                       "single_cold": metadata.get("single_cold", False),
+                       "recorder_sha256": metadata.get("expected_recorder_sha256")}
+            path = suite / "lifecycle-plan-binding.json"
+            path.write_text(json.dumps(binding, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return result
     finally:
         if previous is None:
             os.environ.pop(MODE_ENV, None)

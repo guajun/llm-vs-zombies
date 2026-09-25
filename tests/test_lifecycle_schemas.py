@@ -17,6 +17,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 SCHEMA_DIR = ROOT / "logger" / "schemas"
+# Prefer the established standards validator when the environment provides it;
+# the built-in subset below exists only because the test environment does not
+# ship jsonschema, and it covers exactly the draft-2020-12 keywords the two
+# repository schemas use.
+try:  # pragma: no cover - exercised only where jsonschema is installed
+    import jsonschema as _jsonschema
+except ImportError:  # pragma: no cover
+    _jsonschema = None
 
 
 def load_schema(name: str) -> dict:
@@ -40,6 +48,9 @@ def _resolve(schema: dict, root: dict, path: str) -> dict:
 
 
 def validate(instance, schema: dict, root: dict | None = None, path: str = "$") -> list[str]:
+    if _jsonschema is not None:
+        validator = _jsonschema.Draft202012Validator(schema)
+        return [f"{path}: {error.message}" for error in validator.iter_errors(instance)]
     root = root if root is not None else schema
     schema = _resolve(schema, root, path)
     problems: list[str] = []

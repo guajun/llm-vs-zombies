@@ -14,16 +14,19 @@ command must expose:
 The death/removal classification follows the conservative rule registered in
 issue #110 (``lvz.issue110-death-stage.v2``): HP<=0, a disappeared flag, a
 recycle function or a nearby cannon shot never prove a kill by themselves.
-Every derived fact is labelled a **boundary observation**, not production
-capture evidence: the three capture points remain ``review_required`` in
-``docs/issue111-捕获点表.json``, so ``capture_level`` is always
-``unavailable`` in this delivery and ``first_kill.proven`` is always false.
+Boundary facts stay labelled **boundary observations**. When the run also
+carries a validated exact-store lifecycle stream (v2 events from the installed
+phase/mDead/recycle probes), ``capture_level`` reports those capture facts and
+their limits instead of a blanket ``unavailable``; the first-kill gate is only
+reported as proven with the close receipt, probe capability, initialization
+stream, frozen full window and clean counters all verified.
 
 No game, no Win32 and no Agent import: the reader contract lives in
 ``audit_compare``; this module only interprets reconstructed states.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -46,6 +49,11 @@ DEATH_PHASE_BY_SITE = {
     "phase-catapult": 1, "phase-zamboni": 1,
 }
 DEATH_STAGES = {1: "falling", 2: "ash", 3: "mower_death_stage"}
+# Locked-f966 ApplyBurn -> DieWithLoot -> DieNoLoot chain: the two return
+# addresses that a validated bounded frame fact must show. Generic mDead or a
+# bare DieNoLoot/DieWithLoot observation is never a death by itself.
+APPLYBURN_CHAIN_RETURNS = {"return_into_diewithloot": 0x5302FF,
+                           "return_into_applyburn": 0x532FC7}
 NONDEATH_SITES = frozenset({"phase-drop-loot"})
 # Health counters that invalidate completeness and first-kill proof. live_skips
 # is the expected live guard branch and stays benign; off-board facts are
@@ -55,27 +63,40 @@ BLOCKING_COUNTERS = ("overflow", "wrong_thread", "faults", "unmatched_commits", 
 BENIGN_COUNTERS = ("live_skips",)
 
 
-def _attach_predecessor(fact: dict, initialization: dict, initial_entity_ids, event: dict) -> None:
-    """Correlate a captured fact with its initialization/initial residue.
+def _attach_predecessor(fact: dict, initialization: dict, initial_entities: dict,
+                        event: dict, *, removal: bool) -> None:
+    """Correlate a captured fact with an earlier initialization or residue.
 
-    Only a captured v1 initialization or an entity present at the first
-    sampled boundary is a known predecessor. Anything else stays explicitly
-    unknown so an earlier unobserved removal can never be folded away.
+    The initialization map only contains records that appeared *earlier* in
+    capture_sequence order, so a nested initializer captured after a death can
+    never be used as prior known-live state. Initial residue carries the raw
+    phase/dead state from the first sampled boundary, not merely membership.
     """
     identifier = fact.get("entity")
     init = initialization.get(identifier)
     if init is not None:
         fact["initialization"] = {"capture_sequence": init["capture_sequence"],
                                   "invocation_id": init["invocation_id"],
+                                  "invocation_depth": init.get("invocation_depth"),
+                                  "parent_invocation_id": init.get("parent_invocation_id"),
                                   "engine_call_id": init["engine_call_id"]}
         fact["predecessor"] = "initialization"
         call = event.get("engine_call_id")
-        if call is not None and init.get("engine_call_id") is not None and call == init["engine_call_id"]:
+        # Same-call lifetime is only meaningful for an actual removal.
+        if removal and call is not None and init.get("engine_call_id") is not None \
+                and call == init["engine_call_id"]:
             fact["same_call_lifetime"] = True
-    elif identifier in initial_entity_ids:
-        fact["predecessor"] = "initial_residue"
-    else:
-        fact["predecessor"] = "unknown_predecessor"
+        return
+    residue = initial_entities.get(identifier)
+    if residue is not None:
+        fact["initial_residue"] = dict(residue)
+        state = residue.get("state")
+        if residue.get("disappeared") or (isinstance(state, int) and state in DEATH_STAGES):
+            fact["predecessor"] = "initial_residue_doomed"
+        else:
+            fact["predecessor"] = "initial_residue"
+        return
+    fact["predecessor"] = "unknown_predecessor"
 
 
 def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
@@ -86,58 +107,70 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
     kill evidence. A first-kill claim additionally needs evidence that the
     capture itself was complete: a valid close receipt, the enabled probe
     capability, the initialization capture, a full frozen window and clean
-    counters. Missing evidence is never read as clean.
+    counters. Off-board preview facts are preserved and scoped out of the
+    gameplay first-kill proof instead of being dropped or counted as blockers.
     """
     coverage = coverage or {}
-    events: list[dict] = []
-    initialization: dict[int, dict] = {}
-    for record in records:
+    initial_entities = coverage.get("initial_entities") if isinstance(coverage, dict) else None
+    initial_entities = initial_entities if isinstance(initial_entities, dict) else {}
+    events: list[tuple[int, dict]] = []
+    for index, record in enumerate(records):
         event = record.get("event") if isinstance(record, dict) and isinstance(record.get("event"), dict) else record
-        if not isinstance(event, dict):
-            continue
-        if event.get("schema") == lifecycle_events.EVENT_SCHEMA \
-                and event.get("kind") == lifecycle_events.KIND_INITIALIZATION:
-            entity = event.get("entity") if isinstance(event.get("entity"), dict) else {}
-            identifier = entity.get("id")
-            if isinstance(identifier, int):
-                invocation = event.get("invocation") if isinstance(event.get("invocation"), dict) else {}
-                initialization[identifier] = {
-                    "capture_sequence": event.get("capture_sequence"),
-                    "invocation_id": invocation.get("invocation_id"),
-                    "engine_call_id": event.get("engine_call_id"),
-                }
-        elif event.get("schema") == lifecycle_events.PROBE_EVENT_SCHEMA:
-            events.append(event)
+        if isinstance(event, dict):
+            events.append((index, event))
+    events.sort(key=lambda item: (item[1].get("capture_sequence") if isinstance(
+        item[1].get("capture_sequence"), int) else item[0]))
     entities: dict[int, dict] = {}
     facts: list[dict] = []
-    initial_entity_ids = coverage.get("initial_entity_ids") if isinstance(coverage, dict) else None
-    initial_entity_ids = initial_entity_ids if isinstance(initial_entity_ids, (set, frozenset)) else frozenset()
+    initialization: dict[int, dict] = {}
 
     def entity(identifier: int) -> dict:
         return entities.setdefault(identifier, {"id": identifier, "confirmed_death_stage": False,
                                                "removal_without_death": False, "removal": False,
                                                "recycle_states": [], "phase_transitions": []})
 
-    for event in events:
-        identifier = event.get("entity", {}).get("id") if isinstance(event.get("entity"), dict) else None
+    for _, event in events:
+        if event.get("schema") == lifecycle_events.EVENT_SCHEMA \
+                and event.get("kind") == lifecycle_events.KIND_INITIALIZATION:
+            data = event.get("entity") if isinstance(event.get("entity"), dict) else {}
+            identifier = data.get("id")
+            if isinstance(identifier, int):
+                invocation = event.get("invocation") if isinstance(event.get("invocation"), dict) else {}
+                initialization[identifier] = {
+                    "capture_sequence": event.get("capture_sequence"),
+                    "invocation_id": invocation.get("invocation_id"),
+                    "invocation_depth": invocation.get("depth"),
+                    "parent_invocation_id": invocation.get("parent_invocation_id"),
+                    "engine_call_id": event.get("engine_call_id"),
+                }
+            continue
+        if event.get("schema") != lifecycle_events.PROBE_EVENT_SCHEMA:
+            continue
+        data = event.get("entity") if isinstance(event.get("entity"), dict) else {}
+        identifier = data.get("id")
         if not isinstance(identifier, int):
             continue
         state = entity(identifier)
         kind = event.get("kind")
         sequence = event.get("capture_sequence")
+        obj = event.get("object") if isinstance(event.get("object"), dict) else {}
+        scope = "gameplay" if obj.get("on_board") is not False else "preview"
         if kind == "zombie_phase_transition":
             phase = event.get("phase", {})
             site = phase.get("site")
             transition = {"capture_sequence": sequence, "entity": identifier, "kind": kind, "site": site,
-                          "before": phase.get("before"), "after": phase.get("after")}
-            transitions = state["phase_transitions"]
-            transitions.append(transition)
+                          "before": phase.get("before"), "after": phase.get("after"), "scope": scope}
+            state["phase_transitions"].append(transition)
             expected = DEATH_PHASE_BY_SITE.get(site)
-            if expected is not None and phase.get("after") == expected and phase.get("before") != expected:
+            before, after = phase.get("before"), phase.get("after")
+            if expected is not None and after == expected and before not in DEATH_STAGES \
+                    and before != after:
                 transition["class"] = "confirmed_death_stage"
                 transition["stage"] = DEATH_STAGES.get(expected)
                 state["confirmed_death_stage"] = True
-                _attach_predecessor(transition, initialization, initial_entity_ids, event)
+                _attach_predecessor(transition, initialization, initial_entities, event, removal=False)
+            elif expected is not None and after == expected and before in DEATH_STAGES:
+                transition["class"] = "already_dying"
             elif site in NONDEATH_SITES:
                 transition["class"] = "nondeath"
             else:
@@ -147,11 +180,23 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
             removal = {"capture_sequence": sequence, "entity": identifier, "kind": kind,
                        "source": event.get("removal", {}).get("source"),
                        "before": event.get("removal", {}).get("before"),
-                       "after": event.get("removal", {}).get("after")}
+                       "after": event.get("removal", {}).get("after"), "scope": scope}
             state["removal"] = True
-            _attach_predecessor(removal, initialization, initial_entity_ids, event)
+            _attach_predecessor(removal, initialization, initial_entities, event, removal=True)
+            frame = event.get("removal", {}).get("frame") if isinstance(event.get("removal"), dict) else None
+            chain_valid = (isinstance(frame, dict) and frame.get("callsite_bytes_match") is True
+                           and frame.get("return_into_diewithloot")
+                           == APPLYBURN_CHAIN_RETURNS["return_into_diewithloot"]
+                           and frame.get("return_into_applyburn")
+                           == APPLYBURN_CHAIN_RETURNS["return_into_applyburn"]
+                           and removal["before"] == 0 and removal["after"] == 1 and scope == "gameplay")
             if state["confirmed_death_stage"]:
                 removal["class"] = "removal_after_death"
+            elif chain_valid:
+                removal["class"] = "confirmed_death_path"
+                removal["death_path"] = "applyburn_diewithloot_dienoloot"
+                removal["death_stage"] = "charred_animation_via_applyburn"
+                state["confirmed_death_stage"] = True
             else:
                 removal["class"] = "removal_unclassified"
                 state["removal_without_death"] = True
@@ -159,18 +204,26 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
         elif kind == "zombie_slot_recycle_candidate":
             state["recycle_states"].append("candidate")
             facts.append({"capture_sequence": sequence, "entity": identifier, "kind": kind,
-                          "class": "slot_recycle_candidate"})
+                          "class": "slot_recycle_candidate", "scope": scope})
         elif kind == "zombie_slot_recycle_commit":
             state["recycle_states"].append("committed")
             facts.append({"capture_sequence": sequence, "entity": identifier, "kind": kind,
-                          "class": "slot_recycle_commit"})
+                          "class": "slot_recycle_commit", "scope": scope})
 
-    confirmed = [fact for fact in facts if fact.get("class") == "confirmed_death_stage"]
-    unknown = [fact for fact in facts if fact.get("class") in ("removal_unclassified", "phase_unclassified")]
-    unknown_predecessors = [fact for fact in confirmed if fact.get("predecessor") == "unknown_predecessor"]
+    preview_facts = [fact for fact in facts if fact.get("scope") == "preview"]
+    gameplay_facts = [fact for fact in facts if fact.get("scope") != "preview"]
+    confirmed = [fact for fact in gameplay_facts
+                 if fact.get("class") in ("confirmed_death_stage", "confirmed_death_path")]
+    unknown = [fact for fact in gameplay_facts
+               if fact.get("class") in ("removal_unclassified", "phase_unclassified")]
+    unknown_predecessors = [fact for fact in confirmed
+                            if fact.get("predecessor") in ("unknown_predecessor",
+                                                           "initial_residue_doomed")]
     unknown += unknown_predecessors
-    candidates = [fact for fact in confirmed if fact.get("predecessor") != "unknown_predecessor"]
+    candidates = [fact for fact in confirmed
+                  if fact.get("predecessor") in ("initialization", "initial_residue")]
     counters = counters or {}
+    coverage = coverage or {}
     unhealthy = {name: counters.get(name) for name in BLOCKING_COUNTERS
                  if isinstance(counters.get(name), int) and counters.get(name) > 0}
     reasons: list[str] = []
@@ -192,9 +245,12 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
     else:
         first = candidates[0] if candidates else None
         if unknown_predecessors:
-            reasons.append("a death fact has no captured initialization or initial-residue predecessor")
+            reasons.append("a death fact has no earlier initialization or live initial-residue predecessor")
         if first is not None:
-            blocking = [fact for fact in unknown if fact["capture_sequence"] < first["capture_sequence"]]
+            blocking = [fact for fact in unknown
+                        if isinstance(fact.get("capture_sequence"), int)
+                        and isinstance(first.get("capture_sequence"), int)
+                        and fact["capture_sequence"] < first["capture_sequence"]]
             if blocking:
                 reasons.append("an earlier unclassified fact blocks first-kill proof")
     if unhealthy:
@@ -208,6 +264,8 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
         "entities": {identifier: state for identifier, state in sorted(entities.items())},
         "summary": {
             "fact_count": len(facts),
+            "gameplay_facts": len(gameplay_facts),
+            "preview_facts": len(preview_facts),
             "confirmed_death_stages": len(confirmed),
             "unclassified_facts": len(unknown),
             "initialization_facts": len(initialization),
@@ -230,6 +288,7 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
                                 "entity": fact["entity"]} for fact in blocking],
             "reasons": reasons,
         },
+        "preview_facts": preview_facts,
         "unknown_facts": unknown,
     }
 
@@ -486,18 +545,42 @@ def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) ->
 
 
 def load_capture_facts(audit_directory: str | Path) -> list[dict]:
-    """Read the envelope records so the capture analyzer sees the real stream."""
-    from . import evidence_codec, lifecycle_events
-    directory = Path(audit_directory)
-    store = evidence_codec.EvidenceStore(directory, error=ReportError)
-    if not (directory / lifecycle_events.EVENTS_FILE).is_file():
-        return []
-    return lifecycle_events.load_records(directory)
+    """Read the envelope records so the capture analyzer sees the real stream.
+
+    The shared codec reader resolves plain and sealed (gzip) evidence, so a
+    sealed run yields exactly the same facts as before compression. Decode
+    errors propagate; they are never turned into an empty success.
+    """
+    from . import lifecycle_events
+    return lifecycle_events.load_records(Path(audit_directory))
 
 
-def _full_window_evidence(run: Path, audit_directory: Path, snapshots: list[dict],
-                         plan: str | Path | None) -> tuple[bool, list[str]]:
-    """Prove the frozen plan, the executed endpoint and the audited tail agree.
+def _normalized_plan(plan_path: Path) -> dict | None:
+    """Normalize a raw frozen plan through the repository's Plan contract."""
+    try:
+        from dataclasses import asdict
+
+        from . import evaluation
+        return json.loads(json.dumps(asdict(evaluation.Plan.load(plan_path))))
+    except Exception:  # a plan outside the frozen contract stays unexplained
+        return None
+
+
+def _plan_binding_paths(run_directory: Path, suite_directory: Path,
+                        explicit: str | Path | None) -> list[Path]:
+    paths: list[Path] = []
+    if explicit is not None:
+        paths.append(Path(explicit))
+    paths.append(suite_directory / "lifecycle-plan-binding.json")
+    paths.append(run_directory / "lifecycle-plan-binding.json")
+    return paths
+
+
+def _full_window_evidence(run_directory: Path, audit_directory: Path, snapshots: list[dict],
+                         plan: str | Path | None,
+                         plan_binding: str | Path | None = None) -> tuple[bool, list[str]]:
+    """Prove the frozen plan, the raw identity binding, the captured initial
+    root and the executed endpoint all belong to the same closed run.
 
     A constant is never flipped here: every clause reads real evidence, and a
     missing binding stays an explicit blocker.
@@ -508,21 +591,80 @@ def _full_window_evidence(run: Path, audit_directory: Path, snapshots: list[dict
     if not plan_path.is_file():
         return False, [f"frozen plan is unreadable: {plan_path}"]
     try:
-        plan_doc = json.loads(plan_path.read_bytes())
+        plan_bytes = plan_path.read_bytes()
+        plan_doc = json.loads(plan_bytes)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return False, [f"frozen plan is unreadable: {exc}"]
-    child = run if (run / "audit" / "manifest.json").is_file() else audit_directory
-    suite_name = child.name.rsplit("-s", 1)[0] if "-s" in child.name else child.name
-    suite_plan = child.parent / suite_name / "plan.json"
+    normalized = _normalized_plan(plan_path)
+    if normalized is None:
+        return False, ["the frozen plan does not satisfy the evaluation Plan contract"]
+    name = run_directory.name
+    suite_name = name.rsplit("-s", 1)[0] if "-s" in name else name
+    suite_directory = run_directory.parent / suite_name if "-s" in name else run_directory
+    suite_plan = suite_directory / "plan.json"
+    if not suite_plan.is_file() and (run_directory / "plan.json").is_file():
+        suite_plan = run_directory / "plan.json"
     if not suite_plan.is_file():
         return False, [f"suite plan copy is missing: {suite_plan}"]
     try:
         suite_doc = json.loads(suite_plan.read_bytes())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return False, [f"suite plan copy is unreadable: {exc}"]
-    if suite_doc != plan_doc:
-        return False, ["the suite plan copy does not match the frozen plan"]
-    endpoint = child / "experiment-end.json"
+    if suite_doc != normalized:
+        return False, ["the suite plan copy does not match the normalized frozen plan"]
+    binding: dict | None = None
+    for candidate in _plan_binding_paths(run_directory, suite_directory, plan_binding):
+        if candidate.is_file():
+            try:
+                binding = json.loads(candidate.read_bytes())
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                return False, [f"plan identity binding is unreadable: {exc}"]
+            binding["_path"] = str(candidate)
+            break
+    if binding is None:
+        return False, ["the raw plan identity binding is missing"]
+    digest = hashlib.sha256(plan_bytes).hexdigest()
+    if binding.get("raw_plan_sha256") != digest:
+        return False, ["the raw plan identity binding does not match the frozen plan bytes"]
+    seed = None
+    if "-s" in name:
+        seed_text = name.rsplit("-s", 1)[1].split("-", 1)[0]
+        try:
+            seed = int(seed_text)
+        except ValueError:
+            return False, [f"the child run name has no usable seed: {name}"]
+        if normalized.get("seeds") and seed not in normalized["seeds"]:
+            return False, [f"the child run seed {seed} is not in the frozen plan"]
+    manifest_path = run_directory / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return False, [f"run manifest is unreadable: {exc}"]
+        if manifest.get("run_id") != name:
+            return False, ["the run manifest identity does not match the child directory"]
+        pin = binding.get("recorder_sha256")
+        implementation = manifest.get("implementation")
+        build = implementation.get("recorder_sha256") if isinstance(implementation, dict) else None
+        if pin and build != pin:
+            return False, ["the run manifest recorder build does not match the pinned build"]
+    initial_path = run_directory / "replay-initial.json"
+    if not initial_path.is_file():
+        return False, ["the run has no captured initial boundary"]
+    try:
+        initial = json.loads(initial_path.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, [f"the captured initial boundary is unreadable: {exc}"]
+    observation = initial.get("observation") if isinstance(initial.get("observation"), dict) else initial
+    initial_version = observation.get("version") if isinstance(observation, dict) else None
+    if not isinstance(initial_version, dict):
+        return False, ["the captured initial boundary has no version"]
+    if not snapshots:
+        return False, ["no audited boundary exists"]
+    first_version = (snapshots[0].get("coordinate") or {}).get("version")
+    if first_version != initial_version:
+        return False, ["the audited stream does not start at the captured initial boundary"]
+    endpoint = run_directory / "experiment-end.json"
     if not endpoint.is_file():
         return False, ["executed endpoint evidence is missing"]
     try:
@@ -533,11 +675,18 @@ def _full_window_evidence(run: Path, audit_directory: Path, snapshots: list[dict
         if isinstance(ending.get("final_observation"), dict) else None
     if not isinstance(final_version, dict):
         return False, ["executed endpoint has no boundary version"]
-    if not snapshots:
-        return False, ["no audited boundary exists"]
     last_version = (snapshots[-1].get("coordinate") or {}).get("version")
     if last_version != final_version:
         return False, ["the audited boundary stream does not end at the executed endpoint"]
+    try:
+        if last_version.get("tick") < first_version.get("tick") \
+                or last_version.get("epoch") < first_version.get("epoch"):
+            return False, ["the audited interval is not ordered"]
+    except (TypeError, AttributeError):
+        return False, ["the audited boundary versions are malformed"]
+    budget = normalized.get("tick_budget")
+    if isinstance(budget, int) and last_version.get("tick", 0) > budget:
+        return False, ["the executed endpoint exceeds the frozen tick budget"]
     stop = plan_doc.get("stop_when")
     if isinstance(stop, dict) and "wave_at_least" in stop:
         wave = ending.get("maximum_wave")
@@ -547,10 +696,17 @@ def _full_window_evidence(run: Path, audit_directory: Path, snapshots: list[dict
 
 
 def report_for_run(run: str | Path, *, require_closed: bool = True,
-                   lifecycle: bool = True, plan: str | Path | None = None) -> dict:
-    """Read a run (or audit) directory and return the full report."""
+                   lifecycle: bool = True, plan: str | Path | None = None,
+                   plan_binding: str | Path | None = None) -> dict:
+    """Read a run (or audit) directory and return the full report.
+
+    Both documented input forms work: a child run directory (with its nested
+    ``audit/``) and a bare audit directory (whose parent supplies the endpoint
+    and suite plan binding).
+    """
     run = Path(run)
     audit_directory = run / "audit" if (run / "audit" / "manifest.json").is_file() else run
+    run_directory = run.parent if run.name == "audit" else run
     manifest, snapshots = snapshots_from_audit(audit_directory, require_closed=require_closed)
     spawn_hook = manifest.get("spawn_hook") if isinstance(manifest.get("spawn_hook"), dict) else {}
     coverage = {"audit_manifest_target": manifest.get("target"),
@@ -587,13 +743,20 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
         receipt = lifecycle_report.get("close_receipt") or {}
         try:
             capture_records = load_capture_facts(audit_directory)
-        except (ReportError, OSError):
-            capture_records = []
-        full_window, window_problems = _full_window_evidence(run, audit_directory, snapshots, plan)
-        initial_entity_ids = set()
+        except lifecycle_events.LifecycleError as exc:
+            raise ReportError(f"capture facts are unreadable: {exc}") from exc
+        full_window, window_problems = _full_window_evidence(run_directory, audit_directory, snapshots,
+                                                             plan, plan_binding)
+        initial_entities: dict[int, dict] = {}
         if snapshots:
-            initial_entity_ids = {entry.get("id") for entry in (snapshots[0].get("zombies") or {}).values()
-                                  if isinstance(entry, dict) and isinstance(entry.get("id"), int)}
+            for entry in (snapshots[0].get("zombies") or {}).values():
+                if not isinstance(entry, dict) or not isinstance(entry.get("id"), int):
+                    continue
+                raw = entry.get("raw") if isinstance(entry.get("raw"), dict) else {}
+                state = raw.get("state")
+                state = signed(state) if isinstance(state, int) else None
+                initial_entities[entry["id"]] = {"state": state,
+                                                 "disappeared": bool(raw.get("disappeared"))}
         report["coverage"]["frozen_plan"] = str(plan) if plan is not None else None
         report["coverage"]["full_window_problems"] = window_problems
         report["capture_facts"] = analyze_capture_facts(
@@ -605,7 +768,7 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
                 "initialization_capture": spawn_hook.get("installed") is True,
                 "full_window": full_window,
                 "health_clean": probes_healthy,
-                "initial_entity_ids": frozenset(initial_entity_ids),
+                "initial_entities": initial_entities,
             })
         if window_problems:
             report["coverage"]["full_window_limit"] = window_problems

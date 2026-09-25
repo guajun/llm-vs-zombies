@@ -32,9 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--markdown", type=Path, default=None, help="write a Markdown summary here")
     parser.add_argument("--plan", type=Path, default=None,
                         help="frozen evaluation plan used to bind the full-window coverage")
+    parser.add_argument("--plan-binding", type=Path, default=None,
+                        help="explicit raw plan identity binding (defaults to the suite copy)")
     args = parser.parse_args(argv)
     try:
-        report = lifecycle_report.report_for_run(args.path, plan=args.plan)
+        report = lifecycle_report.report_for_run(args.path, plan=args.plan, plan_binding=args.plan_binding)
     except lifecycle_report.ReportError as exc:
         print(json.dumps({"schema": lifecycle_report.ANALYSIS_SCHEMA, "ok": False,
                           "problems": [str(exc)]}, ensure_ascii=False, indent=2))

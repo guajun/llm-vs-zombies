@@ -92,7 +92,9 @@ _PROBE_EVENT_KEYS = {"schema", "kind", "capture_sequence", "version", "version_p
                      "entity", "object", "probe", "complete"}
 _PROBE_OBJECT_KEYS = {"class", "on_board", "wave", "board"}
 _PROBE_PHASE_KEYS = {"site", "before", "after"}
-_PROBE_REMOVAL_KEYS = {"source", "before", "after"}
+_PROBE_REMOVAL_KEYS = {"source", "before", "after", "frame"}
+_PROBE_REMOVAL_FRAME_KEYS = {"return_into_diewithloot", "return_into_applyburn",
+                             "callsite_bytes_match"}
 _PROBE_RECYCLE_CANDIDATE_KEYS = {"state", "slot", "free_head_before", "count_before"}
 _PROBE_RECYCLE_COMMIT_KEYS = {"state", "slot", "candidate_capture_sequence", "free_head_after", "count_after"}
 _PROBE_PROBE_KEYS = {"name", "schema", "sequence_domain"}
@@ -434,6 +436,14 @@ def _check_probe_event(event: dict, label: str, problems: list[str]) -> None:
             _require(_is_int(removal.get("before")) and _is_int(removal.get("after")),
                      f"{label}: removal before/after must be raw integers", problems)
             _require(removal.get("after") == 1, f"{label}: mDead store writes exactly 1", problems)
+            frame = removal.get("frame")
+            if _exact_keys(frame, _PROBE_REMOVAL_FRAME_KEYS, f"{label} removal.frame", problems):
+                for key in ("return_into_diewithloot", "return_into_applyburn"):
+                    value = frame.get(key)
+                    _require(value is None or (_is_int(value) and value > 0),
+                             f"{label}: frame {key} must be null or a positive address", problems)
+                _require(type(frame.get("callsite_bytes_match")) is bool,
+                         f"{label}: frame callsite_bytes_match must be a boolean", problems)
     else:
         recycle = event.get("recycle")
         expected_keys = _PROBE_RECYCLE_CANDIDATE_KEYS if kind == "zombie_slot_recycle_candidate" \

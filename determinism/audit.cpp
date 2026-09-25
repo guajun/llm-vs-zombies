@@ -213,7 +213,8 @@ void DrainAndCheckSpawns() {
         // The probe drain must never run when no probe was installed (off or
         // unset): DrainLifecycleProbeBatch itself is safe then, and the gate
         // keeps a poisoned wrong-thread counter out of the baseline.
-        Json probes=probesInstalled?DrainLifecycleProbeBatch():Json::array();
+        const bool probesOwned=probesInstalled||LifecycleProbeResourcesOwned();
+        Json probes=probesOwned?DrainLifecycleProbeBatch():Json::array();
         for(auto& spawn:batch.legacy) {
             const auto& boundary=spawn.at("boundary");
             const bool controlled=boundary.is_object();
@@ -546,9 +547,13 @@ void Initialize(const std::filesystem::path& runDir) {
         foleytrace::Shutdown();
         std::string probeError;
         bool probeRollbackFailed=false;
-        if(probesInstalled) {
-            if(!RemoveLifecycleProbes(probeError)) probeRollbackFailed=true;
-            else probesInstalled=false;
+        // A failed install rollback can own patches/handler while the local
+        // flag is still false, so always synchronize with the actual state.
+        if(!RemoveLifecycleProbes(probeError)) probeRollbackFailed=true;
+        else probesInstalled=false;
+        if(LifecycleProbeResourcesOwned()) {
+            PinLifecycleProbeModule();
+            probeRollbackFailed=true;
         }
         std::string particleError;
         if(!RemoveParticleShakeHook(particleError))
@@ -840,11 +845,13 @@ void Shutdown() {
                     {"version",lastObservationVersion},{"payload",finalHealth}});
             } catch(const std::exception& exception) { note(exception.what()); }
             Json finalProbeStatus=nullptr;
-            if(probesInstalled) {
+            const bool probesOwned=probesInstalled||LifecycleProbeResourcesOwned();
+            if(probesOwned) {
                 std::string error;
                 const bool probeRemoved=RemoveLifecycleProbes(error);
                 if(!probeRemoved) note("Keep runtime DLL loaded: "+error);
                 else probesInstalled=false;
+                if(!probeRemoved||LifecycleProbeResourcesOwned()) PinLifecycleProbeModule();
                 finalProbeStatus=LifecycleProbeStatus();
                 try {
                     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","lifecycle_probes_closed"},

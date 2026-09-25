@@ -329,10 +329,14 @@ int RunTests() {
     using lvz::determinism::InstallLifecycleProbesForTest;
     using lvz::determinism::LifecycleProbesInstalled;
     using lvz::determinism::LifecycleProbeStatus;
+    using lvz::determinism::LifecycleProbeResourcesOwned;
     using lvz::determinism::LvzProbeReaderHandlersAddedForTest;
     using lvz::determinism::LvzProbeReaderHandlersRemovedForTest;
     using lvz::determinism::LvzProbeReaderProtectionInstalledForTest;
+    using lvz::determinism::LvzProbeClearCallsiteBytesForTest;
+    using lvz::determinism::LvzProbeSetCallsiteBytesForTest;
     using lvz::determinism::LvzProbeSetInFlightForTest;
+    using lvz::determinism::LvzProbeSetVirtualProtectFailureAfterForTest;
     using lvz::determinism::LvzProbeSetActiveForTest;
     using lvz::determinism::LvzProbeSetQueueCapacityForTest;
     using lvz::determinism::LvzProbeSetThreadForTest;
@@ -459,6 +463,66 @@ int RunTests() {
                   && commit.at("recycle").at("count_after") == 2,
               "second recycle must record the slot/head/count transition from the preserved identity");
     }
+    // 9b. ApplyBurn -> DieWithLoot -> DieNoLoot bounded frame facts. Only the
+    //     locked callsite bytes plus the exact frame chain may classify this
+    //     removal as a direct death path; the store itself still runs for
+    //     every negative case.
+    {
+        LvzProbeClearCallsiteBytesForTest();
+        const uint8_t applyBurnCall[5] = {0xe8, 0x29, 0xd3, 0xff, 0xff};
+        const uint8_t dieNoLootCall[5] = {0xe8, 0x11, 0x02, 0x00, 0x00};
+        LvzProbeSetCallsiteBytesForTest(0x532FC2, applyBurnCall, 5);
+        LvzProbeSetCallsiteBytesForTest(0x5302FA, dieNoLootCall, 5);
+        const auto buildFrame = [](Machine& host, uint32_t dieWithLootReturn,
+                                   uint32_t applyBurnReturn) {
+            const uint32_t innerPoint = U32(host.scratch) + 0x40;
+            const uint32_t outerPoint = U32(host.scratch) + 0x80;
+            uint32_t value = outerPoint;
+            std::memcpy(host.scratch + 0x40, &value, 4);
+            value = dieWithLootReturn;
+            std::memcpy(host.scratch + 0x44, &value, 4);
+            value = 0;
+            std::memcpy(host.scratch + 0x80, &value, 4);
+            value = applyBurnReturn;
+            std::memcpy(host.scratch + 0x84, &value, 4);
+            return innerPoint;
+        };
+        Machine framed = machine;
+        const uint32_t inner = buildFrame(framed, 0x5302FF, 0x532FC7);
+        (void)RunOne(patched.addresses[5], framed, 0, 0, 0, inner, XmmSentinels());
+        auto batch = DrainLifecycleProbeBatch();
+        const auto removal = EventOfKind(batch, "zombie_removal_marked");
+        Check(removal.at("removal").at("frame").at("return_into_diewithloot") == 0x5302FF
+                  && removal.at("removal").at("frame").at("return_into_applyburn") == 0x532FC7
+                  && removal.at("removal").at("frame").at("callsite_bytes_match") == true,
+              "the locked ApplyBurn chain must be recorded as a validated frame fact");
+        // Foreign frame returns are recorded raw but never validated.
+        Machine foreign = machine;
+        const uint32_t foreignInner = buildFrame(foreign, 0x11111111, 0x532FC7);
+        (void)RunOne(patched.addresses[5], foreign, 0, 0, 0, foreignInner, XmmSentinels());
+        batch = DrainLifecycleProbeBatch();
+        Check(EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame").at(
+                  "return_into_diewithloot") == 0x11111111,
+              "foreign frame returns must be preserved raw");
+        // Missing frame: no frame facts are fabricated.
+        (void)RunOne(patched.addresses[5], machine, 0, 0, 0, 0, XmmSentinels());
+        batch = DrainLifecycleProbeBatch();
+        Check(EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame").at(
+                  "return_into_diewithloot").is_null(),
+              "a missing frame must stay null");
+        // Wrong callsite bytes invalidate the chain fact.
+        const uint8_t wrongCall[5] = {0x90, 0x90, 0x90, 0x90, 0x90};
+        LvzProbeSetCallsiteBytesForTest(0x532FC2, wrongCall, 5);
+        Machine wrongBytes = machine;
+        const uint32_t wrongInner = buildFrame(wrongBytes, 0x5302FF, 0x532FC7);
+        (void)RunOne(patched.addresses[5], wrongBytes, 0, 0, 0, wrongInner, XmmSentinels());
+        batch = DrainLifecycleProbeBatch();
+        Check(EventOfKind(batch, "zombie_removal_marked").at("removal").at("frame").at(
+                  "callsite_bytes_match") == false,
+              "a mismatching pinned callsite must invalidate the chain fact");
+        LvzProbeClearCallsiteBytesForTest();
+    }
+
     Check(LifecycleProbeStatus().at("healthy").get<bool>(), "capture must be healthy after the normal cases");
 
     // 3+4. Lost observations are injected only after the healthy window so the
@@ -599,6 +663,21 @@ int RunTests() {
               "a failed install must unregister the acquired handler");
         for (size_t index = 0; index < 3; ++index) ExpectWindowBytes(broken, index, "rollback of the partial install");
     }
+    // 15b. A failed install rollback must still expose and release its resources.
+    {
+        Pages broken = MakePages(false);
+        broken.window(1)[0] = 0x90;  // site 0 patches, site 1 signature fails
+        LvzProbeSetVirtualProtectFailureAfterForTest(3);  // the rollback protection fails
+        std::string rollback;
+        Check(!InstallLifecycleProbesForTest(broken.addresses, broken.continuations, broken.jumpTargets, rollback),
+              "a partial rollback failure must fail the install");
+        Check(LifecycleProbeResourcesOwned(), "a failed rollback must still expose owned resources");
+        Check(LifecycleProbesInstalled(), "the site-0 patch must still be owned");
+        Check(LvzProbeReaderProtectionInstalledForTest(), "the handler must stay registered");
+        LvzProbeSetVirtualProtectFailureAfterForTest(0);
+        Check(RemoveLifecycleProbes(error), error.c_str());
+        Check(!LifecycleProbeResourcesOwned(), "retry must release every owned resource");
+    }
     // 16. Incomplete recycle candidate: pending blocks removal, drain clears it.
     {
         Pages guardOnly = MakePages(false);
@@ -639,6 +718,9 @@ int RunTests() {
         Check(LvzProbeReaderHandlersRemovedForTest() == LvzProbeReaderHandlersAddedForTest(),
               "every acquired handler must be released");
     }
+    Check(!LifecycleProbeResourcesOwned(), "all probe resources must be released at the end");
+    Check(lvz::determinism::PinLifecycleProbeModule(), "module pin must succeed");
+    Check(lvz::determinism::LvzProbeHostModulePinnedForTest(), "module pin must be observable");
     std::string closeError;
     Host().OnPersisted(0);
     if (!Host().Close(&closeError))

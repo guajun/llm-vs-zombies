@@ -80,7 +80,9 @@ def probe_event(kind, sequence, *, entity=0x00020001, wave=0, on_board=True, sit
     if kind == "zombie_phase_transition":
         event["phase"] = phase or {"site": site or "phase-mowdown", "before": 0, "after": 3}
     elif kind == "zombie_removal_marked":
-        event["removal"] = {"source": "dienoloot_mdead_store", "before": 0, "after": 1}
+        event["removal"] = {"source": "dienoloot_mdead_store", "before": 0, "after": 1,
+                            "frame": {"return_into_diewithloot": None, "return_into_applyburn": None,
+                                      "callsite_bytes_match": False}}
     elif kind == "zombie_slot_recycle_candidate":
         event["recycle"] = recycle or {"state": "candidate", "slot": entity & 0xFFFF,
                                        "free_head_before": 0, "count_before": 2}
@@ -325,6 +327,22 @@ class ProbeContractTests(unittest.TestCase):
                 report = lifecycle_events.validate(self.audit, require_close=True)
                 self.assertEqual(report["status"], "failed")
                 self.problem(report, counter)
+
+    def test_removal_frame_contract(self):
+        events = self.valid_events()
+        events[2]["removal"]["frame"] = {"return_into_diewithloot": 0x5302FF,
+                                         "return_into_applyburn": 0x532FC7,
+                                         "callsite_bytes_match": True}
+        self.write(events)
+        report = lifecycle_events.validate(self.audit, require_close=True)
+        self.assertEqual(report["status"], "valid", report["problems"])
+        events = self.valid_events()
+        events[2]["removal"]["frame"] = {"return_into_diewithloot": "no", "return_into_applyburn": None,
+                                          "callsite_bytes_match": "yes"}
+        self.write(events)
+        report = lifecycle_events.validate(self.audit, require_close=True)
+        self.assertEqual(report["status"], "failed")
+        self.problem(report, "frame")
 
     def test_offboard_fact_is_allowed(self):
         events = [v1_event(1), probe_event("zombie_phase_transition", 2, site="phase-mowdown",

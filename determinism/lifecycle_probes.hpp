@@ -29,6 +29,14 @@ bool InstallLifecycleProbes(std::string& error);
 // protection/restore fails for any site.
 bool RemoveLifecycleProbes(std::string& error);
 bool LifecycleProbesInstalled() noexcept;
+// True while any patch, the reader handler or an in-flight shim still belongs
+// to this module. Cleanup callers must consult this instead of a local flag:
+// a failed install rollback can own resources while the install call returned
+// false.
+bool LifecycleProbeResourcesOwned() noexcept;
+// Pins this module in the process (GetModuleHandleEx ..PIN) so a failed
+// removal is enforced, not merely reported.
+bool PinLifecycleProbeModule() noexcept;
 // Single destructive drain of the bounded probe queue; returns the v2 event
 // projection and records delivered counts on the shared host.
 nlohmann::json DrainLifecycleProbeBatch();
@@ -47,5 +55,9 @@ bool LvzProbeReaderProtectionInstalledForTest() noexcept;
 uint64_t LvzProbeReaderHandlersAddedForTest() noexcept;
 uint64_t LvzProbeReaderHandlersRemovedForTest() noexcept;
 void LvzProbeSetInFlightForTest(uint32_t value) noexcept;
+void LvzProbeSetVirtualProtectFailureAfterForTest(uint32_t callIndex) noexcept;
+bool LvzProbeHostModulePinnedForTest() noexcept;
+void LvzProbeSetCallsiteBytesForTest(uint32_t address, const uint8_t* bytes, uint32_t count) noexcept;
+void LvzProbeClearCallsiteBytesForTest() noexcept;
 #endif
 }

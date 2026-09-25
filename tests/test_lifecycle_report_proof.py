@@ -80,7 +80,11 @@ def build_run(base: Path, *, with_receipt: bool = True, truncate: bool = False,
     manifest_bytes = (json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
     (audit / "manifest.json").write_bytes(manifest_bytes)
 
-    data = b"".join((json.dumps(envelope(index, event), separators=(",", ":")) + "\n").encode("utf-8")
+    def child_envelope(index, event):
+        value = envelope(index, event)
+        value["run_id"] = run.name
+        return value
+    data = b"".join((json.dumps(child_envelope(index, event), separators=(",", ":")) + "\n").encode("utf-8")
                     for index, event in enumerate(events))
     if truncate:
         data = data[:-1]
@@ -92,7 +96,7 @@ def build_run(base: Path, *, with_receipt: bool = True, truncate: bool = False,
               "reader_protected": False, "pending_callbacks": 0}
     if with_receipt:
         receipt = {
-            "schema": lifecycle_events.PROBE_RECEIPT_SCHEMA, "run_id": "run-probe",
+            "schema": lifecycle_events.PROBE_RECEIPT_SCHEMA, "run_id": run.name,
             "branch_id": "branch-probe", "session_id": 7,
             "sequence_domain": lifecycle_events.SEQUENCE_DOMAIN,
             "envelope_schema": lifecycle_events.ENVELOPE_SCHEMA,
@@ -130,13 +134,29 @@ def build_run(base: Path, *, with_receipt: bool = True, truncate: bool = False,
     (run / "experiment-end.json").write_text(json.dumps({
         "final_observation": {"version": endpoint}, "maximum_wave": 2, "full_cycle": True}),
         encoding="utf-8")
-    plan = {"schema": "lvz.evaluation-plan.v2", "scenario": "jingdian12", "seeds": [42],
-            "stop_when": {"wave_at_least": 2}, "tick_budget": 2000, "cold_starts": 1}
+    # The captured initial boundary and the run/build identity that the frozen
+    # plan and its raw identity binding must agree with.
+    (run / "replay-initial.json").write_text(json.dumps({
+        "observation": {"version": {"epoch": 1, "tick": 0, "revision": 0},
+                        "game_clock": 0}}), encoding="utf-8")
+    (run / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "run_id": run.name, "status": "recording",
+        "implementation": {"recorder_sha256": "b" * 64}}), encoding="utf-8")
+    # The real frozen issue99 plan and the serialization run_suite writes.
+    from dataclasses import asdict
+
+    from llm_vs_zombies import evaluation
+    plan_path = ROOT / "experiments" / "plans" / "issue99-shovel-control.json"
+    normalized = asdict(evaluation.Plan.load(plan_path))
     suite = runs / "issue111-d-probe-on-a"
     suite.mkdir()
-    (suite / "plan.json").write_text(json.dumps(plan, sort_keys=True) + "\n", encoding="utf-8")
-    plan_path = base / "frozen-plan.json"
-    plan_path.write_text(json.dumps(plan, sort_keys=True) + "\n", encoding="utf-8")
+    (suite / "plan.json").write_text(json.dumps(normalized, sort_keys=True) + "\n", encoding="utf-8")
+    (suite / "lifecycle-plan-binding.json").write_text(json.dumps({
+        "schema": "lvz.lifecycle-plan-binding.v1",
+        "raw_plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        "plan": "experiments/plans/issue99-shovel-control.json",
+        "mode": "on", "probes": "on", "single_cold": True,
+        "recorder_sha256": "b" * 64}) + "\n", encoding="utf-8")
     return run, suite, plan_path
 
 
@@ -154,7 +174,7 @@ class ReportProofTests(unittest.TestCase):
         self.assertTrue(capture["first_kill"]["proven"], capture["first_kill"])
         self.assertTrue(all(capture["first_kill"]["prerequisites"].values()),
                         capture["first_kill"]["prerequisites"])
-        self.assertEqual(capture["summary"]["same_call_lifetimes"], 2)
+        self.assertEqual(capture["summary"]["same_call_lifetimes"], 1)
         self.assertEqual(capture["summary"]["initialization_facts"], 1)
 
     def test_missing_receipt_and_truncated_stream_do_not_prove(self):
@@ -181,6 +201,19 @@ class ReportProofTests(unittest.TestCase):
         self.assertFalse(report2["first_kill"]["proven"])
         self.assertTrue(any("does not end" in problem
                             for problem in report2["coverage"]["full_window_problems"]))
+
+    def test_audit_directory_input_and_sealed_evidence_keep_the_proof(self):
+        from llm_vs_zombies import evidence_codec
+        run, _, plan_path = build_run(self.base)
+        as_run = lifecycle_report.report_for_run(run, plan=plan_path)
+        as_audit = lifecycle_report.report_for_run(run / "audit", plan=plan_path)
+        self.assertTrue(as_audit["first_kill"]["proven"], as_audit["first_kill"])
+        self.assertEqual(as_run["capture_facts"], as_audit["capture_facts"])
+        evidence_codec.compress_evidence(run / "audit")
+        sealed = lifecycle_report.report_for_run(run, plan=plan_path)
+        self.assertTrue(sealed["first_kill"]["proven"], sealed["first_kill"])
+        self.assertEqual(as_run["capture_facts"], sealed["capture_facts"])
+        self.assertEqual(as_run["first_kill"], sealed["first_kill"])
 
     def test_cli_reports_proof_and_refuses_broken_coverage(self):
         script = ROOT / "tools" / "issue111_lifecycle_report.py"
