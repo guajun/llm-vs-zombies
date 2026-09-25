@@ -748,10 +748,9 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
         full_window, window_problems = _full_window_evidence(run_directory, audit_directory, snapshots,
                                                              plan, plan_binding)
         binding_mode_problems: list[str] = []
-        for candidate in _plan_binding_paths(run_directory, audit_directory.parent
-                                             / (run_directory.name.rsplit("-s", 1)[0]
-                                                if "-s" in run_directory.name else run_directory.name),
-                                             plan_binding):
+        suite_directory = run_directory.parent / (run_directory.name.rsplit("-s", 1)[0]
+                                                   if "-s" in run_directory.name else run_directory.name)
+        for candidate in _plan_binding_paths(run_directory, suite_directory, plan_binding):
             if not candidate.is_file():
                 continue
             try:
