@@ -310,7 +310,8 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
     prerequisites = (coverage.get("receipt_valid") is True and coverage.get("probe_capability") is True
                      and initialization_capture and coverage.get("full_window") is True
                      and coverage.get("health_clean") is True)
-    proven = bool(first) and not blocking and not unhealthy and prerequisites
+    proven = (bool(first) and not blocking and not unhealthy and prerequisites
+              and not (window_declared and uncontrolled_death_evidence))
     return {
         "facts": facts,
         "entities": {identifier: state for identifier, state in sorted(entities.items())},
@@ -930,7 +931,8 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
                                                                      else "disabled"):
                 binding_mode_problems.append("the lifecycle capability does not match the prepared mode arm")
             break
-    window_snapshots = snapshots[window_anchor:] if window_anchor is not None else snapshots
+    window_snapshots = (snapshots[window_anchor:window_end_index + 1 if window_end_index is not None else None]
+                        if window_anchor is not None else snapshots)
     report = analyze_snapshots(window_snapshots, coverage=coverage)
     report["source"] = {"directory": str(audit_directory), "target": manifest.get("target"),
                         "boundaries": len(snapshots), "window_start_index": window_anchor,

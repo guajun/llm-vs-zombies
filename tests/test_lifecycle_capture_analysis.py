@@ -269,6 +269,14 @@ class CaptureAnalysisTests(unittest.TestCase):
                                        coverage=FULL_COVERAGE)
         self.assertEqual(report["summary"]["fact_count"], 1)
 
+    def test_later_uncontrolled_death_cannot_be_ordered_after_first_candidate(self):
+        report = analyze_capture_facts([
+            event("zombie_phase_transition", 1),
+            event("zombie_removal_marked", 2, entity=OTHER, version=False),
+        ], coverage=FULL_COVERAGE)
+        self.assertFalse(report["first_kill"]["proven"])
+        self.assertTrue(any("uncontrolled" in reason for reason in report["first_kill"]["reasons"]))
+
 
 if __name__ == "__main__":
     unittest.main()

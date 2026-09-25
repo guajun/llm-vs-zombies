@@ -150,6 +150,34 @@ class ScopedCompareTests(unittest.TestCase):
         self.assertFalse(scoped["equal"])
         self.assertEqual(scoped["actions"]["reason"], "action_method")
 
+    def test_resource_telemetry_is_not_a_gameplay_divergence_but_stop_is(self):
+        from llm_vs_zombies import action_compare
+        for run, elapsed, free in ((self.on_run, 10.0, 9000000000),
+                                   (self.on_b, 12.4, 8999999000)):
+            path = run / "experiment-end.json"
+            endpoint = json.loads(path.read_bytes())
+            endpoint["resources"] = {
+                "wall_budget_seconds": 21600, "elapsed_seconds": elapsed,
+                "samples": [{"version": {"epoch": 0, "tick": 0, "revision": 0},
+                             "elapsed_seconds": elapsed, "free_bytes": free,
+                             "min_free_bytes": 2147483648}], "stop": None}
+            path.write_text(json.dumps(endpoint), encoding="utf-8")
+        result = action_compare.compare_actions(self.on_run, self.on_b)
+        self.assertTrue(result["equal"], result)
+        self.assertIn("experiment_end.resources.elapsed_seconds", result["normalized_resource_telemetry"])
+        path = self.on_b / "experiment-end.json"
+        endpoint = json.loads(path.read_bytes())
+        endpoint["resources"]["stop"] = {"reason": "disk_reserve_stop"}
+        path.write_text(json.dumps(endpoint), encoding="utf-8")
+        self.assertFalse(action_compare.compare_actions(self.on_run, self.on_b)["equal"])
+
+    def test_missing_endpoint_is_not_an_equal_outcome(self):
+        from llm_vs_zombies import action_compare
+        (self.on_run / "experiment-end.json").unlink()
+        (self.on_b / "experiment-end.json").unlink()
+        with self.assertRaises(action_compare.ActionCompareError):
+            action_compare.compare_actions(self.on_run, self.on_b)
+
     def test_real_particle_identity_mismatch_is_reported(self):
         from tests.test_audit_compare import particle_audit
         left = self.base / "p-left" / "audit"

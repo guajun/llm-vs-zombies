@@ -13,6 +13,11 @@ from pathlib import Path
 from . import audit_compare, engine_replay
 
 IDENTITY_KEYS = {"request_id", "run_id", "branch_id", "session_id", "recorded_at"}
+RESOURCE_TELEMETRY = ["experiment_end.resources.elapsed_seconds",
+                      "experiment_end.resources.samples[*].elapsed_seconds",
+                      "experiment_end.resources.samples[*].free_bytes",
+                      "experiment_end.resources.stop.elapsed_seconds",
+                      "experiment_end.resources.stop.free_bytes"]
 
 
 class ActionCompareError(ValueError):
@@ -95,6 +100,21 @@ def _outcome(run: Path, initial: dict) -> dict:
             value["experiment_end"] = _normalize(json.loads(end.read_bytes()))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ActionCompareError(f"executed endpoint is unreadable: {exc}") from exc
+        # Host timing and available disk capacity are diagnostics, not game
+        # outcomes. Preserve budget declarations, sample versions and stop
+        # reasons; normalize only these explicitly named telemetry fields.
+        resources = value["experiment_end"].get("resources")
+        if isinstance(resources, dict):
+            resources.pop("elapsed_seconds", None)
+            samples = resources.get("samples", [])
+            entries = list(samples) if isinstance(samples, list) else []
+            entries.append(resources.get("stop"))
+            for entry in entries:
+                if isinstance(entry, dict):
+                    entry.pop("elapsed_seconds", None)
+                    entry.pop("free_bytes", None)
+    else:
+        raise ActionCompareError(f"executed endpoint is missing: {end}")
     return value
 
 
@@ -104,12 +124,14 @@ def compare_actions(left_run: str | Path, right_run: str | Path) -> dict:
     left_initial, left_steps = load_action_transcript(left_run)
     right_initial, right_steps = load_action_transcript(right_run)
     report = compare_action_steps(left_steps, right_steps)
+    report["normalized_resource_telemetry"] = RESOURCE_TELEMETRY
     if not report["equal"]:
         return report
     difference = audit_compare.first_difference(_outcome(left_run, left_initial),
                                                 _outcome(right_run, right_initial))
     if difference:
         return {"equal": False, "reason": "outcome", "difference": difference,
-                "scope": "initial observation/recipe and executed endpoint"}
+                "scope": "initial observation/recipe and executed endpoint",
+                "normalized_resource_telemetry": RESOURCE_TELEMETRY}
     report["outcome"] = "initial observation/recipe and executed endpoint compared"
     return report
