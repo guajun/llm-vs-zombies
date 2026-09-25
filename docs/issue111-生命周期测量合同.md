@@ -204,6 +204,12 @@ invocation_id 与 depth，仅顶层 parent_invocation_id 为 null）、`entity{i
 
 ## 9. 需要维护者确认的问题（Junior 关卡）
 
+死亡/移除/回收的候选原生路径、字节签名与具体疑点已整理到
+[`issue111-原生候选证据.md`](issue111-原生候选证据.md)（机器可读：
+[`issue111-原生候选证据.json`](issue111-原生候选证据.json)，复核命令
+`python tools/issue111_native_candidates.py verify --exe <locked exe>`）。**该文件通过维护者审查前，
+本节三个捕获点仍保持 `review_required`，不得实现生产 hook。**
+
 以下问题未回答前，阶段 B/C 不实现对应生产 hook：
 
 1. 死亡路径：State 1/2/3 的写入点对应哪些原始函数/RVA？是否存在唯一死亡入口，还是多个分支？

@@ -1,0 +1,167 @@
+{
+  "schema": "lvz.issue111-stage-d-plan.v1",
+  "issue": 111,
+  "frozen": "2026-09-26",
+  "status": "frozen_pending_maintainer_review",
+  "based_on": {
+    "issue": 99,
+    "plan": "experiments/plans/issue99-shovel-control.json",
+    "stop_when": {
+      "wave_at_least": 2
+    },
+    "tick_budget": 2000,
+    "scenario": "jingdian12",
+    "seed": 42,
+    "historical_reference_tick": 1201,
+    "note": "Endpoint definition and tick hard cap are copied from the frozen #99 control plan and must not change to chase a reproduction number."
+  },
+  "mode_switch": {
+    "same_build_for_all_runs": true,
+    "env_var": "LVZ_LIFECYCLE_RECORDING",
+    "gates": "lifecycle persistence adapter only (lifecycle-events.jsonl plus close receipt)",
+    "not_gated": "the ZombieInitialize probe and the legacy lvz.spawn.v1 projection are installed by the audit host in both modes",
+    "modes": [
+      {
+        "name": "off",
+        "value": "0",
+        "purpose": "manifest declares lifecycle capability enabled=false and no lifecycle file exists"
+      },
+      {
+        "name": "on",
+        "value": "1",
+        "purpose": "lifecycle persistence enabled; lifecycle-events.jsonl plus atomic close receipt"
+      }
+    ],
+    "limitations": [
+      "off/on cannot measure instrumented-vs-uninstrumented gameplay because the probe is installed in both modes",
+      "a true instrumentation off/on comparison needs a separate build without the probe (new build identity); no build-time switch exists",
+      "death/removal/recycle facts are not covered by either mode until those capture points pass the candidate-review gate"
+    ],
+    "comparison_rule": "Compare common evidence only (boundary state deltas, checksums, RNG, actions, outcomes). The lifecycle_recording capability block and lifecycle files are mode metadata and are excluded from gameplay comparison."
+  },
+  "runs": [
+    {
+      "name": "issue111-d-off-a",
+      "mode": "off",
+      "role": "persistence-adapter-off control A"
+    },
+    {
+      "name": "issue111-d-off-b",
+      "mode": "off",
+      "role": "persistence-adapter-off control B (repeatability)"
+    },
+    {
+      "name": "issue111-d-on-a",
+      "mode": "on",
+      "role": "persistence-adapter-on cold start A"
+    },
+    {
+      "name": "issue111-d-on-b",
+      "mode": "on",
+      "role": "persistence-adapter-on cold start B (repeatability)"
+    }
+  ],
+  "evaluation_child_mapping": {
+    "note": "Each name is one evaluation suite; run_suite creates these child directories (seed 42, cold_starts=1). They are child runs of a suite, not four separate trajectories.",
+    "per_suite": [
+      "<suite>-s42-c0",
+      "<suite>-s42-c1",
+      "<suite>-s42-recovery"
+    ],
+    "kinds": {
+      "<suite>-s42-c0": "source trajectory",
+      "<suite>-s42-c1": "cold replay",
+      "<suite>-s42-recovery": "disconnect recovery probe"
+    }
+  },
+  "comparisons": [
+    {
+      "name": "control_repeatability",
+      "left": "issue111-d-off-a",
+      "right": "issue111-d-off-b",
+      "require": "common boundary/state/RNG/action equality within the frozen window",
+      "tool": "tools/issue111_lifecycle_compare.py",
+      "normalization": [
+        "run_id",
+        "branch_id",
+        "session_id only"
+      ],
+      "limits": "facts, counters and sequence values are never stripped"
+    },
+    {
+      "name": "mode_repeatability",
+      "left": "issue111-d-on-a",
+      "right": "issue111-d-on-b",
+      "require": "common boundary/state/RNG/action equality plus valid lifecycle receipt in every on child run",
+      "tool": "tools/issue111_lifecycle_compare.py",
+      "normalization": [
+        "run_id",
+        "branch_id",
+        "session_id only"
+      ],
+      "limits": "facts, counters and sequence values are never stripped"
+    },
+    {
+      "name": "persistence_adapter_non_perturbation",
+      "left": "issue111-d-off-a",
+      "right": "issue111-d-on-a",
+      "require": "first divergence located and reported on common evidence; not a pass/fail on event-stream difference alone; the probe is present in both modes",
+      "tool": "tools/issue111_lifecycle_compare.py",
+      "normalization": [
+        "run_id",
+        "branch_id",
+        "session_id only"
+      ],
+      "limits": "facts, counters and sequence values are never stripped"
+    },
+    {
+      "name": "tick940_unknown_path",
+      "left": "issue111-d-on-a",
+      "right": "issue111-d-on-b",
+      "require": "scan the whole declared window for removed-without-death-stage entities and report coordinates; must not assume 33 objects; capture-level claims stay unavailable without reviewed death/removal hooks",
+      "tool": "tools/issue111_lifecycle_compare.py",
+      "normalization": [
+        "run_id",
+        "branch_id",
+        "session_id only"
+      ],
+      "limits": "facts, counters and sequence values are never stripped"
+    }
+  ],
+  "resource_limits": {
+    "min_free_bytes": 4294967296,
+    "max_parallel_game_processes": 1,
+    "timeout_seconds": 900,
+    "tick_cap": 2000
+  },
+  "verdicts": [
+    "capture completeness: valid lifecycle receipts plus strict closed audit for every expected child run; death/removal capture is unavailable until the candidate-review gate closes",
+    "persistence-adapter non-perturbation (never instrumentation non-perturbation): resource/contract gate is enforced by the run entry, common evidence equality or first divergence with range",
+    "two-run repeatability: on-a children vs on-b children on common evidence",
+    "first-kill sufficiency: reported by tools/issue111_lifecycle_report.py; false while death/removal capture points are missing"
+  ],
+  "forbidden": [
+    "overwriting or modifying the four issue #99 trajectories, reports or seals",
+    "starting more than one game process at a time",
+    "changing stop_when, tick_budget or the declared endpoint after seeing results",
+    "installing death/removal/recycle hooks before the candidate-review gate closes",
+    "claiming instrumentation off/on from the persistence switch",
+    "treating event-stream differences alone as an instrumentation failure or as a gameplay fork",
+    "claiming a full-window first kill without death/removal capture and call-internal ordering"
+  ],
+  "required_reviews": [
+    "maintainer review of docs/issue111-原生候选证据.md before any death/removal/recycle production hook",
+    "maintainer acceptance that stage D may run with only the merged initialization probe if the candidate gate is still open; the tick-940 investigation then reports unavailable at capture level"
+  ],
+  "commands": [
+    "python tools/issue111_stage_d.py --root . check",
+    "python tools/issue111_stage_d.py --root . doctor --require-game",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --skip-build",
+    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-on-a",
+    "python tools/issue111_lifecycle_report.py experiments/runs/issue111-d-on-a --out work/issue111-d/on-a.json",
+    "python tools/issue111_lifecycle_compare.py experiments/runs/issue111-d-off-a experiments/runs/issue111-d-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . check --run issue111-d-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-on-a"
+  ]
+}

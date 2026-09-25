@@ -1,0 +1,769 @@
+{
+  "schema": "lvz.native-candidates.v1",
+  "target": {
+    "name": "PvZ 1.0.0.1051 EN (local-engine extracted executable)",
+    "sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322",
+    "wrapper_sha256": "9397ca2dc3a4560eba5f87aef40fd800786ba0312716729ccbdbda185abee27d",
+    "image_base": "0x400000",
+    "avz_commit": "c42676c269b5b482a1eb9203a5b979e9d8a2a5c7"
+  },
+  "issue": 111,
+  "generated": "2026-09-26",
+  "status": "candidate_review_required",
+  "reviewed_by": null,
+  "sources": {
+    "locked_image_sha256": "f9669af338964787a3785a7895791297d599295b8bb669b0db49443f736a1322",
+    "avz_commit": "c42676c269b5b482a1eb9203a5b979e9d8a2a5c7",
+    "decompilation": {
+      "repository": "https://github.com/Patoke/re-plants-vs-zombies",
+      "commit": "c4692036c5e11d227c8fb7c593b734dac96da028",
+      "file": "SexyAppFramework/../Lawn/Zombie.cpp (Zombie.cpp)",
+      "role": "research aid; locked-binary disassembly remains authoritative",
+      "excerpts_used": [
+        "ZamboniDeath mZombiePhase = PHASE_ZOMBIE_DYING in the DAMAGE_SPIKE branch",
+        "CatapultDeath mZombiePhase = PHASE_ZOMBIE_DYING in the DAMAGE_SPIKE branch",
+        "MowDown mZombiePhase = PHASE_ZOMBIE_MOWERED then DropLoot",
+        "ApplyBurn mZombiePhase = PHASE_ZOMBIE_BURNED; DropLoot; DieWithLoot for some phases",
+        "PlayDeathAnim mZombiePhase = PHASE_ZOMBIE_DYING; DieNoLoot when no death anim",
+        "DropLoot is loot only; DieWithLoot = DieNoLoot + DropLoot",
+        "IsOnBoard = mFromWave != ZOMBIE_WAVE_CUTSCENE (-3) && != ZOMBIE_WAVE_UI (-2)",
+        "StopZombieSound performs foley callbacks/iteration",
+        "UpdateZombieGatlingHead creates a Projectile via AddProjectile and writes its +0x28"
+      ]
+    },
+    "wiki": {
+      "url": "https://wiki.pvz1.com/doku.php?id=%E6%8A%80%E6%9C%AF:%E5%86%85%E5%AD%98%E5%9F%BA%E5%9D%80",
+      "role": "community offset reference for field meaning (+0x28 state/animation, +0x6C wave, +0xBA head flag, +0xBD water, projectile +0x28)",
+      "note": "offsets alone are never used as identity; each candidate is cross-checked against object provenance and the locked disassembly"
+    }
+  },
+  "method": "Read-only disassembly of the locked executable (llvm-objdump 23, LLVM-MinGW 20260908) cross-referenced with the pinned AvZ headers and the pinned public decompilation at the exact commit. No game process, no live inspection, no hook installed. Third-party source is referenced, not vendored.",
+  "protocol_notes": [
+    "All VAs are absolute in the locked image at 0x400000; RVA = VA - 0x400000.",
+    "Object-class filter: locate the object pointer in the board pools (zombie stride 0x15c at board+0x90, projectile stride 0x94 at board+0xC8, plant stride 0x14c at board+0xAC) and read the +0x6C wave marker; only a zombie-pool object with wave != -2/-3 is a board zombie. Pool membership alone does NOT prove IsOnBoard.",
+    "Raw phase-transition facts are captured at the exact store sites with the observed before/after values; classification (death stage vs other phase) happens offline with explicit counters. Per-id dedup is not applied at capture time.",
+    "No production hook may be implemented from this file alone; the issue's junior gate requires maintainer review of this design first."
+  ],
+  "interception_plan": [
+    {
+      "fact": "zombie_phase_transition_raw",
+      "strategy": "Instruction-granular MinHook at the exact +0x28 store sites (0x533377, 0x532F5F, 0x532A62, 0x52EC92, 0x52EA38, plus any further zombie stores found by the object-class filter). Each hook reads the store value and the zombie pointer from the site's register, records the raw before/after phase and the site VA, then re-executes the relocated instructions. Offline classification selects PHASE_ZOMBIE_DYING/BURNED/MOWERED (1/2/3) and reports counters for every other transition.",
+      "rationale": "Function entry/exit observation cannot locate the internal store relative to nested removals, so it cannot preserve ordering; exact-store capture assigns capture_sequence at the store itself and keeps raw facts instead of hiding repeats.",
+      "abi": "per-site register: 0x533377/0x532A62/0x52EC92/0x52EA38 use EDI, 0x532F5F uses ESI; short stores (3 bytes) are relocated with following instructions until >=5 bytes, and branch targets into the relocated window must be verified absent.",
+      "board_filter": "pool/stride object-class check plus +0x6C wave marker; record both in every event.",
+      "rejected_alternatives": [
+        "function entry/exit net-diff (cannot order internal stores)",
+        "hooking DropLoot as death completion (side effect, not a transition)",
+        "per-id dedup at capture time (would hide repeated facts)"
+      ]
+    },
+    {
+      "fact": "zombie_removal_marked",
+      "strategy": "Instruction-granular hook at 0x530602 (`movb $0x1, 0xec(%edi)`, 7 bytes) with the object-class filter; record the mDead 0->1 transition and the site. Optionally pair with a DieNoLoot entry event for provenance, but the store is the fact.",
+      "rationale": "Entry-only observation of DieNoLoot cannot order the store against nested work; the store is the unique mDead writer.",
+      "abi": "EDI = AZombie* at the store; the 7-byte store is MinHook-safe.",
+      "board_filter": "pool/stride object-class check plus +0x6C wave marker.",
+      "rejected_alternatives": [
+        "DieNoLoot entry alone as the fact",
+        "pool-pointer-only IsOnBoard filter (preview objects may share the pool)"
+      ]
+    },
+    {
+      "fact": "zombie_slot_recycle_committed",
+      "strategy": "Paired mid-function hooks inside the sweep: candidate read at 0x41BBA9 (7-byte guard; EDI = zombie; capture full id) and commit at 0x41BC23 (5-byte jmp after the free-list update; capture slot, free_head, count, and the candidate event id). Offline pairing requires both events in the same sweep iteration; never label the entry as a completed recycle.",
+      "rationale": "The free-list update happens between the two points; the commit point is after the stores and instruction-aligned for MinHook. StopZombieSound entry is rejected because it only stops sounds.",
+      "abi": "0x41BBA9 is a mid-function compare with EDI = zombie; 0x41BC23 is a 5-byte jmp; ESI = Board* across the sweep.",
+      "board_filter": "the sweep branch is already the zombie pool; still record the +0x6C marker of the candidate entity.",
+      "rejected_alternatives": [
+        "StopZombieSound entry as a recycle trigger",
+        "labeling entry-only observation as a completed free",
+        "hooking every pool free (plants/grid items)"
+      ]
+    }
+  ],
+  "residual_questions": [
+    "0x52EA38 is a 3-byte register store; confirm EBX=PHASE_ZOMBIE_DYING at that point and verify no branch targets the relocation window.",
+    "Whether further zombie +0x28 stores exist beyond the enumerated sites after applying the pool/stride object-class classifier (the immediate/register scan found many non-zombie writers).",
+    "Exact source identity of the retire sweep (Board.cpp) and confirmation that no other image path frees zombie slots.",
+    "Dynamic confirmation that preview/menu objects never pass the pool+wave filter.",
+    "Attachment parts (+0xF4) are separate pool entities; offline classification must decide how to fold multiple raw facts for one logical entity."
+  ],
+  "candidates": [
+    {
+      "id": "zombie-removal-dienoloot",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::DieNoLoot",
+      "entry_va": "0x530510",
+      "rva": "0x130510",
+      "function_start_va": "0x530510",
+      "bytes32": "558bec83e4f851578bf957e8300300008b8f1001000085c97441a1b89e6a008b",
+      "head": [
+        "530510: pushl\t%ebp",
+        "530511: movl\t%esp, %ebp",
+        "530513: andl\t$-0x8, %esp",
+        "530516: pushl\t%ecx",
+        "530517: pushl\t%edi",
+        "530518: movl\t%ecx, %edi",
+        "53051a: pushl\t%edi",
+        "53051b: calll\t0x530850 <.text+0x12f850>"
+      ],
+      "abi": "thiscall: ECX = AZombie*; plain call, callee restores ESP",
+      "semantics": "Marks a board/preview zombie dead; the free-list update happens later in the sweep, not here.",
+      "observed": [
+        "Calls StopZombieSound (0x530850), AttachmentDie (0x404FC0), removes body/mowered/special-head reanimations.",
+        "Sets mDead (+0xEC) to 1 at 0x530602 - the only observed writer of that byte in .text.",
+        "Type-specific follow-ups: BobsledDie (0x530310) for ZOMBIE_BOBSLED, BungeeDie (0x530480), BossDie.",
+        "Does not write mZombiePhase (+0x28) and does not free the pool slot."
+      ],
+      "callers": [
+        "0x4019a8",
+        "0x4019dd",
+        "0x40dedf",
+        "0x40df58",
+        "0x40df9a",
+        "0x4134e4",
+        "0x413523",
+        "0x421dda",
+        "0x429ea1",
+        "0x45866d",
+        "0x46030a",
+        "0x524884",
+        "0x52528b",
+        "0x525bba",
+        "0x526cd2",
+        "0x527740",
+        "0x52a571",
+        "0x52aee2",
+        "0x52afba",
+        "0x52b2a0",
+        "0x52b30a",
+        "0x52eb8c",
+        "0x52ed39",
+        "0x5302fa",
+        "0x53035e",
+        "0x530390",
+        "0x533585",
+        "0x5336f1",
+        "0x533ecc",
+        "0x533f5e",
+        "0x536795"
+      ],
+      "candidate_classification": "Removal marker fact (mDead set). It is called from board deaths and preview cleanup; it is not a kill classification.",
+      "coverage_limits": [
+        "Called by preview/list clearers (0x401970, 0x40DEA0/0x40DF00/0x40DF70) and by board paths.",
+        "Does not distinguish death from non-death removal and does not recycle the slot.",
+        "A hook must use the +0x6C wave marker (IsOnBoard) rather than pool membership alone."
+      ],
+      "open_questions": [
+        "Confirm every board removal reaches this function (the sweep frees only after mDead is set).",
+        "Confirm the exact object-class filter at the store site (zombie pool + wave >= 0)."
+      ],
+      "board_preview": "mixed: shared by board deaths and preview/list cleanup; IsOnBoard() is `mFromWave (+0x6C) != -2 && != -3`",
+      "semantic_gate": "Exact store 0x530602 `movb $0x1, 0xec(%edi)` is the removal-mark fact; entry-only hooks cannot order nested work.",
+      "state_transition": "writes mDead 0->1 at 0x530602; no phase write; no repeat while mDead is already set (callers usually guard)",
+      "exit_effects": [
+        "stop sound / reanimation removal",
+        "type-specific DieNoLoot extensions",
+        "no loot, no slot free"
+      ],
+      "caller_classes": {
+        "preview_or_list": [
+          "0x4019a8",
+          "0x4019dd",
+          "0x40dedf",
+          "0x40df58",
+          "0x40df9a"
+        ],
+        "board_paths": [
+          "0x421dda",
+          "0x45866d",
+          "0x46030a",
+          "0x524884",
+          "0x52a571",
+          "0x52aee2",
+          "0x52afba",
+          "0x52b2a0",
+          "0x52b30a",
+          "0x52eb8c",
+          "0x52ed39",
+          "0x533585",
+          "0x5336f1",
+          "0x533ecc",
+          "0x533f5e",
+          "0x536795"
+        ],
+        "composites": [
+          "0x5302fa"
+        ],
+        "attached_parts": [
+          "0x53035e",
+          "0x530390"
+        ]
+      }
+    },
+    {
+      "id": "zombie-removal-diewithloot",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::DieWithLoot",
+      "entry_va": "0x5302f0",
+      "rva": "0x1302f0",
+      "function_start_va": "0x5302f0",
+      "bytes32": "558bec83e4f851568bf1e8110200008bc6e86afeffff5e8be55dc3cccccccccc",
+      "head": [
+        "5302f0: pushl\t%ebp",
+        "5302f1: movl\t%esp, %ebp",
+        "5302f3: andl\t$-0x8, %esp",
+        "5302f6: pushl\t%ecx",
+        "5302f7: pushl\t%esi",
+        "5302f8: movl\t%ecx, %esi",
+        "5302fa: calll\t0x530510 <.text+0x12f510>",
+        "5302ff: movl\t%esi, %eax"
+      ],
+      "abi": "thiscall: ECX = AZombie*",
+      "semantics": "Composite: DieNoLoot then DropLoot; five callers are the death/effect entry points.",
+      "observed": [
+        "Calls 0x530510 (DieNoLoot) with ECX=zombie, then 0x530170 (DropLoot) with EAX=zombie.",
+        "No separate state; it inherits DieNoLoot's mDead write."
+      ],
+      "callers": [
+        "0x4614f9",
+        "0x4679f7",
+        "0x52524f",
+        "0x532fc2",
+        "0x533e17"
+      ],
+      "candidate_classification": "Composite entry; useful as a provenance marker but the underlying facts are the DieNoLoot store and DropLoot.",
+      "coverage_limits": [
+        "Not called by every death path (PlayDeathAnim sets phase without loot; MowDown/ApplyBurn call DropLoot directly)."
+      ],
+      "open_questions": [
+        "Confirm caller classification against the decomp (Bungee, plant-side, gargantuar damage, etc.)."
+      ],
+      "board_preview": "board paths in all five observed callers (0x461320, 0x4679B0, 0x525180, 0x532B70, 0x5336B0)",
+      "semantic_gate": "Composite of the mDead fact and the loot call; no new field.",
+      "state_transition": "no own write; DieNoLoot's mDead 0->1 at 0x530602",
+      "exit_effects": [
+        "DieNoLoot side effects",
+        "DropLoot side effects"
+      ],
+      "caller_classes": {
+        "callers": [
+          "0x4614f9",
+          "0x4679f7",
+          "0x52524f",
+          "0x532fc2",
+          "0x533e17"
+        ]
+      }
+    },
+    {
+      "id": "zombie-loot-droploot",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::DropLoot",
+      "entry_va": "0x530170",
+      "rva": "0x130170",
+      "function_start_va": "0x530170",
+      "bytes32": "558bec83e4f883ec14538bd88b436c83f8fe56570f845301000083f8fd0f844a",
+      "head": [
+        "530170: pushl\t%ebp",
+        "530171: movl\t%esp, %ebp",
+        "530173: andl\t$-0x8, %esp",
+        "530176: subl\t$0x14, %esp",
+        "530179: pushl\t%ebx",
+        "53017a: movl\t%eax, %ebx",
+        "53017c: movl\t0x6c(%ebx), %eax",
+        "53017f: cmpl\t$-0x2, %eax"
+      ],
+      "abi": "register: EAX = AZombie*",
+      "semantics": "Loot/spawn-award side effect only; NOT death completion and not a phase transition.",
+      "observed": [
+        "Early return when !IsOnBoard() (mFromWave -2/-3).",
+        "Almanac seen; TrySpawnLevelAward; mDroppedLoot guard; Yeti special-case drops diamonds.",
+        "Called by DieWithLoot, MowDown, ApplyBurn and other paths that already set mDead or a dying phase."
+      ],
+      "callers": [
+        "0x421de1",
+        "0x458674",
+        "0x460311",
+        "0x525bc1",
+        "0x52a538",
+        "0x52aee9",
+        "0x52eb93",
+        "0x52ed40",
+        "0x530301",
+        "0x5317a4",
+        "0x532f70",
+        "0x533d75",
+        "0x533ed3",
+        "0x533f65",
+        "0x53530c",
+        "0x53679c"
+      ],
+      "candidate_classification": "Side-effect fact; never use it as the death/death-stage fact.",
+      "coverage_limits": [
+        "Called directly by non-composite paths (MowDown/ApplyBurn) and by DieWithLoot.",
+        "Call count is not a death count."
+      ],
+      "open_questions": [
+        "Confirm which callers are post-death versus still-alive phase paths."
+      ],
+      "board_preview": "board-only: entry returns for wave -2/-3 (preview) and uses board loot state",
+      "semantic_gate": "Drop is an effect on an already-decided path; mDroppedLoot makes it once per entity.",
+      "state_transition": "no field transition",
+      "exit_effects": [
+        "almanac/level award",
+        "loot coins",
+        "Yeti diamonds"
+      ],
+      "caller_classes": {
+        "board": [
+          "0x530301",
+          "0x532f70",
+          "0x52ed40",
+          "0x458674",
+          "0x421de1",
+          "0x460311",
+          "0x52a538",
+          "0x52aee9",
+          "0x52eb93",
+          "0x525bc1",
+          "0x5317a4",
+          "0x533d75",
+          "0x533ed3",
+          "0x533f65",
+          "0x53530c",
+          "0x53679c"
+        ]
+      }
+    },
+    {
+      "id": "zombie-sound-stopzombiesound",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::StopZombieSound",
+      "entry_va": "0x530850",
+      "rva": "0x130850",
+      "function_start_va": "0x530850",
+      "bytes32": "558b6c24088b452483f8085657740983f8090f85930000008b4d008b91680700",
+      "head": [
+        "530850: pushl\t%ebp",
+        "530851: movl\t0x8(%esp), %ebp",
+        "530855: movl\t0x24(%ebp), %eax",
+        "530858: cmpl\t$0x8, %eax",
+        "53085b: pushl\t%esi",
+        "53085c: pushl\t%edi",
+        "53085d: je\t0x530868 <.text+0x12f868>",
+        "53085f: cmpl\t$0x9, %eax"
+      ],
+      "abi": "cdecl: AZombie* pushed on the stack",
+      "semantics": "Stops dancer/box/digger songs; it iterates board zombies and performs callbacks. NOT a recycle or detach marker.",
+      "observed": [
+        "Dancer/backup-dancer branch iterates zombies and may StopFoley(FOLEY_DANCER).",
+        "mPlayingSong branch stops jack-in-the-box/digger foley.",
+        "Called before the mDead store in DieNoLoot and before the pool free in the sweep; entry alone says nothing about the free."
+      ],
+      "callers": [
+        "0x413245",
+        "0x41bbfa",
+        "0x41e566",
+        "0x461b61",
+        "0x526b1d",
+        "0x528280",
+        "0x528427",
+        "0x52a53e",
+        "0x53051b",
+        "0x53197c"
+      ],
+      "candidate_classification": "Sound side effect only. The earlier recycle-trigger proposal is rejected.",
+      "coverage_limits": [
+        "No field transition; not unique to removal."
+      ],
+      "open_questions": [
+        "If used for ordering at all, verify every caller."
+      ],
+      "board_preview": "both board and other contexts",
+      "semantic_gate": "no state or identity fact",
+      "state_transition": "no field transition",
+      "exit_effects": [
+        "foley stop callbacks",
+        "board zombie iteration"
+      ],
+      "caller_classes": {
+        "pre_free": [
+          "0x41bbfa"
+        ],
+        "die": [
+          "0x53051b"
+        ],
+        "other": [
+          "0x413245",
+          "0x41e566",
+          "0x461b61",
+          "0x526b1d",
+          "0x528280",
+          "0x528427",
+          "0x52a53e",
+          "0x53197c"
+        ]
+      }
+    },
+    {
+      "id": "zombie-death-phase-playdeathanim",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::PlayDeathAnim",
+      "entry_va": "0x533240",
+      "rva": "0x133240",
+      "function_start_va": "0x533240",
+      "bytes32": "83ec08535556578bf88b472883f8010f843503000083f8020f842c03000083f8",
+      "head": [
+        "533240: subl\t$0x8, %esp",
+        "533243: pushl\t%ebx",
+        "533244: pushl\t%ebp",
+        "533245: pushl\t%esi",
+        "533246: pushl\t%edi",
+        "533247: movl\t%eax, %edi",
+        "533249: movl\t0x28(%edi), %eax",
+        "53324c: cmpl\t$0x1, %eax"
+      ],
+      "abi": "register: EAX = AZombie*, one stack damage-flags argument",
+      "semantics": "Primary dying-phase transition; can instead call DieNoLoot when no death anim exists or the body must be removed.",
+      "observed": [
+        "Idempotent: returns when phase is already DYING/BURNED/MOWERED.",
+        "Calls DieNoLoot (0x533585) when the body has no anim_death, dolphin/snorkel cases, or DAMAGE_DOESNT_LEAVE_BODY for non-boss/gargantuar.",
+        "Main path writes mZombiePhase=PHASE_ZOMBIE_DYING (1) at 0x533377, then plays anim_death variants."
+      ],
+      "callers": [
+        "0x52a564",
+        "0x53179d",
+        "0x536251"
+      ],
+      "candidate_classification": "Death-phase transition candidate (phase 1).",
+      "coverage_limits": [
+        "Does not call DropLoot; loot arrives via MowDown/ApplyBurn or a later path.",
+        "Exit-only observation would hide the internal store; exact-store capture is required for ordering."
+      ],
+      "open_questions": [
+        "Confirm every damage-death path reaches PlayDeathAnim or one of the other phase stores."
+      ],
+      "board_preview": "board-only callers (zombie update/dispatch regions)",
+      "semantic_gate": "store 0x533377 `movl $0x1, 0x28(%edi)` (7 bytes) is the exact fact; entry guard gives idempotence.",
+      "state_transition": "phase -> 1 (DYING) at 0x533377, or DieNoLoot instead",
+      "exit_effects": [
+        "death animation selection",
+        "particles/foley",
+        "possible DieNoLoot (mDead)"
+      ],
+      "caller_classes": {
+        "board": [
+          "0x52a564",
+          "0x53179d",
+          "0x536251"
+        ]
+      }
+    },
+    {
+      "id": "zombie-death-phase-applyburn",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::ApplyBurn",
+      "entry_va": "0x532b70",
+      "rva": "0x132b70",
+      "function_start_va": "0x532b70",
+      "bytes32": "558bec83e4f883ec0c53568bf133db389eec000000570f855e040000837e2802",
+      "head": [
+        "532b70: pushl\t%ebp",
+        "532b71: movl\t%esp, %ebp",
+        "532b73: andl\t$-0x8, %esp",
+        "532b76: subl\t$0xc, %esp",
+        "532b79: pushl\t%ebx",
+        "532b7a: pushl\t%esi",
+        "532b7b: movl\t%ecx, %esi",
+        "532b7d: xorl\t%ebx, %ebx"
+      ],
+      "abi": "thiscall: ECX = AZombie*",
+      "semantics": "Burned-phase transition (2); high HP/type paths delegate to damage or DieWithLoot.",
+      "observed": [
+        "Idempotent: returns when mDead or phase==BURNED.",
+        "HP>=1800 or boss: TakeDamage instead.",
+        "Some phases/types call DieWithLoot; otherwise writes phase=BURNED (2), countdown 0x12C at 0x532F5F and calls DropLoot."
+      ],
+      "callers": [
+        "0x41d929",
+        "0x466528",
+        "0x5303d4",
+        "0x5303fb"
+      ],
+      "candidate_classification": "Death-phase transition candidate (phase 2).",
+      "coverage_limits": [
+        "Attached parts are separate pool entities and may each reach this function.",
+        "High-HP path does not set the phase here."
+      ],
+      "open_questions": [
+        "Confirm the 0x41D8A0/0x4664B0 callers' object types and the attachment dedup policy."
+      ],
+      "board_preview": "board paths observed (cleanup/plant-side/BobsledBurn attachment iteration)",
+      "semantic_gate": "store 0x532F5F `movl $0x2, 0x28(%esi)` (7 bytes) is the exact fact.",
+      "state_transition": "phase -> 2 (BURNED) at 0x532F5F; countdown 0x12C; or DieWithLoot",
+      "exit_effects": [
+        "DropLoot (0x530170)",
+        "charred reanimation",
+        "possible DieWithLoot (0x5302F0)"
+      ],
+      "caller_classes": {
+        "board_cleanup": [
+          "0x41d929"
+        ],
+        "plant_side": [
+          "0x466528"
+        ],
+        "attached_parts": [
+          "0x5303d4",
+          "0x5303fb"
+        ]
+      }
+    },
+    {
+      "id": "zombie-death-phase-mowdown",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::MowDown",
+      "entry_va": "0x5327e0",
+      "rva": "0x1327e0",
+      "function_start_va": "0x5327e0",
+      "bytes32": "5180bfec0000000053560f854a0300008b472883f8030f843e0300008b4f2483",
+      "head": [
+        "5327e0: pushl\t%ecx",
+        "5327e1: cmpb\t$0x0, 0xec(%edi)",
+        "5327e8: pushl\t%ebx",
+        "5327e9: pushl\t%esi",
+        "5327ea: jne\t0x532b3a <.text+0x131b3a>",
+        "5327f0: movl\t0x28(%edi), %eax",
+        "5327f3: cmpl\t$0x3, %eax",
+        "5327f6: je\t0x532b3a <.text+0x131b3a>"
+      ],
+      "abi": "register: EDI = AZombie*",
+      "semantics": "Mowered-phase transition (3); catapult/zamboni delegate to DieWithLoot.",
+      "observed": [
+        "Idempotent: returns when mDead or phase==MOWERED or boss.",
+        "Catapult/zamboni special-case DieWithLoot.",
+        "Some already-dying phases drop parts then DieWithLoot; the main path writes phase=MOWERED (3) at 0x532A62 and jumps to DropLoot (0x530170)."
+      ],
+      "callers": [
+        "0x4586d2"
+      ],
+      "candidate_classification": "Death-phase transition candidate (phase 3), called by the lawnmower handler.",
+      "coverage_limits": [
+        "The caller then calls DieNoLoot separately in the same handler (0x45866D)."
+      ],
+      "open_questions": [
+        "Confirm the lawnmower handler path and whether MowDown can be entered from other board paths."
+      ],
+      "board_preview": "board-only (lawnmower handler 0x458540)",
+      "semantic_gate": "store 0x532A62 `movl $0x3, 0x28(%edi)` (7 bytes) is the exact fact.",
+      "state_transition": "phase -> 3 (MOWERED) at 0x532A62, then DropLoot",
+      "exit_effects": [
+        "part drops",
+        "DropLoot (tail jump)"
+      ],
+      "caller_classes": {
+        "mower_handler": [
+          "0x4586d2"
+        ]
+      }
+    },
+    {
+      "id": "zombie-death-phase-zambonideath",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::ZamboniDeath",
+      "entry_va": "0x52e9a0",
+      "rva": "0x12e9a0",
+      "function_start_va": "0x52e9a0",
+      "bytes32": "558bec83e4f851f64508205356578bf88b070f8490010000d9eebb0100000088",
+      "head": [
+        "52e9a0: pushl\t%ebp",
+        "52e9a1: movl\t%esp, %ebp",
+        "52e9a3: andl\t$-0x8, %esp",
+        "52e9a6: pushl\t%ecx",
+        "52e9a7: testb\t$0x20, 0x8(%ebp)",
+        "52e9ab: pushl\t%ebx",
+        "52e9ac: pushl\t%esi",
+        "52e9ad: pushl\t%edi"
+      ],
+      "abi": "register: EDI = AZombie*, one stack damage-flags argument",
+      "semantics": "Zamboni phase transition on spike damage; otherwise inlined DieWithLoot.",
+      "observed": [
+        "Spike branch writes the dying phase via a register store at 0x52EA38 (`movl %ebx, 0x28(%edi)`), not an immediate store - immediate-only scans miss it.",
+        "Non-spike branch calls DieNoLoot (0x52EB8C) then DropLoot (0x52EB93) - the inlined DieWithLoot.",
+        "Also sets phase counter 0x118 and particles/foley."
+      ],
+      "callers": [
+        "0x53151b"
+      ],
+      "candidate_classification": "Death-phase transition candidate (phase 1) for the zamboni type; previously missed.",
+      "coverage_limits": [
+        "Register-sourced store value (EBX) must be read from the source/registers at capture time.",
+        "The 3-byte store needs instruction-granular relocation (see interception plan)."
+      ],
+      "open_questions": [
+        "Confirm EBX holds PHASE_ZOMBIE_DYING (1) at 0x52EA38 in the locked binary (source cross-check says yes)."
+      ],
+      "board_preview": "board-only (zamboni update path)",
+      "semantic_gate": "source `mZombiePhase = PHASE_ZOMBIE_DYING` in the spike branch; store at 0x52EA38 is register-sourced.",
+      "state_transition": "phase -> DYING on spike; else DieWithLoot",
+      "exit_effects": [
+        "tire pop foley",
+        "zamboni particles",
+        "DieWithLoot on non-spike"
+      ],
+      "caller_classes": {
+        "dispatcher": [
+          "0x53151b"
+        ]
+      }
+    },
+    {
+      "id": "zombie-death-phase-catapultdeath",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::CatapultDeath",
+      "entry_va": "0x52ec00",
+      "rva": "0x12ec00",
+      "function_start_va": "0x52ec00",
+      "bytes32": "558bec83e4f883ec08f645082056578bf80f84dc0000008b07d9ee80b8c50800",
+      "head": [
+        "52ec00: pushl\t%ebp",
+        "52ec01: movl\t%esp, %ebp",
+        "52ec03: andl\t$-0x8, %esp",
+        "52ec06: subl\t$0x8, %esp",
+        "52ec09: testb\t$0x20, 0x8(%ebp)",
+        "52ec0d: pushl\t%esi",
+        "52ec0e: pushl\t%edi",
+        "52ec0f: movl\t%eax, %edi"
+      ],
+      "abi": "register: EAX = AZombie*, one stack damage-flags argument (bit 0x20 = DAMAGE_SPIKE)",
+      "semantics": "Catapult phase transition on spike; otherwise inlined DieWithLoot.",
+      "observed": [
+        "Flag bit 0x20 set: writes phase=1 at 0x52EC92, countdown 0x118, bounce animation.",
+        "Flag clear: DieNoLoot (0x52ED39) then DropLoot (0x52ED40)."
+      ],
+      "callers": [
+        "0x53151b"
+      ],
+      "candidate_classification": "Death-phase transition candidate (phase 1) for the catapult type.",
+      "coverage_limits": [
+        "The stack flag must be recorded with the event; without it the two branches are indistinguishable."
+      ],
+      "open_questions": [
+        "Confirm the dispatcher's flag source and type coverage."
+      ],
+      "board_preview": "board-only (catapult update path)",
+      "semantic_gate": "store 0x52EC92 `movl $0x1, 0x28(%edi)` (7 bytes) is the exact fact; stack flag bit 0x20 selects the branch.",
+      "state_transition": "phase -> 1 on spike; else DieWithLoot",
+      "exit_effects": [
+        "bounce animation",
+        "particles",
+        "DieWithLoot on non-spike"
+      ],
+      "caller_classes": {
+        "dispatcher": [
+          "0x53151b"
+        ]
+      }
+    },
+    {
+      "id": "zombie-slot-recycle-sweep",
+      "status": "candidate_review_required",
+      "function_name": "Board retire/recycle sweep (Board.cpp, not in Zombie.cpp)",
+      "entry_va": "0x41bad0",
+      "rva": "0x1bad0",
+      "function_start_va": "0x41bad0",
+      "bytes32": "535533db33c05783cdff8d9b000000003bc375088b86ac000000eb05054c0100",
+      "head": [
+        "41bad0: pushl\t%ebx",
+        "41bad1: pushl\t%ebp",
+        "41bad2: xorl\t%ebx, %ebx",
+        "41bad4: xorl\t%eax, %eax",
+        "41bad6: pushl\t%edi",
+        "41bad7: orl\t$-0x1, %ebp",
+        "41bada: leal\t(%ebx), %ebx",
+        "41bae0: cmpl\t%ebx, %eax"
+      ],
+      "abi": "register: ESI = Board*; single caller 0x4526F0 inside game_total_loop 0x452650",
+      "semantics": "Frees disappeared zombies from the board pool; the free-list update is the durable recycle fact.",
+      "observed": [
+        "Zombie branch guard at 0x41BBA9 reads +0xEC; free sequence 0x41BBF4-0x41BC23 updates free_head (board+0x9C) <-> slot+0x158 and count (board+0xA0)--.",
+        "The commit instruction 0x41BC23 is a 5-byte jmp after the whole free sequence - a MinHook-safe post-free observation point.",
+        "Also frees plant/grid pools in the same pass; an object-class filter is required."
+      ],
+      "callers": [
+        "0x4526f0"
+      ],
+      "candidate_classification": "Recycle-commit candidate: pair a candidate read at 0x41BBA9 (full id) with a commit event at 0x41BC23 (slot/free_head/count).",
+      "coverage_limits": [
+        "Mid-function points; branch targets into the relocated window must be checked before implementation.",
+        "The sweep also handles plants/grid items; filter by pool/stride."
+      ],
+      "open_questions": [
+        "Confirm no other image path frees zombie slots (byte-pattern scan found this single free sequence).",
+        "Confirm branch-target freedom for the hook windows."
+      ],
+      "board_preview": "board-only (game_total_loop sweep)",
+      "semantic_gate": "free-list update at 0x41BC0C/0x41BC12 is the durable fact; entry at 0x530850 is rejected as a marker.",
+      "state_transition": "one free per zombie with +0xEC set; candidate 0x41BBA9 -> commit 0x41BC23",
+      "exit_effects": [
+        "detach via 0x404FC0/StopZombieSound",
+        "free_head/count update",
+        "slot reuse later"
+      ],
+      "caller_classes": {
+        "game_total_loop": [
+          "0x4526f0"
+        ]
+      }
+    },
+    {
+      "id": "false-positive-gatling-projectile",
+      "status": "candidate_review_required",
+      "function_name": "Zombie::UpdateZombieGatlingHead (projectile write)",
+      "entry_va": "0x527750",
+      "rva": "0x127750",
+      "function_start_va": "0x527750",
+      "bytes32": "83ec3c535556578bf880bfba000000000f84320300008b476883f864756b8b07",
+      "head": [
+        "527750: subl\t$0x3c, %esp",
+        "527753: pushl\t%ebx",
+        "527754: pushl\t%ebp",
+        "527755: pushl\t%esi",
+        "527756: pushl\t%edi",
+        "527757: movl\t%eax, %edi",
+        "527759: cmpb\t$0x0, 0xba(%edi)",
+        "527760: je\t0x527a98 <.text+0x126a98>"
+      ],
+      "abi": "register: EAX = AZombie* dispatcher argument",
+      "semantics": "FALSE POSITIVE: the +0x28 store belongs to a Projectile, not the Zombie phase.",
+      "observed": [
+        "0x527952 calls AddProjectile (0x41DF60) and keeps the returned Projectile in ESI.",
+        "0x5279F4 writes `movl $1, 0x28(%esi)` on that Projectile; the following field writes (0x1C/0x30/0x34/0x74/0x7C/0x84) are projectile state.",
+        "The wiki notes a projectile also has a +0x28 animation counter; register provenance proves this site is not zombie phase."
+      ],
+      "callers": [
+        "0x52b267"
+      ],
+      "candidate_classification": "Negative evidence: an offset-only rule would emit a false zombie fact here.",
+      "coverage_limits": [
+        "The surrounding function creates and initializes a projectile for the gatling head.",
+        "No zombie phase store exists in this function."
+      ],
+      "open_questions": [
+        "Keep this site in the candidate document as a checkable negative fixture for the object-class filter."
+      ],
+      "board_preview": "board zombie calls a projectile path; object-class filter must reject the Projectile",
+      "semantic_gate": "FALSE POSITIVE: the +0x28 store belongs to a Projectile object created by AddProjectile, not to the Zombie phase; no zombie fact is emitted.",
+      "state_transition": "projectile +0x28 animation counter",
+      "exit_effects": [
+        "projectile spawn and motion setup"
+      ],
+      "caller_classes": {
+        "type_dispatcher_1d": [
+          "0x52b267"
+        ]
+      }
+    }
+  ]
+}
