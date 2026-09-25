@@ -41,10 +41,10 @@
 
 | suite | 模式（prepare 元数据） | 用途 |
 |---|---|---|
-| `issue111-d-probe-off-a` | `--mode on --probes off --single-cold`，`LVZ_LIFECYCLE_RECORDING=1`、`LVZ_LIFECYCLE_PROBES=0` | 探针关闭对照冷启动 A（仅差探针安装） |
-| `issue111-d-probe-off-b` | 同上 | 探针关闭对照冷启动 B（独立复跑） |
-| `issue111-d-probe-on-a` | `--mode on --probes on --single-cold`，`LVZ_LIFECYCLE_RECORDING=1`、`LVZ_LIFECYCLE_PROBES=1` | 探针开启冷启动 A |
-| `issue111-d-probe-on-b` | 同上 | 探针开启冷启动 B（独立复跑） |
+| `issue111-d-hosted-off-a` | `--mode on --probes off --single-cold`，`LVZ_LIFECYCLE_RECORDING=1`、`LVZ_LIFECYCLE_PROBES=0` | 探针关闭对照冷启动 A（仅差探针安装） |
+| `issue111-d-hosted-off-b` | 同上 | 探针关闭对照冷启动 B（独立复跑） |
+| `issue111-d-hosted-on-a` | `--mode on --probes on --single-cold`，`LVZ_LIFECYCLE_RECORDING=1`、`LVZ_LIFECYCLE_PROBES=1` | 探针开启冷启动 A |
+| `issue111-d-hosted-on-b` | 同上 | 探针开启冷启动 B（独立复跑） |
 
 四条臂都通过 `--expected-recorder-sha256` 固定同一个 recorder 构建身份；`check` 会拒绝任何子审计
 声明不同构建的轨迹。子审计真实路径为 `experiments/runs/<suite>-s42-c0`（suite 目录本身没有 audit）。

@@ -125,9 +125,40 @@ def plan_abspath(root: Path, metadata: dict) -> Path:
     return path if path.is_absolute() else Path(root) / path
 
 
+def _hosted_identity(root: Path, receipt: Path) -> dict:
+    """Verify the hosted-build receipt against the actual script and DLL bytes."""
+    receipt = receipt.resolve()
+    if not receipt.is_file():
+        raise ExperimentError(f"hosted-build receipt is missing: {receipt}")
+    try:
+        document = json.loads(receipt.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ExperimentError(f"hosted-build receipt is unreadable: {exc}") from exc
+    if not isinstance(document, dict) or document.get("schema") != "lvz.hosted-build.v1":
+        raise ExperimentError("hosted-build receipt schema is not lvz.hosted-build.v1")
+    script = root / document.get("hosted_script", "") if isinstance(document.get("hosted_script"), str)         else None
+    if script is None:
+        script = root / "logger" / "avz" / "hosted" / "jing_dian_12.cpp"
+    if not script.is_file():
+        raise ExperimentError(f"hosted script is missing: {script}")
+    script_sha = sha256_file(script)
+    if document.get("hosted_script_sha256") != script_sha:
+        raise ExperimentError("hosted-build receipt does not match the actual script bytes")
+    dll = root / "build" / "recorder.dll"
+    if not dll.is_file():
+        raise ExperimentError("hosted recorder.dll is missing")
+    dll_sha = sha256_file(dll)
+    if document.get("recorder_sha256") != dll_sha:
+        raise ExperimentError("hosted-build receipt does not match the actual recorder.dll bytes")
+    return {"receipt": str(receipt.relative_to(root)) if receipt.is_relative_to(root) else str(receipt),
+            "receipt_sha256": sha256_file(receipt), "script": str(script.relative_to(root))
+            if script.is_relative_to(root) else str(script),
+            "script_sha256": script_sha, "recorder_sha256": dll_sha}
+
+
 def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = True,
             probes: str | None = None, single_cold: bool = False,
-            build_sha256: str | None = None) -> dict:
+            build_sha256: str | None = None, hosted_build: Path | None = None) -> dict:
     """Lock plan/root/mode/probe/child identities without creating the suite output."""
     root = Path(root).resolve()
     if mode not in MODE_VALUES:
@@ -138,6 +169,10 @@ def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = 
         raise ExperimentError("the probe arm requires lifecycle recording to stay on")
     if build_sha256 is not None and not _valid_sha256(build_sha256):
         raise ExperimentError("expected recorder build must be a lowercase sha256")
+    hosted = None
+    if hosted_build is not None:
+        hosted = _hosted_identity(root, Path(hosted_build))
+        build_sha256 = hosted["recorder_sha256"]
     plan_path = Path(plan).resolve()
     parsed = _load_plan(plan_path)
     suite = run_directory(root, name)
@@ -166,6 +201,7 @@ def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = 
         "run_builds": bool(run_builds),
         "single_cold": bool(single_cold),
         "expected_recorder_sha256": build_sha256,
+        "hosted": hosted,
         "suite": str(suite),
         "expected_children": expected_children(name, parsed, single_cold),
         "launch_command": launch_command(root, name, plan_path, run_builds=run_builds,
@@ -213,6 +249,14 @@ def _read_prepared(root: Path, name: str) -> dict:
     pin = metadata.get("expected_recorder_sha256")
     if pin is not None and not _valid_sha256(pin):
         raise ExperimentError("lifecycle mode file has a malformed recorder build pin")
+    hosted = metadata.get("hosted")
+    if hosted is not None:
+        if not isinstance(hosted, dict):
+            raise ExperimentError("lifecycle mode file has a malformed hosted identity")
+        current = _hosted_identity(root, Path(hosted.get("receipt", "")))
+        if current["script_sha256"] != hosted.get("script_sha256")                 or current["recorder_sha256"] != hosted.get("recorder_sha256"):
+            raise ExperimentError("hosted script or recorder.dll changed since prepare")
+        pin = current["recorder_sha256"]
     single_cold = metadata.get("single_cold", False)
     if type(single_cold) is not bool:
         raise ExperimentError("lifecycle mode file has a malformed single_cold flag")
@@ -680,6 +724,8 @@ def main(argv: list[str] | None = None) -> int:
                                 help="one source cold start per arm; no extra replay or recovery child")
     prepare_parser.add_argument("--expected-recorder-sha256", default=None,
                                 help="pin the recorder build every child audit must declare")
+    prepare_parser.add_argument("--hosted-build", type=Path, default=None,
+                                help="hosted-build receipt to verify and bind (script/DLL hashes)")
     prepare_parser.add_argument("--skip-build", action="store_true",
                                 help="record that the existing build is reused; never implicit")
     run_parser = sub.add_parser("run", help="run the real evaluation suite with the mode environment")
@@ -695,7 +741,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare":
             report = prepare(args.root, args.name, args.plan, args.mode, run_builds=not args.skip_build,
                              probes=args.probes, single_cold=args.single_cold,
-                             build_sha256=args.expected_recorder_sha256)
+                             build_sha256=args.expected_recorder_sha256,
+                             hosted_build=args.hosted_build)
         elif args.command == "run":
             report = run_experiment(args.root, args.name)
         elif args.command == "check":

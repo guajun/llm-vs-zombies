@@ -17,3 +17,5 @@ experiments/scenarios/**/*.dat
 .env.*
 !.env.example
 *.egg-info/
+work_issue*.md
+experiments/runs/*.lifecycle.json
