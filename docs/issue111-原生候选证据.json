@@ -82,7 +82,66 @@
         "Confirm the +0xEC writer is unique across the whole image (only one byte-pattern site; data-driven writes still possible).",
         "Confirm which callers are board removals vs preview/menu objects.",
         "Decide whether classification needs the death-stage event or a caller/RVA field on the removal record."
-      ]
+      ],
+      "board_preview": "mixed: the same function is called from board removal and from preview/menu cleanup; a hook must filter by board pool membership",
+      "semantic_gate": "Sets the single observed IsDisappeared (+0xEC) writer. It marks any removed zombie, including preview cleanup; it does not distinguish death from non-death removal and does not free the slot.",
+      "state_transition": "no State write; idempotent only in the sense that callers skip already-removed objects (preview guards check State 1/2/3 or AtWave -2)",
+      "exit_effects": [
+        "detach movement/grid state via 0x530850",
+        "detach attached references at +0x110/+0x118/+0x144/+0x150 via 0x404FC0/0x4733F0",
+        "set +0xEC=1 (unique site 0x530602)",
+        "drop/loot housekeeping 0x52FE50",
+        "type-specific handlers: type 0xD -> 0x530310, type 0x14 -> 0x530480, type 0x19 -> 0x5366D0"
+      ],
+      "caller_classes": {
+        "preview_or_ui": [
+          "0x4019a8",
+          "0x4019dd",
+          "0x40dedf",
+          "0x40df58",
+          "0x40df9a"
+        ],
+        "preview_evidence": "0x40DF70 is the target of AvZ AAsm::KillZombiesPreview; 0x40DEA0/0x40DF00 are sibling preview-list clearers (State/AtWave/position guards); 0x401970 iterates inline pointers and also calls RemovePlant",
+        "board_area_effect": [
+          "0x421dda"
+        ],
+        "board_mower_or_state_specific": [
+          "0x45866d",
+          "0x52528b",
+          "0x525bba",
+          "0x526cd2",
+          "0x527740"
+        ],
+        "board_pool_lookup": [
+          "0x46030a",
+          "0x535305"
+        ],
+        "board_dispatch_or_variants": [
+          "0x524884",
+          "0x52a571",
+          "0x52aee2",
+          "0x52afba",
+          "0x52b2a0",
+          "0x52b30a",
+          "0x52eb8c",
+          "0x52ed39",
+          "0x533585",
+          "0x5336f1",
+          "0x533ecc",
+          "0x533f5e",
+          "0x536795"
+        ],
+        "death_api": [
+          "0x5302fa"
+        ],
+        "attached_parts": [
+          "0x53035e",
+          "0x530390"
+        ],
+        "unclassified_caller": [
+          "0x429ea1"
+        ]
+      }
     },
     {
       "id": "zombie-death-effect-shared-aftermath",
@@ -133,7 +192,50 @@
       "open_questions": [
         "Confirm the EAX ABI at every caller (some call sites may pass the zombie differently).",
         "Determine whether this fires once per death and whether State is final at entry."
-      ]
+      ],
+      "board_preview": "board-only in every observed caller; returns early for AtWave -2/-3",
+      "semantic_gate": "Aftermath is not a death-stage fact by itself: callers set State before calling it, and it is not called by every State=1 path (type-29 variant and 0x533240's remove-only branch skip it).",
+      "state_transition": "does not write State; reads AtWave and the global type-seen table; spawns effects/drops",
+      "exit_effects": [
+        "global seen-type byte write",
+        "0x52FE50 drop housekeeping",
+        "type 0x13 special handling",
+        "death sound/particle helpers 0x41D2C0/0x4537D0/0x41CDB0"
+      ],
+      "caller_classes": {
+        "death_api": [
+          "0x530301"
+        ],
+        "area_effect": [
+          "0x421de1"
+        ],
+        "mower": [
+          "0x458674"
+        ],
+        "board_pool_lookup": [
+          "0x460311"
+        ],
+        "state_specific": [
+          "0x525bc1",
+          "0x52a538",
+          "0x52aee9",
+          "0x52eb93",
+          "0x52ed40",
+          "0x5317a4",
+          "0x532f70"
+        ],
+        "falling_variants": [
+          "0x533d75",
+          "0x533ed3",
+          "0x533f65"
+        ],
+        "pool_lookup_variant": [
+          "0x53530c"
+        ],
+        "state_guard_variant": [
+          "0x53679c"
+        ]
+      }
     },
     {
       "id": "zombie-death-state-falling",
@@ -171,7 +273,26 @@
       "open_questions": [
         "Review all State=1 sites and decide whether one canonical death entry exists or a per-site hook is required.",
         "Confirm which zombie types use this path."
-      ]
+      ],
+      "board_preview": "board-only callers (0x52A470 update path, 0x5312D0 dispatcher, 0x536080 type-0x4F branch)",
+      "semantic_gate": "Writes State=1 only after an attachment/effect precondition; otherwise this routine removes the zombie instead (0x533585). Entry is idempotent: State already in {1,2,3} returns immediately.",
+      "state_transition": "State 0/other -> 1 (write at 0x533377) with no repeat while State in {1,2,3}; no aftermath call on this path",
+      "exit_effects": [
+        "effect/particle strings 0x66F3DC/0x66F3E8/0x66F3FC/0x66F40C/0x66F420",
+        "0x528B00 effect spawn, 0x5331C0 finisher",
+        "remove at 0x530510 when the precondition fails"
+      ],
+      "caller_classes": {
+        "board_update": [
+          "0x52a564"
+        ],
+        "board_dispatch": [
+          "0x53179d"
+        ],
+        "type_4f_branch": [
+          "0x536251"
+        ]
+      }
     },
     {
       "id": "zombie-death-state-ash",
@@ -210,7 +331,27 @@
       "open_questions": [
         "Confirm the object type of each caller before treating the entry as a zombie event.",
         "Define the dedup key (full id) and whether repeated State=2 writes for one id are one fact or many."
-      ]
+      ],
+      "board_preview": "board callers observed (0x41D8A0 cleanup path, 0x4664B0 plant-side path, 0x530310 attached-part variant); entry returns when +0xEC is set or State==2",
+      "semantic_gate": "Writes State=2 + StateCountdown=0x12C, then calls the shared aftermath 0x530170; for some types it falls through to KillZombie 0x5302F0. Attachment parts are separate pool entities and can each produce a State=2 write, so dedup by full id is required.",
+      "state_transition": "State != 2 and not disappeared -> 2 (write at 0x532F5F); repeats are rejected by the entry guard",
+      "exit_effects": [
+        "0x530170 aftermath",
+        "type-specific particle setup, 0x530410/0x532350 helpers",
+        "KillZombie for a subset of types at 0x532FC2"
+      ],
+      "caller_classes": {
+        "board_cleanup": [
+          "0x41d929"
+        ],
+        "plant_or_effect_side": [
+          "0x466528"
+        ],
+        "attached_parts": [
+          "0x5303d4",
+          "0x5303fb"
+        ]
+      }
     },
     {
       "id": "zombie-death-state-mower",
@@ -245,7 +386,19 @@
       "open_questions": [
         "Review caller 0x4586D2 context and the mower dispatch to confirm the branch.",
         "Confirm the EDI ABI contract at all (current) callers."
-      ]
+      ],
+      "board_preview": "board-only: single caller 0x458540 is the mower/board handler region (also calls 0x530510+0x530170 for the same zombie)",
+      "semantic_gate": "Entry skips when +0xEC is set or State==3; writes State=3 then jumps to aftermath 0x530170. This is the mower death-stage transition.",
+      "state_transition": "State != 3 and not disappeared -> 3 (write at 0x532A62); idempotence guard at entry; caller then removes the zombie separately at 0x45866D",
+      "exit_effects": [
+        "tail-jump 0x530170",
+        "no direct removal inside this function"
+      ],
+      "caller_classes": {
+        "mower_handler": [
+          "0x4586d2"
+        ]
+      }
     },
     {
       "id": "zombie-death-state-variant-a",
@@ -278,7 +431,19 @@
       "open_questions": [
         "Identify the zombie subtype and whether this path is a death stage or a movement state.",
         "Confirm the caller guard byte +0xBA meaning."
-      ]
+      ],
+      "board_preview": "board-only: dispatcher 0x52B110 selects it for zombie type 0x1D (29 = AGATLING_PEA_ZOMBIE per pinned AvZ avz_types.h)",
+      "semantic_gate": "Guarded by byte +0xBA; writes State=1 and resets row/position/timer fields, but does not remove the zombie and does not call 0x530170. Static shape matches a subtype death/reposition transition; without dynamic confirmation it must not be merged with the falling fact.",
+      "state_transition": "writes State=1 at 0x5279F4 in a type-specific dispatcher branch; repeat behavior depends on caller dispatch, which may re-enter for the same type",
+      "exit_effects": [
+        "field resets at +0x1C/+0x74/+0x7C/+0x84/+0x80",
+        "no remove, no aftermath"
+      ],
+      "caller_classes": {
+        "type_dispatcher_1d": [
+          "0x52b267"
+        ]
+      }
     },
     {
       "id": "zombie-death-state-variant-b",
@@ -312,7 +477,20 @@
       "open_questions": [
         "Enumerate the caller(s) and the flag meaning before proposing any production hook.",
         "Check whether State=1 here is followed by 0x530170 or 0x530510."
-      ]
+      ],
+      "board_preview": "board-only caller (0x5312D0 dispatcher); two branches selected by a stack flag bit 0x20",
+      "semantic_gate": "Flag set -> State=1 + StateCountdown=0x118 + effect, no remove/aftermath. Flag clear -> 0x530510 + 0x530170 removal path. It encodes a type/context-specific choice between falling animation and direct removal; a hook must read the flag and the State diff.",
+      "state_transition": "State -> 1 at 0x52EC92 on the flag-set branch; removal branch at 0x52ED39/0x52ED40",
+      "exit_effects": [
+        "particle string 0x66F1F4 and 0x528B00",
+        "0x5321F0 effect helper",
+        "removal+aftermath on the other branch"
+      ],
+      "caller_classes": {
+        "board_dispatcher": [
+          "0x53151b"
+        ]
+      }
     },
     {
       "id": "zombie-slot-recycled",
@@ -350,7 +528,20 @@
         "Confirm ESI=Board at the single call site and that no other image path frees zombie slots.",
         "Decide between a function-entry hook with a stride filter and a mid-function trampoline at 0x41BBF9.",
         "Verify the free_head/count offsets against runtime pool behaviour (the audit already records free_head/next_key/count)."
-      ]
+      ],
+      "board_preview": "board-only: called once per game update from 0x4526F0 inside game_total_loop 0x452650; it also frees plant and grid-item pools",
+      "semantic_gate": "The free sequence 0x41BBF4-0x41BC23 is the only observed zombie-pool free: free_head (board+0x9C) <-> slot+0x158 next index, count (board+0xA0) -= 1, after the +0xEC guard at 0x41BBA9.",
+      "state_transition": "one sweep pass per update; a zombie with +0xEC set is freed exactly once (the flag stays set, the slot is reused afterwards)",
+      "exit_effects": [
+        "detach via 0x404FC0/0x530850",
+        "slot free-list update",
+        "count decrement"
+      ],
+      "caller_classes": {
+        "game_total_loop": [
+          "0x4526f0"
+        ]
+      }
     },
     {
       "id": "zombie-detach-helper",
@@ -391,7 +582,73 @@
       ],
       "open_questions": [
         "If used for ordering, review every caller."
+      ],
+      "board_preview": "both: called before removal (0x53051B) and before the recycle free (0x41BBFA); also from unrelated detach paths",
+      "semantic_gate": "not a fact by itself; useful as an ABI-safe recycle trigger when filtered by the caller return address",
+      "state_transition": "cdecl, no state writes",
+      "exit_effects": [
+        "detach from movement/grid containers"
+      ],
+      "caller_classes": {
+        "remove": [
+          "0x53051b"
+        ],
+        "recycle": [
+          "0x41bbfa"
+        ],
+        "other": [
+          "0x413245",
+          "0x41e566",
+          "0x461b61",
+          "0x526b1d",
+          "0x528280",
+          "0x528427",
+          "0x52a53e",
+          "0x53197c"
+        ]
+      }
+    }
+  ],
+  "interception_plan": [
+    {
+      "fact": "zombie_removal_unclassified",
+      "strategy": "MinHook entry hook on 0x530510 (ECX=AZombie*) using the existing register-preserving shim pattern, then copy the full id and classify against the last death-stage fact for the same id.",
+      "rationale": "0x530510 is the unique +0xEC writer and every board removal path observed reaches it; entry-only hooking needs no mid-block patch.",
+      "abi": "ECX(this), plain ret; the shim already saves GPR/EFLAGS/x87/SSE and restores LastError.",
+      "board_filter": "read board = *(uint32_t*)(zombie+4); require board in the locked image and zombie == pool.block(board+0x90) + (id & 0xffff) * 0x15c with id != 0",
+      "rejected_alternatives": [
+        "hooking per caller (fragile, 30+ sites)",
+        "hooking 0x530170 for removal (not called on all removal paths)"
+      ]
+    },
+    {
+      "fact": "zombie_death_stage_enter",
+      "strategy": "Entry+exit hooks on the five State-writing routines: 0x533240 (EAX), 0x532B70 (ECX), 0x5327E0 (EDI), 0x527750 (EAX), 0x52EC00 (EAX + stack flag). Capture State before, re-read State at the epilogue, emit only a change into {1,2,3} for a board-filtered zombie; dedupe per (run, session, full id, stage).",
+      "rationale": "Each routine already has an idempotence guard and a distinct subtype/phase role; hooking the function boundary avoids patching individual state stores and keeps the ABI adapters small. The aftermath 0x530170 is recorded only as an optional pairing marker, never as the stage fact, because it is absent from variant-a and from 0x533240's remove-only branch.",
+      "abi": "per-function register argument as listed; reuse the same shim pattern; record the stack flag only for 0x52EC00.",
+      "board_filter": "same pool-membership check; also require the function's own guard result (State not already dead / not disappeared).",
+      "rejected_alternatives": [
+        "hooking 0x530170 alone as death (misses variant-a and remove-only falling branch)",
+        "hooking every raw state-store instruction (five+ sites, no shared ABI)"
+      ]
+    },
+    {
+      "fact": "zombie_slot_recycled",
+      "strategy": "Entry hook on the cdecl detach helper 0x530850, filter by caller return address: 0x41BBFF means the recycle sweep free follows, 0x530520 means removal. Record slot/id before the free; verify the free sequence in a fixture.",
+      "rationale": "The sweep function is shared with plant/grid pools and a mid-block patch at 0x41BBF9 would clobber a push+call sequence; the helper hook is entry-only and the return-address check is ABI-safe.",
+      "abi": "cdecl: AZombie* is pushed on the stack; at entry [esp] is the caller return address.",
+      "board_filter": "same pool-membership check plus return-address whitelist {0x41BBFF}.",
+      "rejected_alternatives": [
+        "hooking 0x41BAD0 and filtering by stride (fires for plants/grid items and needs pre-free enumeration)",
+        "mid-block MinHook at 0x41BBF9 (6-byte window, higher risk)"
       ]
     }
+  ],
+  "residual_questions": [
+    "Preview/menu objects' +4 field layout was not dynamically verified; the pool-membership filter is the static discriminator.",
+    "variant-a (type 29) and variant-b are statically consistent with death animations but were not observed dynamically; a dynamic review must confirm they are not reposition/respawn paths.",
+    "No data-driven State writer was found by immediate-value scanning, but computed writes outside the scanned pattern cannot be excluded statically.",
+    "Exact semantics of 0x52FE50 (loot/drop housekeeping) and the +0xBA/+0xBD flags are not decoded; they matter for classifying variant-a/b and multi-part deaths.",
+    "Attached parts at +0xF4 are separate pool slots and can emit their own State writes; the maintainer must confirm whether one full entity may produce multiple death facts and how to collapse them."
   ]
 }

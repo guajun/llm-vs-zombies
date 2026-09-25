@@ -36,8 +36,8 @@ def snapshot(zombies, seq=0, tick=0):
             "zombies": zombies, "problems": []}
 
 
-def analyze(snapshots):
-    return lifecycle_report.analyze_snapshots(snapshots)
+def analyze(snapshots, coverage=None):
+    return lifecycle_report.analyze_snapshots(snapshots, coverage=coverage)
 
 
 class SnapshotScenarioTests(unittest.TestCase):
@@ -70,9 +70,12 @@ class SnapshotScenarioTests(unittest.TestCase):
         ])
         self.assertFalse(report["facts"]["first_confirmed_death"].get("confirmed", False))
         removal = report["facts"]["first_removal"]
-        self.assertEqual(removal["classification"], "unknown_removal")
+        self.assertEqual(removal["channel"], "disappeared_flag")
+        self.assertEqual(removal["classification"], "without_confirmed_death")
         self.assertEqual(report["facts"]["disappeared_without_confirmed_death"]["count"], 1)
-        self.assertIn("no call-internal ordering", " ".join(report["first_kill"]["reasons"]))
+        self.assertEqual(report["facts"]["removal_events"]["channels"],
+                         {"disappeared_flag": 1, "slot_release": 1})
+        self.assertIn("cannot be ordered", " ".join(report["first_kill"]["reasons"]))
         self.assertEqual(report["first_kill"]["gate"], "unverified")
 
     def test_same_slot_different_generation_is_not_merged(self):
@@ -108,7 +111,8 @@ class SnapshotScenarioTests(unittest.TestCase):
         removal = report["facts"]["first_removal"]
         self.assertEqual(removal["classification"], "unknown_removal")
         self.assertEqual(removal["entity"]["id"], (1 << 16) | 6)
-        self.assertIn("exact_spawn_hook=false", " ".join(report["first_kill"]["reasons"]))
+        self.assertIn("objects created and destroyed between boundary samples",
+                      " ".join(report["first_kill"]["reasons"]))
 
     def test_all_death_stages_and_multiple_changes_in_one_boundary(self):
         report = analyze([
@@ -133,6 +137,29 @@ class SnapshotScenarioTests(unittest.TestCase):
         self.assertFalse(observation["confirmed"])
         self.assertIn("verified live predecessor", observation["reason"])
         self.assertFalse(report["facts"]["first_confirmed_death"].get("confirmed", False))
+
+    def test_live_initial_entity_that_dies_later_is_not_residue(self):
+        report = analyze([
+            snapshot(pool(entity(9, 1, 0)), tick=0),          # live at the first boundary
+            snapshot(pool(entity(9, 1, 2)), tick=1),          # dies in the window
+            snapshot(pool(), tick=2),
+        ])
+        self.assertEqual(report["facts"]["initial_residue"], [])
+        self.assertTrue(report["facts"]["first_confirmed_death"]["confirmed"])
+        self.assertEqual(report["facts"]["first_confirmed_death"]["entity"]["id"], (1 << 16) | 9)
+        self.assertEqual(report["facts"]["first_removal"]["classification"],
+                         "release_after_confirmed_death")
+
+    def test_first_kill_reasons_reflect_actual_capture_coverage(self):
+        installed = analyze([snapshot(pool(entity(1, 1, 0)), tick=0)],
+                            coverage={"initialization_capture": "installed"})
+        missing = analyze([snapshot(pool(entity(1, 1, 0)), tick=0)],
+                          coverage={"initialization_capture": "not installed"})
+        self.assertTrue(any("no death/removal/recycle capture point" in reason
+                           for reason in installed["first_kill"]["reasons"]))
+        self.assertTrue(any("not installed" in reason for reason in missing["first_kill"]["reasons"]))
+        self.assertEqual(installed["first_kill"]["initialization_capture"], "installed")
+        self.assertFalse(installed["first_kill"]["proven"])
 
 
 def build_audit(directory: Path, states: list[dict]):

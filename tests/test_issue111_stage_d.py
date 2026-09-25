@@ -6,6 +6,7 @@ exercised with injected resource facts and a temporary checkout.
 """
 import copy
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -56,6 +57,71 @@ class PlanCheckTests(unittest.TestCase):
         problems = stage_d.check(doc, ROOT)
         self.assertTrue(any("frozen_pending_maintainer_review" in problem for problem in problems))
         self.assertTrue(any("LVZ_LIFECYCLE_RECORDING" in problem for problem in problems))
+
+    def test_persistence_switch_must_state_what_it_does_not_gate(self):
+        doc = copy.deepcopy(self.doc)
+        doc["mode_switch"]["not_gated"] = "nothing"
+        doc["mode_switch"].pop("limitations")
+        problems = stage_d.check(doc, ROOT)
+        self.assertTrue(any("not_gated" in problem for problem in problems))
+        self.assertTrue(any("limitations" in problem for problem in problems))
+
+    def test_child_mapping_must_match_the_frozen_plan(self):
+        doc = copy.deepcopy(self.doc)
+        doc["evaluation_child_mapping"]["per_suite"] = ["<suite>-s42-c0"]
+        self.assertTrue(any("per_suite" in problem for problem in stage_d.check(doc, ROOT)))
+
+    def test_comparisons_must_not_claim_instrumentation_off_on(self):
+        doc = copy.deepcopy(self.doc)
+        doc["comparisons"][2]["name"] = "instrumentation_non_perturbation"
+        problems = stage_d.check(doc, ROOT)
+        self.assertTrue(any("persistence_adapter_non_perturbation" in problem for problem in problems))
+        self.assertTrue(any("instrumentation off/on" in problem for problem in problems))
+
+
+class DocumentedCommandTests(unittest.TestCase):
+    def test_documented_dry_commands_parse_through_argparse(self):
+        import contextlib
+        import io
+        import shlex
+        import tempfile
+        import issue111_lifecycle_experiment as experiment
+
+        tools = {name: __import__(name) for name in
+                 ("issue111_stage_d", "issue111_lifecycle_experiment", "issue111_lifecycle_report")}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "experiments" / "plans").mkdir(parents=True)
+            (root / "experiments" / "configs").mkdir(parents=True)
+            shutil.copy2(ROOT / "experiments" / "plans" / "issue99-shovel-control.json",
+                         root / "experiments" / "plans" / "issue99-shovel-control.json")
+            shutil.copy2(ROOT / "experiments" / "configs" / "jingdian12.json",
+                         root / "experiments" / "configs" / "jingdian12.json")
+            for command in self.doc_commands():
+                if " run " in command:
+                    continue  # not a dry command: it starts the real suite
+                argv = shlex.split(command)
+                self.assertEqual(argv[0], "python")
+                tool = tools[Path(argv[1]).stem]
+                tail = [str(root) if item == "." else item for item in argv[2:]]
+                tail = [str(root / item) if item.startswith("experiments/plans/") else item for item in tail]
+                if "--name" in tail:
+                    tail[tail.index("--name") + 1] = "issue111-d-dry-run"
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    code = tool.main(tail)
+                self.assertIn(code, (0, 1, 2), command)
+
+    @staticmethod
+    def doc_commands():
+        doc = json.loads((ROOT / "docs" / "issue111-阶段D计划.json").read_bytes())
+        return doc["commands"]
+
+    def test_old_doctor_root_ordering_is_rejected(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                stage_d.main(["doctor", "--root", ".", "--plan", "docs/issue111-阶段D计划.json"])
 
 
 class DoctorTests(unittest.TestCase):

@@ -55,7 +55,8 @@ def check(doc: dict, root: Path | None = None) -> list[str]:
         return ["candidate evidence must be an object"]
     if doc.get("schema") != SCHEMA:
         problems.append(f"schema must be {SCHEMA!r}")
-    for key in ("issue", "generated", "status", "method", "protocol_notes", "candidates"):
+    for key in ("issue", "generated", "status", "method", "protocol_notes", "candidates",
+                "interception_plan", "residual_questions"):
         if key not in doc:
             problems.append(f"missing top-level key: {key}")
     if doc.get("status") not in ("candidate_review_required", "reviewed"):
@@ -93,7 +94,8 @@ def check(doc: dict, root: Path | None = None) -> list[str]:
     seen_vas: set[str] = set()
     any_established = False
     required = ("id", "status", "entry_va", "rva", "function_start_va", "bytes32", "abi", "semantics",
-                "observed", "callers", "candidate_classification", "coverage_limits", "open_questions")
+                "observed", "callers", "candidate_classification", "coverage_limits", "open_questions",
+                "board_preview", "semantic_gate", "state_transition", "exit_effects", "caller_classes")
     for index, candidate in enumerate(candidates):
         label = f"candidates[{index}]"
         if not isinstance(candidate, dict):
@@ -131,10 +133,11 @@ def check(doc: dict, root: Path | None = None) -> list[str]:
         payload = candidate.get("bytes32")
         if not (isinstance(payload, str) and len(payload) == 64 and all(c in "0123456789abcdef" for c in payload)):
             problems.append(f"{label}.bytes32 must be 32 bytes of lowercase hex")
-        for key in ("abi", "semantics", "candidate_classification"):
+        for key in ("abi", "semantics", "candidate_classification", "board_preview", "semantic_gate",
+                    "state_transition"):
             if not isinstance(candidate.get(key), str) or not candidate[key].strip():
                 problems.append(f"{label}.{key} must be a non-empty string")
-        for key in ("observed", "callers", "coverage_limits", "open_questions"):
+        for key in ("observed", "callers", "coverage_limits", "open_questions", "exit_effects"):
             value = candidate.get(key)
             if not isinstance(value, list) or not value:
                 problems.append(f"{label}.{key} must be a non-empty list")
@@ -147,6 +150,27 @@ def check(doc: dict, root: Path | None = None) -> list[str]:
                 problems.append(f"{label} caller must be 0x-prefixed hex: {caller!r}")
     if any_established and not (isinstance(doc.get("reviewed_by"), str) and doc["reviewed_by"].strip()):
         problems.append("established candidates require a reviewed_by maintainer name")
+    plan = doc.get("interception_plan")
+    if not isinstance(plan, list) or not plan:
+        problems.append("interception_plan must be a non-empty list")
+    else:
+        for index, strategy in enumerate(plan):
+            label = f"interception_plan[{index}]"
+            if not isinstance(strategy, dict):
+                problems.append(f"{label} must be an object")
+                continue
+            for key in ("fact", "strategy", "rationale", "abi", "board_filter", "rejected_alternatives"):
+                if key not in strategy:
+                    problems.append(f"{label} missing key: {key}")
+            for key in ("fact", "strategy", "rationale", "abi", "board_filter"):
+                if isinstance(strategy.get(key), str) and not strategy[key].strip():
+                    problems.append(f"{label}.{key} must not be empty")
+            if not isinstance(strategy.get("rejected_alternatives"), list) or not strategy["rejected_alternatives"]:
+                problems.append(f"{label}.rejected_alternatives must be a non-empty list")
+    questions = doc.get("residual_questions")
+    if not isinstance(questions, list) or not questions or any(
+            not isinstance(item, str) or not item.strip() for item in questions):
+        problems.append("residual_questions must be a non-empty list of strings")
     return problems
 
 

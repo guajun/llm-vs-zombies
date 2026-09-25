@@ -88,6 +88,17 @@ class EvidenceDocumentTests(unittest.TestCase):
         doc["target"]["avz_commit"] = "0" * 40
         self.assertTrue(any("dependencies.lock.json" in problem for problem in self.problems(doc)))
 
+    def test_semantic_fields_and_interception_plan_are_required(self):
+        facts = {item["fact"] for item in self.doc["interception_plan"]}
+        self.assertEqual(facts, {"zombie_removal_unclassified", "zombie_death_stage_enter", "zombie_slot_recycled"})
+        self.assertTrue(self.doc["residual_questions"])
+        doc = copy.deepcopy(self.doc)
+        doc["candidates"][0].pop("semantic_gate")
+        doc["interception_plan"] = []
+        problems = self.problems(doc)
+        self.assertTrue(any("semantic_gate" in problem for problem in problems))
+        self.assertTrue(any("interception_plan" in problem for problem in problems))
+
 
 class PeVerificationTests(unittest.TestCase):
     def setUp(self):

@@ -35,15 +35,31 @@ FIELDS = {"type": "00000024", "state": "00000028", "hp": "000000c8",
 DEAD_STAGES = {1: "falling", 2: "ash", 3: "mower_death_stage"}
 KNOWN_NONDEAD = {0, 11, 15, 20, 69, 70, 71, 73, 76}
 UNIMPLEMENTED_FACT_CLASSES = ("confirmed_death_stage", "removal_unclassified", "slot_recycle")
-# The exact spawn hook is not installed across arbitrary callers, and calls
-# inside one boundary are not ordered, so a full-window first kill cannot be
-# proven from boundary samples.
-FIRST_KILL_REASONS = [
-    "coverage.exact_spawn_hook=false: objects created and destroyed between two boundary samples are not excluded",
-    "no call-internal ordering: multiple changes inside one boundary cannot be ordered",
-    "death/removal/recycle capture points are review_required and not installed",
-    "boundary observations only prove what was sampled, not the absence of earlier unobserved events",
-]
+
+
+def first_kill_assessment(coverage: dict | None) -> dict:
+    """Report only the guarantees this delivery actually has.
+
+    Boundary samples can never prove a full-window first kill unless the
+    initialization capture is installed *and* death/removal/recycle capture
+    points exist; call-internal ordering is missing in every case.
+    """
+    coverage = coverage or {}
+    capture = coverage.get("initialization_capture", "not declared")
+    reasons: list[str] = []
+    if capture == "installed":
+        reasons.append("ZombieInitialize exit capture is installed and validated for initialization facts, "
+                       "but no death/removal/recycle capture point is installed, so removals are inferred "
+                       "only at boundary resolution")
+    else:
+        reasons.append(f"initialization exit capture is {capture}: objects created and destroyed between "
+                       "boundary samples are not excluded")
+    reasons.append("multiple changes inside one boundary cannot be ordered (no call-internal ordering)")
+    reasons.append("boundary observations cannot exclude an earlier unobserved removal before the first "
+                   "sampled boundary")
+    reasons.append("death-stage boundary observations are not production capture facts")
+    return {"gate": "unverified", "proven": False, "reasons": reasons,
+            "initialization_capture": capture}
 
 
 class ReportError(ValueError):
@@ -136,6 +152,7 @@ def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) ->
     deaths: list[dict] = []
     confirmed_deaths: list[dict] = []
     removals: list[dict] = []
+    removal_events: list[dict] = []
     unknown_removals: list[dict] = []
     disappearance_flags: list[dict] = []
     slot_reuse: list[dict] = []
@@ -193,10 +210,16 @@ def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) ->
                     fact["reason"] = "death stage observed without a verified live predecessor"
             if (prior_raw is not None and prior_raw["disappeared"] == 0 and raw["disappeared"] == 1
                     and identity not in confirmed):
-                fact = _fact(entry, coordinate, prior_raw, raw,
-                             classification="disappeared_without_confirmed_death",
+                fact = _fact(entry, coordinate, prior_raw, raw, channel="disappeared_flag",
+                             classification="without_confirmed_death",
                              reason="disappeared flag set without a prior death-stage observation")
                 disappearance_flags.append(fact)
+                removal_events.append(fact)
+                unknown_removals.append(fact)
+            elif prior_raw is not None and prior_raw["disappeared"] == 0 and raw["disappeared"] == 1:
+                removal_events.append(_fact(entry, coordinate, prior_raw, raw, channel="disappeared_flag",
+                                            classification="after_confirmed_death",
+                                            reason="disappeared flag set after a confirmed death stage"))
         for identity, before in previous.items():
             if identity in current:
                 continue
@@ -208,9 +231,11 @@ def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) ->
                                              reason="cold-start residue leaving the pool; not a window removal"))
                 continue
             classification = "release_after_confirmed_death" if identity in confirmed else "unknown_removal"
-            fact = _fact(before, coordinate, before_raw, None, classification=classification,
+            fact = _fact(before, coordinate, before_raw, None, channel="slot_release",
+                         classification=classification,
                          reason="slot no longer held this full identity at the boundary")
             removals.append(fact)
+            removal_events.append(fact)
             if classification == "unknown_removal":
                 unknown_removals.append(fact)
         # Same slot with a different full id is a reuse we did not observe end-to-end.
@@ -225,7 +250,7 @@ def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) ->
                                         reason="slot changed generation between sampled boundaries"))
         previous = current
     first_confirmed = confirmed_deaths[0] if confirmed_deaths else None
-    first_removal = removals[0] if removals else None
+    first_removal = removal_events[0] if removal_events else None
     first_unknown = unknown_removals[0] if unknown_removals else None
     return {
         "schema": ANALYSIS_SCHEMA,
@@ -237,10 +262,14 @@ def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) ->
             "first_removal": first_removal or {"available": False,
                                                "reason": "no removal observed in the sampled window"},
             "unknown_removals": {"count": len(unknown_removals), "first": first_unknown,
-                                 "rule": "slot release without a prior confirmed death-stage observation"},
+                                 "rule": "disappeared 0->1 or slot release without a prior confirmed "
+                                         "death-stage observation"},
             "disappeared_without_confirmed_death": {
                 "count": len(disappearance_flags), "first": disappearance_flags[0] if disappearance_flags else None,
                 "rule": "disappeared 0->1 without a prior death-stage observation"},
+            "removal_events": {"count": len(removal_events),
+                               "channels": {"disappeared_flag": len(disappearance_flags),
+                                            "slot_release": len(removals)}},
             "death_stage_observations": deaths,
             "removals": removals,
             "slot_reuse": {"count": len(slot_reuse), "first": slot_reuse[0] if slot_reuse else None},
@@ -252,7 +281,7 @@ def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) ->
                       "are review_required in docs/issue111-捕获点表.json; this report is boundary observation only",
             "unimplemented_fact_classes": list(UNIMPLEMENTED_FACT_CLASSES),
         },
-        "first_kill": {"gate": "unverified", "proven": False, "reasons": list(FIRST_KILL_REASONS)},
+        "first_kill": first_kill_assessment(coverage),
         "coverage": coverage or {},
         "state_phase_counts": phase_counts,
         "problems": problems,
@@ -265,8 +294,11 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
     run = Path(run)
     audit_directory = run / "audit" if (run / "audit" / "manifest.json").is_file() else run
     manifest, snapshots = snapshots_from_audit(audit_directory, require_closed=require_closed)
-    report = analyze_snapshots(snapshots, coverage={"audit_manifest_target": manifest.get("target"),
-                                                    "source": "boundary samples"})
+    spawn_hook = manifest.get("spawn_hook") if isinstance(manifest.get("spawn_hook"), dict) else {}
+    coverage = {"audit_manifest_target": manifest.get("target"),
+                "source": "boundary samples",
+                "initialization_capture": "installed" if spawn_hook.get("installed") is True else "not installed"}
+    report = analyze_snapshots(snapshots, coverage=coverage)
     report["source"] = {"directory": str(audit_directory), "target": manifest.get("target"),
                         "boundaries": len(snapshots)}
     if lifecycle:
@@ -282,6 +314,7 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
                                "records": (lifecycle_report.get("records") or {}).get("count"),
                                "close_receipt_present": (lifecycle_report.get("close_receipt") or {}).get("present"),
                                "problems": lifecycle_report.get("problems") or []}
+        report["coverage"]["lifecycle_recording"] = lifecycle_report.get("status")
         if lifecycle_report.get("status") == "failed":
             report["problems"].extend(f"lifecycle: {problem}" for problem in lifecycle_report["problems"])
     return report

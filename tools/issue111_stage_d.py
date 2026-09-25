@@ -48,6 +48,7 @@ def check(doc: dict, root: Path) -> list[str]:
         problems.append("based_on must be an object")
         based_on = {}
     source = Path(root) / str(based_on.get("plan", ""))
+    frozen: dict = {}
     if not source.is_file():
         problems.append(f"based_on.plan does not exist: {source}")
     else:
@@ -85,6 +86,24 @@ def check(doc: dict, root: Path) -> list[str]:
              if isinstance(mode, dict)} if isinstance(switch, dict) else {}
     if modes != MODE_VALUES:
         problems.append("mode_switch.modes must define off=0 and on=1")
+    if isinstance(switch, dict):
+        not_gated = str(switch.get("not_gated", ""))
+        if "ZombieInitialize" not in not_gated and "probe" not in not_gated:
+            problems.append("mode_switch.not_gated must state that the probe is installed in both modes")
+        if not isinstance(switch.get("limitations"), list) or not switch["limitations"]:
+            problems.append("mode_switch.limitations must state what the persistence switch cannot test")
+
+    mapping = doc.get("evaluation_child_mapping")
+    if not isinstance(mapping, dict) or not isinstance(mapping.get("per_suite"), list) or not mapping["per_suite"]:
+        problems.append("evaluation_child_mapping.per_suite must enumerate run_suite child directories")
+    elif frozen.get("seeds"):
+        expected = []
+        for seed in frozen["seeds"]:
+            for index in range(max(2, frozen.get("cold_starts", 1))):
+                expected.append(f"<suite>-s{seed}-c{index}")
+            expected.append(f"<suite>-s{seed}-recovery")
+        if sorted(mapping["per_suite"]) != sorted(expected):
+            problems.append("evaluation_child_mapping.per_suite does not match the frozen plan seeds/cold_starts")
 
     runs = doc.get("runs")
     if not isinstance(runs, list) or not runs:
@@ -115,6 +134,20 @@ def check(doc: dict, root: Path) -> list[str]:
         for side in ("left", "right"):
             if item.get(side) not in names:
                 problems.append(f"comparisons[{index}].{side} is not a declared run")
+    comparison_names = {item.get("name") for item in comparisons if isinstance(item, dict)}
+    if "persistence_adapter_non_perturbation" not in comparison_names:
+        problems.append("comparisons must name persistence_adapter_non_perturbation")
+    if any(isinstance(name, str) and "instrumentation_non_perturbation" in name for name in comparison_names):
+        problems.append("comparisons must not claim instrumentation off/on from the persistence switch")
+    if not isinstance(doc.get("verdicts"), list) or not doc["verdicts"]:
+        problems.append("verdicts must be a non-empty list")
+    commands = doc.get("commands")
+    if not isinstance(commands, list) or not commands:
+        problems.append("commands must be a non-empty list")
+    else:
+        for command in commands:
+            if not isinstance(command, str) or "tools/issue111_" not in command:
+                problems.append(f"command must invoke a repository issue111 tool: {command!r}")
     if not isinstance(doc.get("forbidden"), list) or not doc["forbidden"]:
         problems.append("forbidden must be a non-empty list")
     if not isinstance(doc.get("required_reviews"), list) or not doc["required_reviews"]:
