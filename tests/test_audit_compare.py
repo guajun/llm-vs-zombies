@@ -6,8 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import patch as mock_patch
 
+from llm_vs_zombies import lifecycle_events
 from llm_vs_zombies.audit_compare import (AuditLog, AuditTail, EvidenceError, SCHEMA, digests,
-    _FrameDecoder, _fnv, _python_fnv, canonical, compare_audits, digest, first_difference, patch,
+    _FrameDecoder, _fnv, _python_fnv, audit_files, canonical, compare_audits, digest, first_difference, patch,
     PARTICLE_SHAKE_MODE, _tokens, _cached_tokens, _POINTER_CACHE_SIZE, _POINTER_CACHE_MAX_CHARS, decode,
     EventStream, _fnv_continue)
 
@@ -147,6 +148,47 @@ def particle_audit(directory, pointer=0x10000140, identity=65538, *, age=5, site
 
 
 class AuditTests(unittest.TestCase):
+    def test_closed_lifecycle_recording_requires_its_receipt_but_live_tail_does_not(self):
+        def capability():
+            return {
+                "mode": lifecycle_events.MODE, "enabled": True,
+                "event_schema": lifecycle_events.EVENT_SCHEMA,
+                "envelope_schema": lifecycle_events.ENVELOPE_SCHEMA,
+                "receipt_schema": lifecycle_events.RECEIPT_SCHEMA,
+                "sequence_domain": lifecycle_events.SEQUENCE_DOMAIN, "session_id": 1,
+                "probe": {"name": lifecycle_events.PROBE_NAME, "schema": lifecycle_events.PROBE_SCHEMA,
+                          "event_kind": lifecycle_events.KIND_INITIALIZATION},
+                "build": {"module": "recorder.dll", "sha256": "a" * 64},
+                "files": {"events": lifecycle_events.EVENTS_FILE,
+                          "close_receipt": lifecycle_events.RECEIPT_FILE},
+            }
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "audit"
+            animation_audit(directory)
+            manifest = json.loads((directory / "manifest.json").read_text())
+            manifest["lifecycle_recording"] = capability()
+            (directory / "manifest.json").write_text(json.dumps(manifest))
+            (directory / lifecycle_events.EVENTS_FILE).write_text("")
+            # A live tail may follow the recording before the receipt exists.
+            # Lifecycle evidence is not engine-frame evidence, so its bytes
+            # must not show up as unconsumed frame bytes at close.
+            tail = AuditTail(directory)
+            self.assertIn(lifecycle_events.EVENTS_FILE, audit_files(directory, manifest))
+            self.assertIn(lifecycle_events.EVENTS_FILE, tail.evidence_files)
+            self.assertNotIn(lifecycle_events.EVENTS_FILE, tail._positions)
+            self.assertNotIn(lifecycle_events.RECEIPT_FILE, tail._positions)
+            list(tail.read_request("a"))
+            with self.assertRaisesRegex(EvidenceError, "missing its close receipt"):
+                tail.verify_closed()
+            with self.assertRaisesRegex(EvidenceError, "missing its close receipt"):
+                AuditLog(directory, require_closed=True)
+            (directory / lifecycle_events.RECEIPT_FILE).write_text('{"schema":"' + lifecycle_events.RECEIPT_SCHEMA + '"}\n')
+            audit = AuditLog(directory, require_closed=True)
+            self.assertIn(lifecycle_events.RECEIPT_FILE, audit.evidence_files)
+            tail = AuditTail(directory)
+            list(tail.read_request("a"))
+            tail.verify_closed()
+
     def test_controlled_births_bind_to_update_or_next_action_boundary(self):
         for phase, expected in (("update", [0, 1]), ("action", [1, 0])):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temp:

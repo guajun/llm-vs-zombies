@@ -85,4 +85,6 @@ python -m unittest tests.test_issue111_capture_points tests.test_audit_compare -
 1. 死亡/移除/回收三个捕获点的函数、VA/RVA、ABI 与唯一签名仍待审查（阶段 A `review_checklist`）。
 2. 下一 PR 建议：`audit.cpp` 接入 `DrainSpawnBatch().lifecycle` 按 `lvz.lifecycle-event.v1` 落盘并绑定
    运行清单，配套离线读取器对缺 `capture_sequence` 的旧轨迹标 `unavailable`；再补实验入口
-   enable→推进→drain→最后 drain→健康/关闭→封存。
+   enable→推进→drain→最后 drain→健康/关闭→封存。已由
+   [`docs/issue111-生命周期记录与离线校验.md`](issue111-生命周期记录与离线校验.md) 落地（显式环境开关、
+   原子 close receipt 与 `tools/issue111_lifecycle_check.py`；死亡/移除/回收 hook 与真机验收仍属后续）。

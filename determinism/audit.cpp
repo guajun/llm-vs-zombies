@@ -9,11 +9,13 @@
 #include "json_diff.hpp"
 #include "memory.hpp"
 #include "measurement.hpp"
+#include "lifecycle_record.hpp"
 #include "stream_close.hpp"
 #include "spawn_hook.hpp"
 #include "reanimation_audit.hpp"
 #include "particle_shake.hpp"
 #include "runtime/engine_call.hpp"
+#include "runtime/runtime.hpp"
 #include "foley_trace.hpp"
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
 #include "hosted_fire.hpp"
@@ -45,6 +47,65 @@ Json previousReanimationEvidence;
 bool reanimationLinksValid=true;
 Json lastObservationVersion=Json::object();
 std::set<uint32_t> previousZombies;
+
+// Issue #111 lifecycle persistence is explicitly enabled per process and
+// declares itself in the audit manifest. Disabled/absent means no lifecycle
+// file at all, so old trajectories keep their exact behavior and comparability.
+LifecycleRecorder lifecycleRecorder;
+bool lifecycleSettingPresent=false, lifecycleEnabled=false;
+
+// LVZ_LIFECYCLE_RECORDING is "1" (enabled), "0" (explicitly disabled) or
+// unset (no capability declaration). Any other value is rejected: a typo must
+// not silently produce a run without the requested evidence.
+std::string LifecycleSetting() {
+    char buffer[32]{};
+    const DWORD size=GetEnvironmentVariableA("LVZ_LIFECYCLE_RECORDING",buffer,sizeof(buffer));
+    if(!size) return {};
+    if(size>=sizeof(buffer)) throw std::runtime_error("LVZ_LIFECYCLE_RECORDING must be 0 or 1");
+    const std::string value(buffer,size);
+    if(value!="0"&&value!="1") throw std::runtime_error("LVZ_LIFECYCLE_RECORDING must be 0 or 1");
+    return value;
+}
+std::filesystem::path HostModulePath() {
+    HMODULE module=nullptr;
+    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&HostModulePath),&module)) throw std::runtime_error("Cannot locate the recorder module");
+    wchar_t path[32768]{};
+    const DWORD length=GetModuleFileNameW(module,path,32768);
+    if(!length||length>=32768) throw std::runtime_error("Cannot resolve the recorder module path");
+    return std::filesystem::path(path);
+}
+Json LifecycleCapability(const LifecycleIdentity& identity) {
+    return {{"mode",kLifecycleMode},{"enabled",true},
+        {"event_schema",kLifecycleEventSchema},{"envelope_schema",kLifecycleEnvelopeSchema},
+        {"receipt_schema",kLifecycleReceiptSchema},{"sequence_domain",kLifecycleSequenceDomain},
+        {"session_id",identity.session_id},
+        {"probe",{{"name","zombie-initialize-exit"},{"schema","lvz.spawn.v1"},{"event_kind","zombie_initialized"}}},
+        {"build",{{"module",identity.build_module},{"sha256",identity.build_sha256}}},
+        {"files",{{"events",kLifecycleEventsFile},{"close_receipt",kLifecycleReceiptFile}}},
+        {"live_validated",false}};
+}
+Json LifecycleDisabledCapability() {
+    return {{"mode",kLifecycleMode},{"enabled",false}};
+}
+Json LifecycleCounters(const Json& health) {
+    return {{"captured",health.value("captured",uint64_t(0))},
+        {"delivered",health.value("delivered",uint64_t(0))},
+        {"persisted",health.value("persisted",uint64_t(0))},
+        {"overflow",health.value("overflow",uint64_t(0))},
+        {"wrong_thread",health.value("wrong_thread",uint64_t(0))},
+        {"nesting_mismatch",health.value("nesting_mismatch",uint64_t(0))},
+        {"incomplete_events",health.value("incomplete_events",uint64_t(0))}};
+}
+Json LifecycleProbeHealth(const Json& status) {
+    return {{"captured",status.value("captured",uint64_t(0))},
+        {"queued",status.value("queued",uint64_t(0))},
+        {"wrong_thread_calls",status.value("wrong_thread_calls",uint64_t(0))},
+        {"faults",status.value("faults",uint64_t(0))},
+        {"overflow",status.value("overflow",uint64_t(0))},
+        {"active_initializers",status.value("active_initializers",uint64_t(0))},
+        {"healthy",status.value("healthy",false)}};
+}
 
 void RequireThread() {
     if (!initialized || GetCurrentThreadId() != ownerThread)
@@ -93,6 +154,12 @@ void DrainAndCheckSpawns() {
                 {"native_phase","zombie_initialize_exit"},{"version",version},
                 {"payload",std::move(spawn)}});
         }
+        // The lifecycle projection is the second view of the same immutable
+        // batch. It is persisted only here; no other consumer may drain the
+        // probe. A failed write throws before OnPersisted, so Close() sees an
+        // unbalanced batch and the session is aborted instead of committed.
+        if(lifecycleRecorder.Opened())
+            for(auto& record:batch.lifecycle) lifecycleRecorder.Write(record);
         lvz::measurement::Host().OnPersisted(batch.count);
     }
     if(!health.value("healthy",false)) {
@@ -305,10 +372,13 @@ void Initialize(const std::filesystem::path& runDir) {
     if(initialized) {
         RequireThread(); return;
     }
+    const std::string lifecycleSetting=LifecycleSetting();
+    lifecycleSettingPresent=!lifecycleSetting.empty();
+    lifecycleEnabled=lifecycleSetting=="1";
     if(!ValidateTargetImage()) throw std::runtime_error("Unsupported PvZ engine image: deterministic adapter rejected");
     const auto directory=runDir/"audit";
     std::filesystem::create_directories(directory);
-    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl","engine-call-raw.jsonl","sound-counter-raw.jsonl","fp-environment-raw.jsonl"})
+    for(auto file : {"checksums.jsonl","state-deltas.jsonl","events.jsonl","reanimation-handles.jsonl","particle-shake-seeds.jsonl","engine-call-raw.jsonl","sound-counter-raw.jsonl","fp-environment-raw.jsonl",kLifecycleEventsFile,kLifecycleReceiptFile})
         if(std::filesystem::exists(directory/file) && std::filesystem::file_size(directory/file))
             throw std::runtime_error("Audit output already exists; create a fresh run");
     checksums.open(directory/"checksums.jsonl",std::ios::out|std::ios::binary);
@@ -324,6 +394,7 @@ void Initialize(const std::filesystem::path& runDir) {
     previous=nullptr; previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
     bool hookInstalled=false, measurementOpened=false;
+    Json lifecycleCapability=Json::object();
     try {
         silentaudio::Initialize(runDir);
         if(silentaudio::Enabled()){
@@ -334,12 +405,39 @@ void Initialize(const std::filesystem::path& runDir) {
         if(!lvz::measurement::Host().Open(ownerThread, &measureError))
             throw std::runtime_error(measureError);
         measurementOpened=true;
+        if(lifecycleEnabled) {
+            LifecycleIdentity identity;
+            identity.run_id=runDir.filename().string();
+            identity.branch_id=lvz::runtime::InstanceBranchScope(runDir);
+            identity.session_id=lvz::measurement::Host().SessionId();
+            const auto module=HostModulePath();
+            identity.build_module=module.filename().string();
+            identity.build_sha256=lvz::determinism::FileSha256(module);
+            // The run manifest already binds recorder_sha256; the loaded module
+            // must match it or this run cannot claim the lifecycle capability.
+            std::ifstream runManifest(runDir/"manifest.json");
+            Json declared=Json::object();
+            if(!(runManifest>>declared)||!declared.is_object())
+                throw std::runtime_error("Cannot read the run manifest for lifecycle identity binding");
+            const Json* implementation=declared.contains("implementation")?&declared.at("implementation"):nullptr;
+            if(implementation&&implementation->contains("recorder_sha256")) {
+                const auto& declaredHash=implementation->at("recorder_sha256");
+                if(!declaredHash.is_string()||declaredHash.get<std::string>()!=identity.build_sha256)
+                    throw std::runtime_error("Lifecycle recorder build does not match the run manifest identity");
+            }
+            lifecycleRecorder.Open(directory,std::move(identity));
+            lifecycleCapability=LifecycleCapability(lifecycleRecorder.Identity());
+        } else if(lifecycleSettingPresent) {
+            lifecycleCapability=LifecycleDisabledCapability();
+        }
         if(!InstallSpawnHook(error)) throw std::runtime_error(error);
         hookInstalled=true;
         if(!InstallParticleShakeHook(error)) throw std::runtime_error(error);
         foleytrace::Initialize(runDir);
         std::ofstream manifest(directory/"manifest.json");
-        manifest<<ProbeTarget().dump(2)<<'\n';
+        Json target=ProbeTarget();
+        if(lifecycleSettingPresent) target["lifecycle_recording"]=lifecycleCapability;
+        manifest<<target.dump(2)<<'\n';
         if(!manifest) throw std::runtime_error("Cannot write audit manifest");
     } catch(...) {
         foleytrace::Shutdown();
@@ -351,9 +449,14 @@ void Initialize(const std::filesystem::path& runDir) {
             if(!RemoveSpawnHook(removeError))
                 throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
         }
+        if(lifecycleRecorder.Opened()) {
+            try { lifecycleRecorder.Finish(false); } catch(...) {}
+        }
+        lifecycleRecorder.Abandon();
         if(measurementOpened) {
             lvz::measurement::Host().Abort();
         }
+        lifecycleSettingPresent=false;lifecycleEnabled=false;
         checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();fpRaw.close();initialized=false;
         throw;
     }
@@ -618,8 +721,9 @@ void Shutdown() {
             // Foley owns its own hooks/output: terminate it unconditionally so a
             // front-stage drain fault cannot leak its 12 hooks or output stream.
             try { foleytrace::Shutdown(); } catch(const std::exception& exception) { note(exception.what()); }
+            Json finalHealth=nullptr;
             try {
-                const auto finalHealth=SpawnHookStatus();
+                finalHealth=SpawnHookStatus();
                 Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},
                     {"version",lastObservationVersion},{"payload",finalHealth}});
             } catch(const std::exception& exception) { note(exception.what()); }
@@ -631,7 +735,25 @@ void Shutdown() {
             const std::string soundCloseError = CloseOptionalStream(soundCounterRaw, "Sound counter raw evidence");
             if(!soundCloseError.empty()) note(soundCloseError);
             if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()||fpRaw.fail()) note("Audit output close failed");
+            // Lifecycle finalization is the last durable step: the receipt is
+            // written only after the events stream was flushed, closed and
+            // checked, and only when the measurement session validated and no
+            // earlier cleanup error exists. The in-memory Commit happens after
+            // this cleanup returns, so the receipt never depends on it.
+            if(lifecycleRecorder.Opened()) {
+                try {
+                    if(cleanupError.empty() && lvz::measurement::Host().Closing())
+                        lifecycleRecorder.Finish(true,LifecycleCounters(lvz::measurement::Host().Health()),
+                            LifecycleProbeHealth(finalHealth));
+                    else
+                        lifecycleRecorder.Finish(false);
+                } catch(const std::exception& exception) {
+                    note(std::string("Lifecycle evidence finalization failed: ")+exception.what());
+                }
+            }
+            lifecycleRecorder.Abandon();
             initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
+            lifecycleSettingPresent=false;lifecycleEnabled=false;
             reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
             ResetHostedFire();
