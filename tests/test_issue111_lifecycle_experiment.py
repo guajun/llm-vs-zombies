@@ -206,6 +206,17 @@ class ExperimentEntryTests(unittest.TestCase):
             add_audit_mode(directory / "audit", child, enabled=(mode == "on"))
         return metadata, suite
 
+    def test_child_facts_bind_probe_arm_and_pinned_build(self):
+        child = "issue111-d-probe-on-a-s42-c0"
+        directory = self.root / "experiments" / "runs" / child
+        write_run_manifest(directory, child)
+        add_audit_mode(directory / "audit", child, enabled=True)
+        _, problems = experiment._child_facts(self.root, "issue111-d-probe-on-a", "on", child, "on")
+        self.assertTrue(any("no lifecycle_probes capability" in problem for problem in problems), problems)
+        _, pinned = experiment._child_facts(self.root, "issue111-d-probe-on-a", "on", child, None,
+                                            "a" * 64)
+        self.assertTrue(any("pinned build" in problem for problem in pinned), pinned)
+
     def test_check_and_seal_on_complete_suite(self):
         metadata, suite = self._complete_suite()
         report = experiment.check(self.root, "issue111-d-on-a")
