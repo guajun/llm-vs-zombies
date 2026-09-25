@@ -148,7 +148,8 @@ python tools/issue110_deaths.py --output <新目录>/issue111-recheck110
 
 `schema`、`kind`、`capture_sequence`、`version{epoch,tick,revision}`、`version_phase`
 （`controlled_boundary`/`initialization`/`unknown`）、`engine_call_id`（受控调用内为真实 ID，否则必须
-为 null，禁止伪造）、`invocation{depth,invocation_id,parent_invocation_id}`、`entity{id,slot,generation}`、
+为 null，禁止伪造）、`invocation{invocation_id,depth,parent_invocation_id}`（每条事件都输出
+invocation_id 与 depth，仅顶层 parent_invocation_id 为 null）、`entity{id,slot,generation}`、
 `before_after`（`before`/`after` 子对象）原始字段子集、`classification{class,cause}`（无证据时 `unknown`）、`probe`、`complete`。
 每个捕获点只复制自己声明的最小字段；浮点保存原始 32 位；指针不作为跨运行身份。
 

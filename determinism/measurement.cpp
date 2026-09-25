@@ -4,7 +4,15 @@
 namespace lvz::measurement {
 namespace {
 MeasurementHost host;
-constexpr uint8_t kIdle = 0, kOpen = 1, kClosed = 2;
+constexpr uint8_t kOpen = 1, kClosed = 2, kFailed = 3;
+const char* StateName(uint8_t state) {
+    switch (state) {
+        case kOpen: return "open";
+        case kClosed: return "closed";
+        case kFailed: return "failed";
+        default: return "idle";
+    }
+}
 }
 
 MeasurementHost& Host() noexcept { return host; }
@@ -25,6 +33,7 @@ bool MeasurementHost::Open(uint32_t ownerThread, std::string* error) noexcept {
     owner_ = ownerThread;
     ++session_id_;
     next_sequence_ = 1;
+    next_invocation_id_ = 1;
     captured_.store(0);
     delivered_.store(0);
     persisted_.store(0);
@@ -59,6 +68,16 @@ bool MeasurementHost::Close(std::string* error) noexcept {
     return true;
 }
 
+bool MeasurementHost::Abort(std::string* error) noexcept {
+    if (state_.load() != kOpen) {
+        if (error) *error = "measurement session is not open";
+        return false;
+    }
+    // No successful close receipt: faults and undelivered counts stay visible.
+    state_.store(kFailed);
+    return true;
+}
+
 uint64_t MeasurementHost::NextSequence() noexcept {
     if (Refuse()) return 0;
     if (GetCurrentThreadId() != owner_) {
@@ -66,6 +85,15 @@ uint64_t MeasurementHost::NextSequence() noexcept {
         return 0;
     }
     return next_sequence_++;
+}
+
+uint64_t MeasurementHost::NextInvocationId() noexcept {
+    if (Refuse()) return 0;
+    if (GetCurrentThreadId() != owner_) {
+        wrong_thread_.fetch_add(1);
+        return 0;
+    }
+    return next_invocation_id_++;
 }
 
 void MeasurementHost::OnCaptured() noexcept { if (!Refuse()) captured_.fetch_add(1); }
@@ -79,7 +107,7 @@ void MeasurementHost::OnIncomplete() noexcept { if (!Refuse()) incomplete_.fetch
 Json MeasurementHost::Health() const noexcept {
     return {
         {"session", session_id_},
-        {"state", state_.load() == kOpen ? "open" : (state_.load() == kClosed ? "closed" : "idle")},
+        {"state", StateName(state_.load())},
         {"captured", captured_.load()},
         {"delivered", delivered_.load()},
         {"persisted", persisted_.load()},
@@ -98,6 +126,7 @@ bool MeasurementHost::BoundTo(uint32_t thread) const noexcept {
 
 bool MeasurementHost::SessionOpen() const noexcept { return state_.load() == kOpen; }
 bool MeasurementHost::Closed() const noexcept { return state_.load() == kClosed; }
+bool MeasurementHost::Failed() const noexcept { return state_.load() == kFailed; }
 uint64_t MeasurementHost::SessionId() const noexcept { return session_id_; }
 bool MeasurementHost::CloseReceiptPresent() const noexcept { return close_receipt_present_.load(); }
 }

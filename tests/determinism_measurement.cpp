@@ -78,7 +78,7 @@ int main() {
         Host().OnPersisted(1);
         Check(Host().Close(&error), "a rebalanced session must close");
 
-        // --- Session 3: fault reporting, faulted-close refusal, wrong-thread refusal ---
+        // --- Session 3: fault reporting, faulted-close refusal, Abort, reopen ---
         Check(Host().Open(GetCurrentThreadId(), &error), "third Open must succeed");
         Host().OnOverflow();
         Host().OnWrongThread();
@@ -97,7 +97,26 @@ int main() {
         Check(!leaked, "foreign thread must not receive a capture_sequence");
         Check(Counter(Host().Health(), "wrong_thread") == 2, "foreign-thread allocation must be counted");
 
-        std::cout << "measurement: shared capture_sequence, fault counters, session/close lifecycle passed\n";
+        // A faulted session must still be terminable so cleanup can run and a
+        // new session can start, without emitting a successful close receipt.
+        Check(Host().Abort(&error), "Abort must finalize a faulted session");
+        Check(Host().Failed() && !Host().CloseReceiptPresent()
+                  && Host().Health().at("state") == "failed",
+              "Abort must mark failed without a close receipt");
+        Check(Counter(Host().Health(), "wrong_thread") == 2 && Counter(Host().Health(), "overflow") == 1,
+              "Abort must preserve fault evidence");
+        Check(Host().Open(GetCurrentThreadId(), &error) && Host().SessionId() == 4,
+              "next-round re-init must succeed after Abort");
+
+        // --- Session 4: persistence failure is not a successful close ---
+        Host().OnCaptured();
+        Host().OnDelivered(1);
+        Check(!Host().Close(&error) && error == "measurement batch is incomplete",
+              "Close must refuse a batch that was not persisted");
+        Check(Host().Abort(&error), "Abort must finalize an incompletely persisted session");
+        Check(Host().Failed() && !Host().CloseReceiptPresent(), "Abort must not fabricate a receipt");
+
+        std::cout << "measurement: shared capture_sequence, fault counters, session/close/abort lifecycle passed\n";
         return 0;
     } catch (const std::exception& exception) {
         std::cerr << exception.what() << '\n';

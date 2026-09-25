@@ -352,7 +352,8 @@ void Initialize(const std::filesystem::path& runDir) {
         }
         if(measurementOpened) {
             std::string closeError;
-            lvz::measurement::Host().Close(&closeError);
+            if(!lvz::measurement::Host().Close(&closeError))
+                lvz::measurement::Host().Abort();
         }
         checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();fpRaw.close();initialized=false;
         throw;
@@ -610,10 +611,8 @@ void Shutdown() {
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_closed"},
         {"version",lastObservationVersion},{"payload",ParticleShakeStatus()}});
     std::string measureCloseError;
-    if(!lvz::measurement::Host().Close(&measureCloseError)) {
-        Flush();
-        throw std::runtime_error("Measurement session close failed: "+measureCloseError);
-    }
+    const bool measurementClosed=lvz::measurement::Host().Close(&measureCloseError);
+    if(!measurementClosed) lvz::measurement::Host().Abort();
     const auto finalHealth=SpawnHookStatus();
     Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},
         {"version",lastObservationVersion},{"payload",finalHealth}});
@@ -628,5 +627,7 @@ void Shutdown() {
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
     ResetHostedFire();
 #endif
+    if(!measurementClosed)
+        throw std::runtime_error("Measurement session close failed: "+measureCloseError);
 }
 }

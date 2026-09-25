@@ -67,7 +67,7 @@ struct Record {
 std::array<EntryData,kDepthLimit> stack;
 std::array<Record,kCapacity> queue;
 size_t depth=0, count=0;
-uint64_t ordinal=0, captured=0, invocationId=0;
+uint64_t ordinal=0, captured=0;
 std::atomic<uint64_t> wrongThread{0}, faults{0}, overflow{0};
 DWORD gameThread=0;
 bool installed=false;
@@ -101,9 +101,10 @@ void Enter(SavedRegisters* frame) noexcept {
     const uint32_t enterDepth=depth;
     auto& item=stack[depth++];
     item=EntryData{};
-    // Invocation identity is entry-order and is separate from the event's
-    // capture_sequence, which is allocated at the actual exit capture point.
-    item.invocationId=invocationId++;
+    // Invocation identity is session-scoped and entry-order; it is separate
+    // from the event's capture_sequence, which is allocated at the exit capture
+    // point.
+    item.invocationId=lvz::measurement::Host().NextInvocationId();
     item.depth=enterDepth;
     item.parentInvocationId=enterDepth?stack[enterDepth-1].invocationId:0;
     const auto* args=reinterpret_cast<const uint32_t*>(frame+1);
@@ -190,7 +191,7 @@ bool Install(uintptr_t entry,uintptr_t epilogue,uintptr_t mt,std::string& error,
     }
     if(status==MH_OK) {
         gameThread=GetCurrentThreadId();entryAddress=entry;exitAddress=epilogue;mtAddress=mt;
-        depth=count=0;ordinal=captured=0;invocationId=0;wrongThread=0;faults=0;overflow=0;currentBoundary={};
+        depth=count=0;ordinal=captured=0;wrongThread=0;faults=0;overflow=0;currentBoundary={};
         status=MH_EnableHook(reinterpret_cast<void*>(epilogue));
         if(status==MH_OK) status=MH_EnableHook(reinterpret_cast<void*>(entry));
     }
@@ -229,8 +230,10 @@ Json LifecycleEvent(const Record& record) {
         version={{"epoch",input.boundary.segment},{"tick",input.boundary.tick},{"revision",input.boundary.revision}};
         engineCallId=input.boundary.engineCallId;
     }
-    Json invocation=nullptr;
-    if(input.depth) invocation={{"depth",input.depth},{"invocation_id",input.invocationId},{"parent_invocation_id",input.parentInvocationId}};
+    // Every event carries an invocation_id so a child's parent_invocation_id
+    // can always be resolved; only the top-level parent reference is null.
+    Json invocation={{"invocation_id",input.invocationId},{"depth",input.depth},
+        {"parent_invocation_id",input.depth?Json(input.parentInvocationId):Json(nullptr)}};
     return {{"schema","lvz.lifecycle-event.v1"},{"kind","zombie_initialized"},
         {"capture_sequence",record.captureSequence},
         {"version",version},

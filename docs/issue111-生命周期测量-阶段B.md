@@ -9,16 +9,18 @@
 本 PR 做：
 
 - 新增 `determinism/measurement.{hpp,cpp}`：由 **runtime 宿主** 拥有的一次性测量会话
-  `Open`/`Close`、进程内共享 `capture_sequence` 分配器、单一宿主批次台账与关闭回执。
+  `Open`/`Close`/`Abort`、进程内共享 `capture_sequence` 分配器与会话内共享 `invocation_id` 分配器、
+  单一宿主批次台账与关闭/终止回执。
 - 出生探针接入共享顺序域：`capture_sequence` 在**实际捕获点出口**分配、进入队列前落定；调用身份
-  `invocation_id`/`parent_invocation_id` 在入口分配，与事件序号分离；旧 `ordinal` 保持单探针历史语义。
+  `invocation_id`/`parent_invocation_id` 在入口分配（会话内唯一，重装探针不重置），每条事件都带
+  `invocation_id` 与 `depth`，仅顶层 `parent_invocation_id` 为 null；旧 `ordinal` 保持单探针历史语义。
 - `DrainSpawnBatch()`：单一破坏性 drain，同时产出旧 `lvz.spawn.v1` 投影与新的
   `lvz.lifecycle-event.v1` 投影。
 - `determinism/audit.cpp` 最小接入：`Initialize` 开启会话、`Shutdown` 关闭会话、`DrainAndCheckSpawns`
   单次 drain 并标记 delivered/persisted；写盘失败与关闭失败显式传播。
-- 离线夹具：`tests/determinism_measurement.cpp`（会话/关闭/负例）与扩展的
+- 离线夹具：`tests/determinism_measurement.cpp`（会话/关闭/终止/负例）与扩展的
   `tests/determinism_spawn_hook.cpp`（出口捕获顺序、嵌套 invocation、跨类型交错、drain 不重置、
-  关闭后拒绝采集）。
+  重装不重置、关闭后拒绝采集）。
 
 本 PR 不做：
 
@@ -34,10 +36,10 @@
 |---|---|
 | 复用出生探针与 runtime 宿主，抽公共部分 | 公共顺序域/会话台账抽到 `lvz::measurement`，出生探针绑定；无泛型 hook 生成器/动态注册/脚本 |
 | 公共上下文 | `lvz.lifecycle-event.v1` 投影含 `entity{id,slot,generation}`、`version`、`version_phase`、`engine_call_id`、`probe`、`invocation`、`classification`、`complete` |
-| 同一顺序域、嵌套 invocation/parent | `capture_sequence` 出口分配；`invocation{depth,invocation_id,parent_invocation_id}` 入口分配、与事件序号分离 |
+| 同一顺序域、嵌套 invocation/parent | `capture_sequence` 出口分配；`invocation{invocation_id,depth,parent_invocation_id}` 每条事件都输出、入口分配、会话内唯一，与事件序号分离 |
 | hook 内只做有界复制 | 复用既有出生探针约束；新字段只做定长复制，无堆分配/序列化/文件 I/O/回调 |
 | 单一宿主 drain 与批次所有权 | `DrainSpawnBatch()` 单次破坏性 drain；`MeasurementHost` 记录 delivered |
-| 计数与关闭回执 | 8 个合同计数器全部实现；`Close()` 置 `close_receipt_present`，关闭后拒绝分配/采集/台账修改 |
+| 计数与关闭回执 | 8 个合同计数器全部实现；`Close()` 成功才置 `close_receipt_present`，失败用 `Abort()` 终止并保留证据；关闭后拒绝分配/采集/台账修改 |
 | 安装验证/回滚/所有权/卸载 | 复用既有 `Install`/`Remove`；探针安装只 `BoundTo` 绑定已开启会话，不 reset 共享状态 |
 | 新模式显式启用 + 旧轨迹可读 | `lvz.spawn.v1` 保持兼容；缺 `capture_sequence` 的旧轨迹由未来读取器标 unavailable |
 | 实验入口独立闭环 | 会话 Open/Close 已由 `audit.cpp` 宿主接入；lifecycle 落盘与读取器属下一 PR |
@@ -46,13 +48,15 @@
 
 - `capture_sequence` 在**出口**分配：嵌套初始化实际先捕获子出口、再捕获父出口，因此子序号 < 父序号，
   排序与事实发生顺序一致；将来初始化期间的伤害/移除事件也按真实出口顺序排入。
-- `invocation_id`/`parent_invocation_id` 在**入口**分配（父先于子），只用于配对嵌套调用，不冒充事件序号。
+- `invocation_id`/`parent_invocation_id` 在**入口**分配（父先于子）且会话内唯一（重装探针不重置），
+  只用于配对嵌套调用；每条事件都输出 `invocation_id`/`depth`，仅顶层 `parent_invocation_id=null`。
 - 无受控边界的初始化事件：`version=null`、`version_phase=initialization`、`engine_call_id=null`。
 - `classification.cause` 恒为 `unknown`；未观测到死亡阶段不等于已确认非死亡。
 - `persisted` 只由记录适配器在写盘成功后递增；探针与 drain 只负责 `captured`/`delivered`。
 - 会话生命周期：`Open` 拒绝活跃会话重复开启并递增 session 身份；`Close` 在有 fault 或
-  `captured != delivered || delivered != persisted` 时失败；关闭后所有分配/采集/台账修改被拒绝并计入
-  `refused`，回执成为稳定最终边界。
+  `captured != delivered || delivered != persisted` 时失败并保持 open；此时用 `Abort()` 终止为 failed
+  （不产生成功回执、保留故障与未交付计数），确保卸钩/文件清理可执行，清理后才允许新会话。
+  关闭/终止后所有分配/采集/台账修改被拒绝并计入 `refused`，回执成为稳定最终边界。
 
 ## 4. 校验
 
