@@ -35,8 +35,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.scope == "lifecycle":
             report = lifecycle_compare.compare_lifecycle(resolve_audit(args.left), resolve_audit(args.right))
         else:
-            report = lifecycle_compare.compare_scoped(resolve_audit(args.left), resolve_audit(args.right),
-                                                      scope=args.scope)
+            # Keep the original run paths so the action transcript can be read
+            # from the run directory; the scoped comparator resolves audit dirs
+            # for validation on its own.
+            report = lifecycle_compare.compare_scoped(args.left, args.right, scope=args.scope)
     except lifecycle_compare.CompareError as exc:
         print(json.dumps({"schema": "lvz.lifecycle-compare.v1", "ok": False, "problems": [str(exc)]},
                          ensure_ascii=False, indent=2))

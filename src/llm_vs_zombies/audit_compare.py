@@ -804,7 +804,7 @@ class _DrawEvidence:
         if self.preparing is not None and self.warm is None and kind != "render_prepared":
             if kind not in {"zombie_initialized", "particle_shake_seed"} or event.get("phase") != "initialization":
                 raise EvidenceError("warm drawing contains an unexpected controlled mutation")
-        if self.terminal_completed and kind not in {"recording_closed", "engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if self.terminal_completed and kind not in {"recording_closed", "engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed", "lifecycle_probes_closed"}:
             raise EvidenceError("simulation event follows terminal completion")
         if kind == "render_preparing":
             if (self.preparing is not None or self.warm is not None or self.seen_frame
@@ -946,7 +946,7 @@ class _EngineCallEvidence:
 
     def event(self, event, raw=None):
         kind, payload = event["kind"], event["payload"]
-        footer = {"recording_closed", "engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}
+        footer = {"recording_closed", "engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed", "lifecycle_probes_closed"}
         if self.terminal_completed and kind not in footer:
             raise EvidenceError("engine event follows terminal completion")
         if kind in {"particle_shake_seed", "zombie_initialized"}:
@@ -1204,7 +1204,7 @@ class _HostedFireEvidence:
 
 class _EventSummary:
     def __init__(self):
-        self.tail = deque(maxlen=7)
+        self.tail = deque(maxlen=8)
         self.birth_count = 0
         self.controlled_birth_count = 0
         self.initialization_birth_count = 0
@@ -1218,9 +1218,9 @@ class _EventSummary:
             raise EvidenceError("native animation link fault invalidates strict evidence")
         if event["seq"] < self.last_seq:
             raise EvidenceError("audit event sequence moved backwards")
-        if self.recording_closed and event["kind"] not in {"engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if self.recording_closed and event["kind"] not in {"engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed", "lifecycle_probes_closed"}:
             raise EvidenceError("native event after recording close")
-        if not self.recording_closed and event["kind"] in {"engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed"}:
+        if not self.recording_closed and event["kind"] in {"engine_call_closed", "fp_environment_closed", "sound_effects_closed", "draw_schedule_closed", "particle_shake_closed", "spawn_hook_closed", "lifecycle_probes_closed"}:
             raise EvidenceError("native hook close precedes recording close")
         self.last_seq = event["seq"]
         if event["kind"] == "zombie_initialized":
@@ -1236,9 +1236,51 @@ class _EventSummary:
         self.count += 1
 
 
-def _closed_events(summary, *, particle=None, draw=None, calls=None, audio=None, fp=None, spawn_required=False):
+PROBE_CLOSE_FAULT_COUNTERS = ("overflow", "wrong_thread", "unmatched_commits", "pair_mismatch",
+                              "overwritten_pending", "faults", "read_failed", "classify_refused",
+                              "inactive_suppressed")
+
+
+def _validate_probes_close(event, manifest, summary):
+    """Strict validation of the declared lifecycle_probes_closed footer."""
+    health = event.get("payload")
+    if not isinstance(health, dict) or set(health) != {"installed", "active", "healthy", "pending_candidate",
+            "patched_sites", "counters", "sites", "reader_protected", "pending_callbacks"}:
+        raise EvidenceError("lifecycle probe close payload is missing or malformed")
+    if (health.get("healthy") is not True or health.get("installed") is not False
+            or health.get("active") is not False or health.get("pending_candidate") is not False
+            or health.get("reader_protected") is not False or health.get("pending_callbacks") != 0):
+        raise EvidenceError("final lifecycle probe evidence is unhealthy or still installed")
+    counters = health.get("counters")
+    if not isinstance(counters, dict) or any(type(counters.get(key)) is not int for key in PROBE_CLOSE_FAULT_COUNTERS):
+        raise EvidenceError("lifecycle probe close counters are malformed")
+    if any(counters[key] != 0 for key in PROBE_CLOSE_FAULT_COUNTERS) or counters.get("queued") != 0:
+        raise EvidenceError("lifecycle probe close counters are not clean")
+    if counters.get("captured") != counters.get("delivered"):
+        raise EvidenceError("lifecycle probe capture/delivery mismatch at close")
+    block = manifest.get("lifecycle_probes") if isinstance(manifest, dict) else None
+    if not isinstance(block, dict) or block.get("enabled") is not True:
+        raise EvidenceError("lifecycle probe close has no enabled capability")
+    final = block.get("probe_counters")
+    if not isinstance(final, dict) or final.get("captured") != counters.get("captured")             or final.get("delivered") != counters.get("delivered") or final.get("queued") != 0:
+        raise EvidenceError("lifecycle probe close differs from the final manifest counters")
+    if block.get("healthy") is not True or block.get("installed") is not False:
+        raise EvidenceError("lifecycle probe capability final health is not clean")
+    if len(summary.tail) < 2 or event["version"] != summary.tail[-2]["version"]:
+        raise EvidenceError("lifecycle probe close boundary differs from spawn hook close")
+
+
+def _closed_events(summary, *, particle=None, draw=None, calls=None, audio=None, fp=None,
+                   spawn_required=False, probes_required=False, probes_allowed=False, manifest=None):
     """Validate the declared close sequence and all hook health summaries."""
     final = list(summary.tail)
+    if final and final[-1]["kind"] == "lifecycle_probes_closed":
+        if not probes_allowed:
+            raise EvidenceError("lifecycle probe close is not declared by the capability")
+        _validate_probes_close(final[-1], manifest, summary)
+        final = final[:-1]
+    elif probes_required:
+        raise EvidenceError("required lifecycle probe close health is missing")
     if spawn_required and (not final or final[-1]["kind"] != "spawn_hook_closed"):
         raise EvidenceError("required spawn hook close health is missing")
     if final and final[-1]["kind"] == "spawn_hook_closed":
@@ -1844,7 +1886,10 @@ class AuditLog:
         self.frames = FrameSelection(self)
         if require_closed:
             _closed_events(self._summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio, fp=self._fp,
-                           spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
+                           spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True,
+                           probes_required=self.manifest.get("lifecycle_probes", {}).get("enabled") is True,
+                           probes_allowed=self.manifest.get("lifecycle_probes", {}).get("enabled") is True,
+                           manifest=self.manifest)
         # Full semantic lifecycle validation, not a receipt-existence check. A
         # live snapshot (require_closed=False) may be missing the receipt but
         # its present records must still satisfy the contract.
@@ -2217,7 +2262,10 @@ class AuditTail:
             raise EvidenceError("unexpected unconsumed frames at recording close")
         self._stream.finish(final=True)
         _closed_events(self._stream.summary, particle=self._particle, draw=self._draw, calls=self._calls, audio=self._audio, fp=self._fp,
-                       spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True)
+                       spawn_required=self.manifest.get("spawn_hook", {}).get("installed") is True,
+                       probes_required=self.manifest.get("lifecycle_probes", {}).get("enabled") is True,
+                       probes_allowed=self.manifest.get("lifecycle_probes", {}).get("enabled") is True,
+                       manifest=self.manifest)
         lifecycle_report(self.directory, self.manifest, require_close=True)
         for name, position in self._positions.items():
             if self._check_file(name).st_size != position:
