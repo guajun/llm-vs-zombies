@@ -68,7 +68,7 @@ public:
     // `complete`. Always throws on a failed write, close or receipt
     // finalization; the close receipt is only ever the last durable step.
     void Finish(bool complete, const Json& counters = Json::object(),
-                const Json& probeHealth = Json::object());
+                const Json& probeHealth = Json::object(), bool probesEnabled = false);
 
     // Best-effort release after a failed Finish so a later Initialize can
     // start a fresh run in the same process. Never writes a receipt.
@@ -90,7 +90,7 @@ public:
 #endif
 
 private:
-    void WriteReceipt(const Json& counters, const Json& probeHealth);
+    void WriteReceipt(const Json& counters, const Json& probeHealth, bool probesEnabled);
     void CloseEvents();
 
     std::filesystem::path auditDir_;
@@ -101,6 +101,8 @@ private:
     LifecycleIdentity identity_;
     uint64_t count_ = 0;
     uint64_t bytes_ = 0;
+    uint64_t initializationRecords_ = 0;
+    uint64_t probeRecords_ = 0;
     uint64_t firstSequence_ = 0;
     uint64_t lastSequence_ = 0;
     std::string digest_;

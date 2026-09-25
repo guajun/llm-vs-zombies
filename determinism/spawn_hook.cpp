@@ -274,6 +274,12 @@ bool RemoveSpawnHook(std::string& error) {
 void SetSpawnBoundary(uint64_t tick,uint64_t revision,uint32_t segment,uint64_t engineCallId) {
     RequireOwner();currentBoundary={tick,revision,segment,true,engineCallId};
 }
+#ifdef LVZ_LIFECYCLE_PROBES_TESTING
+void SetSpawnBoundaryForTest(uint64_t tick,uint64_t revision,uint32_t segment,uint64_t engineCallId) {
+    currentBoundary={tick,revision,segment,true,engineCallId};
+}
+void ClearSpawnBoundaryForTest() {currentBoundary={};}
+#endif
 void ClearSpawnBoundary() {RequireOwner();currentBoundary={};}
 SpawnBatch DrainSpawnBatch() {
     RequireOwner();

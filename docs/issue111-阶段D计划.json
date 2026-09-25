@@ -150,15 +150,22 @@
   "commands": [
     "python tools/issue111_stage_d.py --root . check",
     "python tools/issue111_stage_d.py --root . doctor --require-game",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-a --plan experiments/plans/issue99-shovel-control.json --mode on --skip-build",
-    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --skip-build",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --skip-build",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-a --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --skip-build",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-off-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes off --skip-build",
+    "python tools/issue111_lifecycle_experiment.py --root . prepare --name issue111-d-probe-on-b --plan experiments/plans/issue99-shovel-control.json --mode on --probes on --skip-build",
     "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-off-a",
     "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-on-a",
-    "python tools/issue111_lifecycle_report.py experiments/runs/issue111-d-probe-on-a --out work/issue111-d/probe-on-a.json",
-    "python tools/issue111_lifecycle_compare.py experiments/runs/issue111-d-probe-off-a experiments/runs/issue111-d-probe-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-off-b",
+    "python tools/issue111_lifecycle_experiment.py --root . run --name issue111-d-probe-on-b",
     "python tools/issue111_lifecycle_experiment.py --root . check --run issue111-d-probe-on-a",
     "python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-probe-on-a",
-    "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-probe-on-a"
+    "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-probe-on-a",
+    "python tools/issue111_lifecycle_experiment.py --root . check --run issue111-d-probe-off-a",
+    "python tools/issue111_lifecycle_experiment.py --root . seal --run issue111-d-probe-off-a",
+    "python tools/issue111_lifecycle_experiment.py --root . verify --run issue111-d-probe-off-a",
+    "python tools/issue111_lifecycle_report.py experiments/runs/issue111-d-probe-on-a-s42-c0 --out work/issue111-d/probe-on-a-c0.json",
+    "python tools/issue111_lifecycle_compare.py experiments/runs/issue111-d-probe-off-a-s42-c0 experiments/runs/issue111-d-probe-on-a-s42-c0"
   ],
   "run_environment": {
     "issue111-d-probe-off-a": {
@@ -177,5 +184,10 @@
       "LVZ_LIFECYCLE_RECORDING": "1",
       "LVZ_LIFECYCLE_PROBES": "1"
     }
-  }
+  },
+  "command_notes": [
+    "Every prepare arm pins both switches: --mode on keeps LVZ_LIFECYCLE_RECORDING=1 in both probe arms and --probes off/on is the real LVZ_LIFECYCLE_PROBES switch.",
+    "The suite has no audit of its own: report/compare read the real child run directories named in evaluation_child_mapping (issue111-d-probe-on-a-s42-c0 etc.).",
+    "Only one game process at a time; run arms sequentially. The runner applies LVZ_LIFECYCLE_PROBES from the prepared metadata, so the ambient environment is not trusted."
+  ]
 }

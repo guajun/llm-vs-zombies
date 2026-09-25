@@ -50,6 +50,8 @@ REPORT_SCHEMA = "lvz.lifecycle-experiment-report.v1"
 SEAL_SCHEMA = "lvz.lifecycle-seal.v1"
 MODE_ENV = "LVZ_LIFECYCLE_RECORDING"
 MODE_VALUES = {"off": "0", "on": "1"}
+PROBES_ENV = "LVZ_LIFECYCLE_PROBES"
+PROBES_VALUES = {"off": "0", "on": "1"}
 _NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -118,11 +120,16 @@ def plan_abspath(root: Path, metadata: dict) -> Path:
     return path if path.is_absolute() else Path(root) / path
 
 
-def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = True) -> dict:
-    """Lock plan/root/mode/child identities without creating the suite output."""
+def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = True,
+            probes: str | None = None) -> dict:
+    """Lock plan/root/mode/probe/child identities without creating the suite output."""
     root = Path(root).resolve()
     if mode not in MODE_VALUES:
         raise ExperimentError("mode must be off or on")
+    if probes is not None and probes not in PROBES_VALUES:
+        raise ExperimentError("probes must be off, on or omitted")
+    if probes == "on" and mode != "on":
+        raise ExperimentError("the probe arm requires lifecycle recording to stay on")
     plan_path = Path(plan).resolve()
     parsed = _load_plan(plan_path)
     suite = run_directory(root, name)
@@ -141,6 +148,8 @@ def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = 
         "root": str(root),
         "mode": mode,
         "env": {"name": MODE_ENV, "value": MODE_VALUES[mode]},
+        "probes": None if probes is None else {"env": {"name": PROBES_ENV, "value": PROBES_VALUES[probes]},
+                                               "mode": probes},
         "plan": {
             "path": str(plan_path.relative_to(root)) if plan_path.is_relative_to(root) else str(plan_path),
             "sha256": sha256_file(plan_path),
@@ -170,6 +179,15 @@ def _read_prepared(root: Path, name: str) -> dict:
     if metadata.get("env", {}).get("name") != MODE_ENV \
             or metadata["env"].get("value") != MODE_VALUES[metadata["mode"]]:
         raise ExperimentError("lifecycle mode file does not bind the explicit environment switch")
+    probes = metadata.get("probes")
+    if probes is not None:
+        if not isinstance(probes, dict) or probes.get("mode") not in PROBES_VALUES:
+            raise ExperimentError("lifecycle mode file has a malformed probe arm")
+        if probes.get("env", {}).get("name") != PROBES_ENV \
+                or probes["env"].get("value") != PROBES_VALUES[probes["mode"]]:
+            raise ExperimentError("lifecycle mode file does not bind the probe environment switch")
+        if probes["mode"] == "on" and metadata.get("mode") != "on":
+            raise ExperimentError("a probe-on arm requires lifecycle recording on")
     if Path(metadata.get("root", "")).resolve() != root:
         raise ExperimentError("prepared root differs from the requested root")
     plan_path = Path(metadata["plan"]["path"])
@@ -264,6 +282,10 @@ def run_experiment(root: Path, name: str, *, suite_runner=None,
     from llm_vs_zombies import evaluation
     previous = os.environ.get(MODE_ENV)
     os.environ[MODE_ENV] = metadata["env"]["value"]
+    probes = metadata.get("probes")
+    previous_probes = os.environ.get(PROBES_ENV)
+    if probes is not None:
+        os.environ[PROBES_ENV] = probes["env"]["value"]
     try:
         runner = suite_runner
         if runner is None:
@@ -275,13 +297,19 @@ def run_experiment(root: Path, name: str, *, suite_runner=None,
             os.environ.pop(MODE_ENV, None)
         else:
             os.environ[MODE_ENV] = previous
+        if probes is not None:
+            if previous_probes is None:
+                os.environ.pop(PROBES_ENV, None)
+            else:
+                os.environ[PROBES_ENV] = previous_probes
 
 
 def _valid_sha256(value) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
-def _child_facts(root: Path, name: str, mode: str, child: str) -> tuple[dict | None, list[str]]:
+def _child_facts(root: Path, name: str, mode: str, child: str,
+                 probe_mode: str | None = None) -> tuple[dict | None, list[str]]:
     from llm_vs_zombies.audit_compare import AuditLog, EvidenceError
     directory = root / "experiments" / "runs" / child
     problems: list[str] = []
@@ -318,6 +346,21 @@ def _child_facts(root: Path, name: str, mode: str, child: str) -> tuple[dict | N
                       "frames": len(strict.frames),
                       "target": strict.manifest.get("target")}
     lifecycle_mode = lifecycle_events.mode(strict.manifest)
+    if probe_mode is not None:
+        probe_block = strict.manifest.get("lifecycle_probes")
+        if not isinstance(probe_block, dict):
+            problems.append(f"{child}: prepared probe arm has no lifecycle_probes capability")
+        else:
+            expected_enabled = probe_mode == "on"
+            if probe_block.get("enabled") is not expected_enabled:
+                problems.append(f"{child}: lifecycle_probes.enabled does not match the prepared probe arm")
+            elif expected_enabled:
+                if probe_block.get("healthy") is not True:
+                    problems.append(f"{child}: lifecycle_probes capability is not healthy")
+                if probe_block.get("pending_candidate") is not False:
+                    problems.append(f"{child}: lifecycle_probes still has a pending candidate")
+                if probe_block.get("installed") is not False:
+                    problems.append(f"{child}: lifecycle_probes was not cleanly unloaded")
     if mode == "on":
         if lifecycle_mode != "enabled":
             problems.append(f"{child}: expected lifecycle capability enabled, found {lifecycle_mode}")
@@ -533,6 +576,8 @@ def main(argv: list[str] | None = None) -> int:
     prepare_parser.add_argument("--name", required=True)
     prepare_parser.add_argument("--plan", type=Path, required=True)
     prepare_parser.add_argument("--mode", choices=sorted(MODE_VALUES), required=True)
+    prepare_parser.add_argument("--probes", choices=sorted(PROBES_VALUES), default=None,
+                                help="explicit same-build probe arm (off/on); omitted keeps the old adapter-only arm")
     prepare_parser.add_argument("--skip-build", action="store_true",
                                 help="record that the existing build is reused; never implicit")
     run_parser = sub.add_parser("run", help="run the real evaluation suite with the mode environment")
@@ -546,7 +591,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
-            report = prepare(args.root, args.name, args.plan, args.mode, run_builds=not args.skip_build)
+            report = prepare(args.root, args.name, args.plan, args.mode, run_builds=not args.skip_build,
+                             probes=args.probes)
         elif args.command == "run":
             report = run_experiment(args.root, args.name)
         elif args.command == "check":

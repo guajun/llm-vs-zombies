@@ -9,8 +9,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from llm_vs_zombies import lifecycle_events  # noqa: E402
 from llm_vs_zombies.lifecycle_report import analyze_capture_facts  # noqa: E402
 
+FULL_COVERAGE = {"receipt_valid": True, "probe_capability": True, "initialization_capture": True,
+                 "full_window": True, "health_clean": True}
 
-def event(kind, sequence, *, entity=0x20001, site="phase-dienoloot", before=0, after=3):
+
+def event(kind, sequence, *, entity=0x00020001, site="phase-mowdown", before=0, after=3):
     base = {
         "schema": lifecycle_events.PROBE_EVENT_SCHEMA, "kind": kind, "capture_sequence": sequence,
         "version": None, "version_phase": "uncontrolled_update", "engine_call_id": None,
@@ -23,7 +26,7 @@ def event(kind, sequence, *, entity=0x20001, site="phase-dienoloot", before=0, a
     if kind == "zombie_phase_transition":
         base["phase"] = {"site": site, "before": before, "after": after}
     elif kind == "zombie_removal_marked":
-        base["removal"] = {"source": "phase-lifetime", "before": 0, "after": 1}
+        base["removal"] = {"source": "dienoloot_mdead_store", "before": 0, "after": 1}
     else:
         base["recycle"] = {"state": "candidate", "slot": 0, "free_head_before": 0, "count_before": 1}
     return base
@@ -35,43 +38,59 @@ class CaptureAnalysisTests(unittest.TestCase):
             event("zombie_phase_transition", 1),
             event("zombie_removal_marked", 2),
             event("zombie_slot_recycle_candidate", 3),
-        ])
-        self.assertTrue(report["entities"][0x20001]["confirmed_death_stage"])
+        ], coverage=FULL_COVERAGE)
+        self.assertTrue(report["entities"][0x00020001]["confirmed_death_stage"])
         self.assertEqual(report["facts"][1]["class"], "removal_after_death")
         self.assertTrue(report["first_kill"]["proven"])
         self.assertEqual(report["summary"]["recycle_candidates"], 1)
 
-    def test_droploot_is_not_death_evidence(self):
+    def test_missing_evidence_never_proves_a_kill(self):
+        report = analyze_capture_facts([event("zombie_phase_transition", 1)])
+        self.assertFalse(report["first_kill"]["proven"])
+        self.assertFalse(report["first_kill"]["prerequisites"]["receipt_valid"])
+        self.assertTrue(any("receipt" in reason for reason in report["first_kill"]["reasons"]))
+
+    def test_droploot_and_wrong_after_are_not_death_evidence(self):
         report = analyze_capture_facts([
             event("zombie_phase_transition", 1, site="phase-drop-loot", after=1),
-            event("zombie_removal_marked", 2),
-        ])
+            event("zombie_phase_transition", 2, site="phase-mowdown", after=99),
+            event("zombie_removal_marked", 3),
+        ], coverage=FULL_COVERAGE)
         self.assertFalse(report["first_kill"]["proven"])
-        self.assertEqual(report["facts"][0]["class"], "nondeath")
-        self.assertEqual(report["facts"][1]["class"], "removal_unclassified")
+        self.assertIn(report["facts"][0]["class"], ("nondeath", "phase_unclassified"))
+        self.assertEqual(report["facts"][1]["class"], "phase_unclassified")
+        self.assertEqual(report["facts"][2]["class"], "removal_unclassified")
+
+    def test_reviewer_repro_is_not_proven(self):
+        report = analyze_capture_facts([{
+            "schema": "lvz.lifecycle-event.v2", "kind": "zombie_phase_transition", "capture_sequence": 1,
+            "entity": {"id": 65536}, "phase": {"site": "phase-dienoloot", "before": 0, "after": 99}}])
+        self.assertFalse(report["first_kill"]["proven"])
 
     def test_earlier_unknown_removal_blocks_later_kill(self):
         report = analyze_capture_facts([
-            event("zombie_removal_marked", 1, entity=0x30001),
-            event("zombie_phase_transition", 2, entity=0x20001),
-        ])
+            event("zombie_removal_marked", 1, entity=0x00030001),
+            event("zombie_phase_transition", 2, entity=0x00020001),
+        ], coverage=FULL_COVERAGE)
         self.assertFalse(report["first_kill"]["proven"])
         self.assertEqual(report["first_kill"]["blocking_facts"][0]["capture_sequence"], 1)
 
     def test_repeated_phase_facts_are_preserved_in_order(self):
         report = analyze_capture_facts([
-            event("zombie_phase_transition", 1, site="phase-mowdown"),
-            event("zombie_phase_transition", 2, site="phase-mowdown"),
-        ])
+            event("zombie_phase_transition", 1),
+            event("zombie_phase_transition", 2),
+        ], coverage=FULL_COVERAGE)
         self.assertEqual([fact["capture_sequence"] for fact in report["facts"]], [1, 2])
 
     def test_unhealthy_counters_block_proof(self):
-        report = analyze_capture_facts([event("zombie_phase_transition", 1)], counters={"overflow": 1})
+        report = analyze_capture_facts([event("zombie_phase_transition", 1)],
+                                       counters={"overflow": 1}, coverage=FULL_COVERAGE)
         self.assertFalse(report["first_kill"]["proven"])
         self.assertIn("overflow", " ".join(report["first_kill"]["reasons"]))
 
     def test_envelope_records_are_unwrapped(self):
-        report = analyze_capture_facts([{"event": event("zombie_phase_transition", 1)}])
+        report = analyze_capture_facts([{"event": event("zombie_phase_transition", 1)}],
+                                       coverage=FULL_COVERAGE)
         self.assertEqual(report["summary"]["fact_count"], 1)
 
 

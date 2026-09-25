@@ -46,7 +46,7 @@
 
 | suite | 模式 | 用途 |
 |---|---|---|
-| `issue111-d-probe-off-a` | `LVZ_LIFECYCLE_PROBES=0`，`LVZ_LIFECYCLE_RECORDING=1` | 探针关闭对照冷启动 A（仅差探针安装） |
+| `issue111-d-probe-off-a` | `--probes off`（prepare 元数据固定 `LVZ_LIFECYCLE_PROBES=0`，`LVZ_LIFECYCLE_RECORDING=1`） | 探针关闭对照冷启动 A（仅差探针安装） |
 | `issue111-d-probe-off-b` | 同上 | 探针关闭对照冷启动 B（独立复跑） |
 | `issue111-d-probe-on-a` | `LVZ_LIFECYCLE_PROBES=1`，`LVZ_LIFECYCLE_RECORDING=1` | 探针开启冷启动 A |
 | `issue111-d-probe-on-b` | 同上 | 探针开启冷启动 B（独立复跑） |

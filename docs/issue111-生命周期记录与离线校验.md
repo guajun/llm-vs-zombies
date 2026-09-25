@@ -241,3 +241,13 @@ python -m unittest discover -s tests -q
 `lifecycle_probes.enabled=true`、`record_schema=lvz.lifecycle-event.v2`、probe set、session 与
 build 身份；重复的 phase store 原样保留（不做 dedup）；candidate 必须有 commit、commit 必须
 引用已知 candidate，否则文件判 failed。旧 v1 轨迹与 unavailable 判定保持兼容。
+
+## v2 关闭回执与最终健康（评审修正）
+
+探针开启时回执 schema 升级为 `lvz.lifecycle-close-receipt.v2`：`counters` 按来源分为
+`initialization` / `probes` / `total`，其中 `probes.persisted` 与 v2 记录数严格相等；
+`probe_health` 绑定卸载后的最终状态（`installed=false`、`pending_candidate=false`、
+`healthy=true`、`queued=0`，所有故障计数为 0），并与 manifest 的最终
+`lifecycle_probes.probe_counters`、`sites` 以及 audit `lifecycle_probes_closed` 事件逐项一致。
+v2 receipt 的 `event_schemas` 同时声明 v1 与 v2；缺关闭事件、payload 不一致或任一故障计数
+非零都判 failed。

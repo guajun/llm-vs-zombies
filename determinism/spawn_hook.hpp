@@ -39,6 +39,13 @@ struct CaptureBoundary {
 };
 CaptureBoundary CurrentCaptureBoundary() noexcept;
 
+#ifdef LVZ_LIFECYCLE_PROBES_TESTING
+// Test-only boundary setter so the probes fixture can exercise controlled
+// capture without installing the game-thread spawn hook.
+void SetSpawnBoundaryForTest(uint64_t tick, uint64_t revision, uint32_t segment, uint64_t engineCallId = 0);
+void ClearSpawnBoundaryForTest();
+#endif
+
 #ifdef LVZ_SPAWN_HOOK_TESTING
 // Only compiled into the standalone ABI test. Not exposed by the runtime DLL.
 bool InstallSpawnHookForTest(uintptr_t entry, uintptr_t epilogue,

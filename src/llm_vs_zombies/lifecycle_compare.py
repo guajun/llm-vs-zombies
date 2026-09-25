@@ -27,6 +27,10 @@ from . import evidence_codec, lifecycle_events
 from .audit_compare import first_difference
 
 IDENTITY_FIELDS = ("run_id", "branch_id", "session_id")
+# The raw Board* is a process-local diagnostic pointer (ASLR differs per cold
+# start). It is the only permitted normalization besides the run identity; the
+# entity ids, slots, generations, waves and counts stay comparable.
+DIAGNOSTIC_FIELDS = ("event.object.board",)
 _RECEIPT_FACT_KEYS = ("schema", "event_schema", "envelope_schema", "sequence_domain", "records",
                       "first_capture_sequence", "last_capture_sequence", "counters", "probe_health",
                       "completed", "persistence")
@@ -70,10 +74,14 @@ def _validate(directory: Path) -> dict:
 
 
 def normalize(record: dict) -> dict:
-    """Remove only the permitted per-run identity fields."""
+    """Remove only the permitted per-run identity and diagnostic fields."""
     value = copy.deepcopy(record)
     for key in IDENTITY_FIELDS:
         value.pop(key, None)
+    if isinstance(value.get("event"), dict):
+        obj = value["event"].get("object")
+        if isinstance(obj, dict) and "board" in obj:
+            obj["board"] = "<board-scope>"
     return value
 
 

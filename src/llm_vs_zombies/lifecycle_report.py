@@ -39,20 +39,28 @@ KNOWN_NONDEAD = {0, 11, 15, 20, 69, 70, 71, 73, 76}
 UNIMPLEMENTED_FACT_CLASSES = ("confirmed_death_stage", "removal_unclassified", "slot_recycle")
 # Sites whose store transitions are proven death stages in the locked binary.
 # DropLoot is deliberately absent: it is not kill evidence (issue #111 review).
-DEATH_CONFIRMING_SITES = frozenset({"phase-dienoloot", "phase-diewithloot", "phase-mowdown", "phase-burn",
-                                   "phase-playdeathanim", "phase-zamboni", "phase-catapult"})
+# The five frozen phase stores and the raw value each one writes. DropLoot is
+# not a phase store and is never death evidence.
+DEATH_PHASE_BY_SITE = {
+    "phase-playdeathanim": 1, "phase-applyburn": 2, "phase-mowdown": 3,
+    "phase-catapult": 1, "phase-zamboni": 1,
+}
+DEATH_STAGES = {1: "falling", 2: "ash", 3: "mower_death_stage"}
 NONDEATH_SITES = frozenset({"phase-drop-loot"})
 # Health counters that invalidate first-kill proof for the whole stream.
 BLOCKING_COUNTERS = ("overflow", "wrong_thread", "faults", "refused_recycle", "unmatched_commits",
                      "pair_mismatch", "overwritten_pending", "incomplete_records")
 
 
-def analyze_capture_facts(records: list[dict], *, counters: dict | None = None) -> dict:
+def analyze_capture_facts(records: list[dict], *, counters: dict | None = None,
+                          coverage: dict | None = None) -> dict:
     """Classify the v2 exact-store facts without dropping any observation.
 
     The function never folds repeated phase stores and never treats DropLoot as
-    kill evidence. First-kill provability is derived from the raw order, so an
-    earlier unclassified removal blocks a later claim instead of being hidden.
+    kill evidence. A first-kill claim additionally needs evidence that the
+    capture itself was complete: a valid close receipt, the enabled probe
+    capability, the initialization capture, a full frozen window and clean
+    counters. Missing evidence is never read as clean.
     """
     events: list[dict] = []
     for record in records:
@@ -81,8 +89,10 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None) 
                           "before": phase.get("before"), "after": phase.get("after")}
             transitions = state["phase_transitions"]
             transitions.append(transition)
-            if site in DEATH_CONFIRMING_SITES and phase.get("before") != phase.get("after"):
+            expected = DEATH_PHASE_BY_SITE.get(site)
+            if expected is not None and phase.get("after") == expected and phase.get("before") != expected:
                 transition["class"] = "confirmed_death_stage"
+                transition["stage"] = DEATH_STAGES.get(expected)
                 state["confirmed_death_stage"] = True
             elif site in NONDEATH_SITES:
                 transition["class"] = "nondeath"
@@ -113,11 +123,22 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None) 
     confirmed = [fact for fact in facts if fact.get("class") == "confirmed_death_stage"]
     unknown = [fact for fact in facts if fact.get("class") in ("removal_unclassified", "phase_unclassified")]
     counters = counters or {}
+    coverage = coverage or {}
     unhealthy = {name: counters.get(name) for name in BLOCKING_COUNTERS
                  if isinstance(counters.get(name), int) and counters.get(name) > 0}
     reasons: list[str] = []
     blocking: list[dict] = []
     first: dict | None = None
+    if not coverage.get("receipt_valid"):
+        reasons.append("no valid close receipt proves the capture stream was complete")
+    if not coverage.get("probe_capability"):
+        reasons.append("the exact-store probe capability is not proven installed and healthy")
+    if not coverage.get("initialization_capture"):
+        reasons.append("the initialization capture is not proven installed")
+    if not coverage.get("full_window"):
+        reasons.append("a full frozen window with both endpoints is not proven")
+    if coverage.get("health_clean") is not True:
+        reasons.append("clean probe counters are not asserted by the evidence")
     if not confirmed:
         reasons.append("no capture fact shows a death-confirming phase store")
     else:
@@ -127,7 +148,10 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None) 
             reasons.append("an earlier unclassified fact blocks first-kill proof")
     if unhealthy:
         reasons.append("probe health counters are not clean: " + ", ".join(sorted(unhealthy)))
-    proven = bool(first) and not blocking and not unhealthy
+    prerequisites = all(coverage.get(key) is True for key in
+                        ("receipt_valid", "probe_capability", "initialization_capture", "full_window")) \
+        and coverage.get("health_clean") is True
+    proven = bool(first) and not blocking and not unhealthy and prerequisites
     return {
         "facts": facts,
         "entities": {identifier: state for identifier, state in sorted(entities.items())},
@@ -141,6 +165,9 @@ def analyze_capture_facts(records: list[dict], *, counters: dict | None = None) 
         },
         "first_kill": {
             "proven": proven,
+            "prerequisites": {key: bool(coverage.get(key)) for key in
+                              ("receipt_valid", "probe_capability", "initialization_capture", "full_window",
+                               "health_clean")},
             "entity": None if not (proven and first) else first["entity"],
             "capture_sequence": None if not (proven and first) else first["capture_sequence"],
             "blocking_facts": [{"capture_sequence": fact["capture_sequence"], "class": fact["class"],
@@ -402,6 +429,16 @@ def analyze_snapshots(snapshots: list[dict], *, coverage: dict | None = None) ->
     }
 
 
+def load_capture_facts(audit_directory: str | Path) -> list[dict]:
+    """Read the envelope records so the capture analyzer sees the real stream."""
+    from . import evidence_codec, lifecycle_events
+    directory = Path(audit_directory)
+    store = evidence_codec.EvidenceStore(directory, error=ReportError)
+    if not (directory / lifecycle_events.EVENTS_FILE).is_file():
+        return []
+    return lifecycle_events.load_records(directory)
+
+
 def report_for_run(run: str | Path, *, require_closed: bool = True,
                    lifecycle: bool = True) -> dict:
     """Read a run (or audit) directory and return the full report."""
@@ -431,6 +468,33 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
         report["coverage"]["lifecycle_recording"] = lifecycle_report.get("status")
         if lifecycle_report.get("status") == "failed":
             report["problems"].extend(f"lifecycle: {problem}" for problem in lifecycle_report["problems"])
+        probes_block = manifest.get("lifecycle_probes")
+        probes_enabled = isinstance(probes_block, dict) and probes_block.get("enabled") is True
+        probes_healthy = isinstance(probes_block, dict) and probes_block.get("healthy") is True \
+            and probes_block.get("pending_candidate") is False
+        receipt = lifecycle_report.get("close_receipt") or {}
+        try:
+            capture_records = load_capture_facts(audit_directory)
+        except (ReportError, OSError):
+            capture_records = []
+        report["capture_facts"] = analyze_capture_facts(
+            capture_records,
+            counters=(probes_block or {}).get("probe_counters") if probes_enabled else None,
+            coverage={
+                "receipt_valid": lifecycle_report.get("status") == "valid" and receipt.get("present") is True,
+                "probe_capability": probes_enabled,
+                "initialization_capture": spawn_hook.get("installed") is True,
+                "full_window": False,
+                "health_clean": probes_healthy,
+            })
+        capture_first_kill = report["capture_facts"]["first_kill"]
+        report["first_kill"] = {
+            "proven": capture_first_kill["proven"],
+            "source": "exact-store capture facts",
+            "reasons": capture_first_kill["reasons"],
+            "prerequisites": capture_first_kill["prerequisites"],
+            "boundary_gate": report.get("first_kill"),
+        }
     return report
 
 
@@ -449,6 +513,7 @@ def markdown_report(report: dict) -> str:
              f"- first removal: {json.dumps(removal, ensure_ascii=False, sort_keys=True)}",
              f"- unknown removals: count={unknown.get('count')}",
              f"- first kill proven: {first_kill.get('proven')}",
+             f"- capture facts: {json.dumps((report.get('capture_facts') or {}).get('summary'), sort_keys=True)}",
              f"- capture level: {json.dumps(report.get('capture_level'), ensure_ascii=False, sort_keys=True)}",
              f"- lifecycle: {json.dumps(report.get('lifecycle'), ensure_ascii=False, sort_keys=True)}", ""]
     if report.get("problems"):

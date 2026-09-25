@@ -56,6 +56,35 @@ KIND_INITIALIZATION = "zombie_initialized"
 # carry exact-store capture facts with raw before/after values; the v1 stream
 # stays byte-compatible and older trajectories remain readable.
 PROBE_MODE = "lvz.lifecycle-probes.v1"
+PROBE_RECEIPT_SCHEMA = "lvz.lifecycle-close-receipt.v2"
+PROBE_SET = ("zombie-phase-store", "zombie-removal-marked", "zombie-slot-recycle")
+# Site id -> (kind, expected raw phase value or None for non-phase stores).
+PROBE_SITE_KINDS = {
+    "phase-playdeathanim": ("zombie_phase_transition", 1),
+    "phase-applyburn": ("zombie_phase_transition", 2),
+    "phase-mowdown": ("zombie_phase_transition", 3),
+    "phase-catapult": ("zombie_phase_transition", 1),
+    "phase-zamboni": ("zombie_phase_transition", 1),
+    "removal-mdead": ("zombie_removal_marked", None),
+    "recycle-guard": ("zombie_slot_recycle_candidate", None),
+    "recycle-commit": ("zombie_slot_recycle_commit", None),
+}
+_PROBE_SITE_KEYS = {"id", "va", "window_bytes", "bytes", "continuation_va"}
+_PROBES_CAPABILITY_KEYS = {"mode", "enabled", "record_schema", "event_schemas", "probe_set", "session_id",
+                           "build", "sites", "patch_windows_evidence", "probe_counters", "healthy",
+                           "pending_candidate", "active", "installed", "live_validated"}
+_PROBE_COUNTER_BASE_KEYS = {"captured", "queued", "delivered", "overflow", "wrong_thread",
+                            "inactive_suppressed", "classify_refused", "read_failed", "live_skips",
+                            "unmatched_commits", "pair_mismatch", "overwritten_pending", "faults"}
+_PROBE_COUNTER_KEYS = _PROBE_COUNTER_BASE_KEYS | {"persisted"}
+_PROBE_HEALTH_KEYS = {"installed", "active", "healthy", "pending_candidate", "patched_sites",
+                      "counters", "sites"}
+_RECEIPT_V2_KEYS = {"schema", "run_id", "branch_id", "session_id", "sequence_domain", "envelope_schema",
+                    "event_schemas", "probe", "build", "manifest_sha256", "records",
+                    "first_capture_sequence", "last_capture_sequence", "bytes", "sha256",
+                    "counters", "probe_health", "completed", "persistence"}
+_RECEIPT_V2_COUNTER_KEYS = {"initialization", "probes", "total"}
+_TOTAL_COUNTER_KEYS = {"persisted", "records", "bytes"}
 PROBE_EVENT_SCHEMA = "lvz.lifecycle-event.v2"
 PROBE_KINDS = ("zombie_phase_transition", "zombie_removal_marked",
                "zombie_slot_recycle_candidate", "zombie_slot_recycle_commit")
@@ -229,6 +258,7 @@ def _scan_probe_events(store: evidence_codec.EvidenceStore, *, allow_partial_tai
     live reader may tolerate a final partially flushed line.
     """
     report = {"present": False, "scanned": False, "fault_events": 0, "closed_unhealthy": False,
+              "probes_closed_present": False, "probes_closed_payload": None, "probe_fault_events": 0,
               "problems": []}
     if not _present(store, "events.jsonl"):
         return report
@@ -258,6 +288,11 @@ def _scan_probe_events(store: evidence_codec.EvidenceStore, *, allow_partial_tai
                 payload = value.get("payload")
                 if not isinstance(payload, dict) or payload.get("healthy") is not True:
                     report["closed_unhealthy"] = True
+            elif kind == "lifecycle_probes_closed":
+                report["probes_closed_present"] = True
+                report["probes_closed_payload"] = value.get("payload")
+            elif kind == "lifecycle_probe_fault":
+                report["probe_fault_events"] += 1
     report["scanned"] = True
     return report
 
@@ -362,39 +397,59 @@ def _check_probe_event(event: dict, label: str, problems: list[str]) -> None:
         _require(entity.get("slot") == (identifier & 0xFFFF), f"{label}: entity slot must be the low 16 bits", problems)
         _require(entity.get("generation") == (identifier >> 16),
                  f"{label}: entity generation must be the high 16 bits", problems)
+        # The engine's own delete loop treats generation 0 as a free slot, so a
+        # live captured object can never carry it.
+        _require(entity.get("generation") > 0, f"{label}: entity generation 0 is a free slot, not a fact", problems)
     obj = event.get("object")
     if _exact_keys(obj, _PROBE_OBJECT_KEYS, f"{label} probe event.object", problems):
         _require(obj.get("class") == "zombie", f"{label}: object class must be zombie", problems)
-        _require(obj.get("on_board") is True, f"{label}: published probe facts must be on-board", problems)
+        _require(type(obj.get("on_board")) is bool, f"{label}: object on_board must be a boolean", problems)
         _require(_is_int(obj.get("wave")), f"{label}: object wave must be an integer", problems)
-        _require(_is_int(obj.get("board")) and obj["board"] > 0, f"{label}: object board must be a live pointer value", problems)
+        _require(_is_int(obj.get("board")) and obj["board"] > 0,
+                 f"{label}: object board must be a live pointer value", problems)
     probe = event.get("probe")
     _require(isinstance(probe, dict) and _exact_keys(probe, _PROBE_PROBE_KEYS, f"{label} probe event.probe", problems)
-             and probe.get("schema") == PROBE_EVENT_SCHEMA and probe.get("sequence_domain") == SEQUENCE_DOMAIN,
+             and probe.get("name") == "zombie-lifecycle-store" and probe.get("schema") == PROBE_EVENT_SCHEMA
+             and probe.get("sequence_domain") == SEQUENCE_DOMAIN,
              f"{label}: probe declaration does not match {PROBE_EVENT_SCHEMA}", problems)
     if kind == "zombie_phase_transition":
         phase = event.get("phase")
         if _exact_keys(phase, _PROBE_PHASE_KEYS, f"{label} probe event.phase", problems):
-            _require(isinstance(phase.get("site"), str) and phase["site"], f"{label}: phase site required", problems)
+            site = phase.get("site")
+            binding = PROBE_SITE_KINDS.get(site)
+            _require(binding is not None and binding[0] == kind,
+                     f"{label}: phase site is not a frozen phase store", problems)
             _require(_is_int(phase.get("before")) and _is_int(phase.get("after")),
                      f"{label}: phase before/after must be raw integers", problems)
+            if binding is not None and _is_int(phase.get("after")):
+                _require(phase["after"] == binding[1],
+                         f"{label}: phase after value does not match the locked store at {site}", problems)
+        if _is_int(identifier):
+            _require(not event.get("phase") or event["phase"].get("after") is not None, f"{label}: phase payload", problems)
     elif kind == "zombie_removal_marked":
         removal = event.get("removal")
         if _exact_keys(removal, _PROBE_REMOVAL_KEYS, f"{label} probe event.removal", problems):
+            _require(removal.get("source") == "dienoloot_mdead_store",
+                     f"{label}: removal source must be the locked mDead store", problems)
             _require(_is_int(removal.get("before")) and _is_int(removal.get("after")),
                      f"{label}: removal before/after must be raw integers", problems)
+            _require(removal.get("after") == 1, f"{label}: mDead store writes exactly 1", problems)
     else:
         recycle = event.get("recycle")
-        expected = _PROBE_RECYCLE_CANDIDATE_KEYS if kind == "zombie_slot_recycle_candidate" \
+        expected_keys = _PROBE_RECYCLE_CANDIDATE_KEYS if kind == "zombie_slot_recycle_candidate" \
             else _PROBE_RECYCLE_COMMIT_KEYS
-        if _exact_keys(recycle, expected, f"{label} probe event.recycle", problems):
+        if _exact_keys(recycle, expected_keys, f"{label} probe event.recycle", problems):
             if kind == "zombie_slot_recycle_candidate":
                 _require(recycle.get("state") == "candidate", f"{label}: candidate state mismatch", problems)
                 for key in ("slot", "free_head_before", "count_before"):
                     _require(_is_int(recycle.get(key)), f"{label}: recycle {key} must be an integer", problems)
+                if _is_int(recycle.get("count_before")):
+                    _require(recycle["count_before"] >= 1,
+                             f"{label}: candidate count_before must be positive", problems)
             else:
                 _require(recycle.get("state") == "committed", f"{label}: commit state mismatch", problems)
-                _require(_is_int(recycle.get("candidate_capture_sequence")) and recycle["candidate_capture_sequence"] > 0,
+                _require(_is_int(recycle.get("candidate_capture_sequence"))
+                         and recycle["candidate_capture_sequence"] > 0,
                          f"{label}: commit must reference a candidate capture sequence", problems)
                 for key in ("slot", "free_head_after", "count_after"):
                     _require(_is_int(recycle.get(key)), f"{label}: recycle {key} must be an integer", problems)
@@ -519,8 +574,8 @@ def _sequence_problems(records: list[dict]) -> tuple[list[str], dict]:
                               "duplicates and decreases are refused"}
 
 
-def _probe_contract(manifest: dict, records: list[dict]) -> list[str]:
-    """Validate the v2 probe capability and candidate/commit pairing."""
+def _probe_contract(manifest: dict, records: list[dict], *, live_prefix: bool = False) -> list[str]:
+    """Validate the v2 probe capability, site binding and candidate/commit pair."""
     problems: list[str] = []
     events = [record.get("event") for record in records]
     probe_events = [event for event in events
@@ -537,32 +592,122 @@ def _probe_contract(manifest: dict, records: list[dict]) -> list[str]:
         if probe_events:
             problems.append("lifecycle probe records exist while the capability is disabled")
         return problems
-    if block.get("record_schema") != PROBE_EVENT_SCHEMA:
-        problems.append("lifecycle_probes record_schema must be lvz.lifecycle-event.v2")
-    if not isinstance(block.get("probe_set"), list) or not block["probe_set"]:
-        problems.append("lifecycle_probes probe_set must declare the installed probes")
+    _exact_keys(block, _PROBES_CAPABILITY_KEYS, "lifecycle_probes", problems)
+    _require(block.get("record_schema") == PROBE_EVENT_SCHEMA,
+             "lifecycle_probes record_schema must be lvz.lifecycle-event.v2", problems)
+    schemas = block.get("event_schemas")
+    _require(isinstance(schemas, list) and PROBE_EVENT_SCHEMA in schemas,
+             "lifecycle_probes must declare the v2 event schema", problems)
+    _require(block.get("probe_set") == list(PROBE_SET),
+             "lifecycle_probes probe_set must match the frozen probe set", problems)
+    if not isinstance(block.get("patch_windows_evidence"), str) or not block["patch_windows_evidence"]:
+        problems.append("lifecycle_probes must bind the patch-window evidence")
+    if type(block.get("live_validated")) is not bool:
+        problems.append("lifecycle_probes live_validated must be a boolean")
     session = block.get("session_id")
-    if not _is_int(session) or session <= 0:
-        problems.append("lifecycle_probes session_id must be a positive integer")
+    _require(_is_int(session) and session > 0, "lifecycle_probes session_id must be a positive integer", problems)
     if not _valid_build(block.get("build")):
         problems.append("lifecycle_probes build identity is incomplete")
+    lifecycle = manifest.get(CAPABILITY_KEY) if isinstance(manifest.get(CAPABILITY_KEY), dict) else {}
+    if lifecycle:
+        if session != lifecycle.get("session_id"):
+            problems.append("lifecycle_probes session identity does not match lifecycle_recording")
+        if block.get("build") != lifecycle.get("build"):
+            problems.append("lifecycle_probes build identity does not match lifecycle_recording")
+    sites = block.get("sites")
+    if not isinstance(sites, list) or len(sites) != len(PROBE_SITE_KINDS):
+        problems.append("lifecycle_probes sites must list the eight frozen windows")
+    else:
+        seen: set = set()
+        for site in sites:
+            if not isinstance(site, dict) or not _exact_keys(site, _PROBE_SITE_KEYS, "probe site", problems):
+                continue
+            site_id = site.get("id")
+            if site.get("id") not in PROBE_SITE_KINDS:
+                problems.append(f"lifecycle_probes declares an unknown site: {site_id!r}")
+                continue
+            if site_id in seen:
+                problems.append(f"lifecycle_probes declares a duplicate site: {site_id}")
+            seen.add(site_id)
+            _require(_is_int(site.get("va")) and site["va"] > 0, f"probe site {site_id}: va must be positive", problems)
+            size = site.get("window_bytes")
+            _require(_is_int(size) and 1 <= size <= 7, f"probe site {site_id}: window_bytes out of range", problems)
+            _require(isinstance(site.get("continuation_va"), int), f"probe site {site_id}: continuation required", problems)
+            _require(isinstance(site.get("bytes"), list) and len(site["bytes"]) == size
+                     and all(_is_int(byte) and 0 <= byte <= 255 for byte in site["bytes"]),
+                     f"probe site {site_id}: bytes must match window_bytes", problems)
+        missing = set(PROBE_SITE_KINDS) - seen
+        if missing:
+            problems.append(f"lifecycle_probes is missing frozen sites: {sorted(missing)}")
+    counters = block.get("probe_counters")
+    if not isinstance(counters, dict) or not _exact_keys(counters, _PROBE_COUNTER_BASE_KEYS,
+                                                         "lifecycle_probes.probe_counters", problems):
+        problems.append("lifecycle_probes.probe_counters must be the final installed counter set")
+    for key in ("healthy", "pending_candidate", "active", "installed"):
+        if type(block.get(key)) is not bool:
+            problems.append(f"lifecycle_probes.{key} must be a boolean")
+    if not live_prefix:
+        if block.get("healthy") is not True:
+            problems.append("lifecycle_probes final health is not healthy")
+        if block.get("pending_candidate") is not False:
+            problems.append("lifecycle_probes final state still has a pending candidate")
+        if block.get("active") is not False:
+            problems.append("lifecycle_probes final state is still active")
     if not probe_events:
         return problems
-    candidates: dict[int, object] = {}
+    candidates: dict[int, dict] = {}
+    committed: set = set()
     for event in probe_events:
         kind = event.get("kind")
         sequence = event.get("capture_sequence")
-        if kind == "zombie_slot_recycle_candidate":
-            candidates[sequence] = "open"
+        if not _is_int(sequence):
+            continue
+        event_site = None
+        if kind == "zombie_phase_transition" and isinstance(event.get("phase"), dict):
+            event_site = event["phase"].get("site")
+        elif kind == "zombie_removal_marked":
+            event_site = "removal-mdead"
+        elif kind == "zombie_slot_recycle_candidate":
+            event_site = "recycle-guard"
         elif kind == "zombie_slot_recycle_commit":
-            recycle = event.get("recycle") if isinstance(event.get("recycle"), dict) else {}
-            reference = recycle.get("candidate_capture_sequence")
-            if reference not in candidates:
-                problems.append(f"recycle commit {sequence} references unknown candidate {reference!r}")
-            else:
-                candidates[reference] = "committed"
-    for sequence, state in candidates.items():
-        if state == "open":
+            event_site = "recycle-commit"
+        binding = PROBE_SITE_KINDS.get(event_site)
+        _require(binding is not None and binding[0] == kind,
+                 f"capture_sequence {sequence}: event kind does not match a frozen site", problems)
+        if kind == "zombie_slot_recycle_candidate":
+            counters = event.get("recycle") if isinstance(event.get("recycle"), dict) else {}
+            entity = event.get("entity") if isinstance(event.get("entity"), dict) else {}
+            candidates[sequence] = {"entity": entity.get("id"), "slot": counters.get("slot"),
+                                    "board": (event.get("object") or {}).get("board"),
+                                    "free_head_before": counters.get("free_head_before"),
+                                    "count_before": counters.get("count_before")}
+        elif kind == "zombie_slot_recycle_commit":
+            counters = event.get("recycle") if isinstance(event.get("recycle"), dict) else {}
+            entity = event.get("entity") if isinstance(event.get("entity"), dict) else {}
+            reference = counters.get("candidate_capture_sequence")
+            if not _is_int(reference):
+                problems.append(f"recycle commit {sequence} must reference an integer candidate sequence")
+                continue
+            if reference in committed:
+                problems.append(f"recycle commit {sequence} reuses candidate {reference}")
+            committed.add(reference)
+            candidate = candidates.get(reference)
+            if candidate is None:
+                problems.append(f"recycle commit {sequence} references unknown candidate {reference}")
+                continue
+            if entity.get("id") != candidate["entity"]:
+                problems.append(f"recycle commit {sequence} entity does not match its candidate")
+            if counters.get("slot") != candidate["slot"]:
+                problems.append(f"recycle commit {sequence} slot does not match its candidate")
+            if (event.get("object") or {}).get("board") != candidate["board"]:
+                problems.append(f"recycle commit {sequence} board does not match its candidate")
+            if counters.get("free_head_after") != candidate["slot"]:
+                problems.append(f"recycle commit {sequence} head is not the freed slot")
+            if not (_is_int(counters.get("count_after")) and _is_int(candidate["count_before"])
+                    and counters["count_after"] + 1 == candidate["count_before"]):
+                problems.append(f"recycle commit {sequence} count transition does not match its candidate")
+    for sequence, candidate in candidates.items():
+        if sequence not in committed and not live_prefix:
             problems.append(f"recycle candidate {sequence} has no commit in this stream")
     return problems
 
@@ -634,7 +779,12 @@ def _nesting_problems(records: list[dict], *, strict: bool) -> list[str]:
 
 
 def _cross_check_receipt(receipt, capability: dict, records: list[dict], events_bytes: bytes,
-                         manifest_bytes: bytes | None, problems: list[str]) -> None:
+                         manifest_bytes: bytes | None, problems: list[str],
+                         probes_block: dict | None = None) -> None:
+    if isinstance(receipt, dict) and receipt.get("schema") == PROBE_RECEIPT_SCHEMA:
+        _cross_check_receipt_v2(receipt, capability, records, events_bytes, manifest_bytes, problems,
+                                probes_block)
+        return
     if not _exact_keys(receipt, _RECEIPT_KEYS, "close receipt", problems):
         return
     def require(condition: bool, message: str) -> None:
@@ -720,6 +870,144 @@ def _cross_check_receipt(receipt, capability: dict, records: list[dict], events_
                 "close receipt must assert it was written after the events close")
 
 
+def _cross_check_receipt_v2(receipt, capability: dict, records: list[dict], events_bytes: bytes,
+                            manifest_bytes: bytes | None, problems: list[str],
+                            probes_block: dict | None = None) -> None:
+    """Complete close receipt for a mixed v1/v2 probe run."""
+    if not _exact_keys(receipt, _RECEIPT_V2_KEYS, "close receipt v2", problems):
+        return
+
+    def require(condition: bool, message: str) -> None:
+        _require(condition, message, problems)
+
+    require(receipt.get("completed") is True, "close receipt v2 is not marked completed")
+    require(receipt.get("envelope_schema") == ENVELOPE_SCHEMA, "close receipt v2 envelope schema mismatch")
+    require(receipt.get("event_schemas") == [EVENT_SCHEMA, PROBE_EVENT_SCHEMA],
+            "close receipt v2 event_schemas must list the v1 and v2 event schemas")
+    require(receipt.get("sequence_domain") == SEQUENCE_DOMAIN, "close receipt v2 sequence domain mismatch")
+    for key in ("run_id", "branch_id"):
+        value = receipt.get(key)
+        require(isinstance(value, str) and bool(value), f"close receipt v2 {key} must be a non-empty string")
+    require(_is_int(receipt.get("session_id")) and receipt.get("session_id") == capability.get("session_id"),
+            "close receipt v2 session identity does not match the capability")
+    require(_valid_build(receipt.get("build")) and receipt.get("build") == capability.get("build"),
+            "close receipt v2 build identity does not match the capability")
+    receipt_probe = receipt.get("probe")
+    require(isinstance(receipt_probe, dict)
+            and _exact_keys(receipt_probe, _RECEIPT_PROBE_KEYS, "close receipt v2.probe", problems)
+            and receipt_probe.get("name") == PROBE_NAME and receipt_probe.get("schema") == PROBE_SCHEMA,
+            "close receipt v2 probe declaration mismatch")
+    require(_is_int(receipt.get("records")) and receipt.get("records") == len(records),
+            "close receipt v2 records does not match the parsed records")
+    require(_is_int(receipt.get("bytes")) and receipt.get("bytes") == len(events_bytes),
+            "close receipt v2 byte count does not match the events file")
+    digest = hashlib.sha256(events_bytes).hexdigest()
+    require(_valid_sha256(receipt.get("sha256")) and receipt.get("sha256") == digest,
+            "close receipt v2 SHA-256 does not match the events file bytes")
+    if manifest_bytes is not None:
+        require(receipt.get("manifest_sha256") == hashlib.sha256(manifest_bytes).hexdigest(),
+                "close receipt v2 manifest_sha256 does not match audit/manifest.json")
+    sequences: list[int] = []
+    kinds: dict[str, int] = {}
+    for record in records:
+        event = _record_event(record)
+        if isinstance(event, dict):
+            value = event.get("capture_sequence")
+            if _is_int(value):
+                sequences.append(value)
+            kind = event.get("kind")
+            if isinstance(kind, str):
+                kinds[kind] = kinds.get(kind, 0) + 1
+    first = sequences[0] if sequences else None
+    last = sequences[-1] if sequences else None
+    if receipt.get("records") == 0:
+        require(receipt.get("first_capture_sequence") is None and receipt.get("last_capture_sequence") is None,
+                "a zero-record receipt must carry null capture-sequence bounds")
+    else:
+        require(receipt.get("first_capture_sequence") == first,
+                "close receipt v2 first capture_sequence mismatch")
+        require(receipt.get("last_capture_sequence") == last,
+                "close receipt v2 last capture_sequence mismatch")
+    counters = receipt.get("counters")
+    if not isinstance(counters, dict) or not _exact_keys(counters, _RECEIPT_V2_COUNTER_KEYS,
+                                                         "close receipt v2.counters", problems):
+        return
+    initialization = counters.get("initialization")
+    probes = counters.get("probes")
+    total = counters.get("total")
+    v1_count = kinds.get(KIND_INITIALIZATION, 0)
+    v2_count = len(records) - v1_count
+    if isinstance(initialization, dict) and _exact_keys(initialization, _COUNTER_KEYS,
+                                                        "close receipt v2.counters.initialization", problems):
+        for key in ("captured", "delivered"):
+            require(_is_int(initialization.get(key)) and initialization.get(key) >= v1_count,
+                    f"close receipt v2 initialization {key} is smaller than the persisted records")
+        require(initialization.get("persisted") == v1_count,
+                "close receipt v2 initialization persisted does not match the v1 records")
+        for key in ("overflow", "wrong_thread", "nesting_mismatch", "incomplete_events"):
+            require(initialization.get(key) == 0,
+                    f"close receipt v2 initialization counter {key} must be zero")
+    else:
+        problems.append("close receipt v2 initialization counters are incomplete")
+    if isinstance(probes, dict) and _exact_keys(probes, _PROBE_COUNTER_KEYS,
+                                                "close receipt v2.counters.probes", problems):
+        for key in ("overflow", "wrong_thread", "unmatched_commits", "pair_mismatch",
+                    "overwritten_pending", "faults"):
+            require(probes.get(key) == 0, f"close receipt v2 probe counter {key} must be zero")
+        require(probes.get("queued") == 0, "close receipt v2 still has queued probe records")
+        require(probes.get("persisted") == v2_count,
+                "close receipt v2 probe persisted does not match the v2 records")
+        require(probes.get("captured") == probes.get("persisted"),
+                "close receipt v2 probe captured/persisted mismatch")
+        require(probes.get("delivered") == probes.get("persisted"),
+                "close receipt v2 probe delivered/persisted mismatch")
+    else:
+        problems.append("close receipt v2 probe counters are incomplete")
+    if isinstance(total, dict) and _exact_keys(total, _TOTAL_COUNTER_KEYS,
+                                               "close receipt v2.counters.total", problems):
+        require(total.get("records") == len(records) and total.get("persisted") == len(records),
+                "close receipt v2 total record count mismatch")
+        require(total.get("bytes") == len(events_bytes), "close receipt v2 total byte count mismatch")
+    else:
+        problems.append("close receipt v2 total counters are incomplete")
+    health = receipt.get("probe_health")
+    if isinstance(health, dict) and _exact_keys(health, _PROBE_HEALTH_KEYS,
+                                                "close receipt v2.probe_health", problems):
+        require(health.get("healthy") is True, "close receipt v2 probe health is not healthy")
+        require(health.get("pending_candidate") is False, "close receipt v2 still has a pending candidate")
+        require(health.get("active") is False, "close receipt v2 probe capture is still active")
+        require(health.get("counters") == probes, "close receipt v2 probe health counters differ from counters.probes")
+        final = probes_block if isinstance(probes_block, dict) else {}
+        if final.get("enabled") is True and isinstance(health.get("counters"), dict):
+            health_counters = {key: value for key, value in health["counters"].items() if key != "persisted"}
+            require(health_counters == final.get("probe_counters"),
+                    "close receipt v2 probe health differs from the final manifest counters")
+            require(health.get("sites") == final.get("sites"),
+                    "close receipt v2 probe health sites differ from the manifest")
+            require(health.get("installed") is False,
+                    "close receipt v2 probe health must be recorded after a successful unload")
+    else:
+        problems.append("close receipt v2 probe health is incomplete")
+    persistence = receipt.get("persistence")
+    if _exact_keys(persistence, _PERSISTENCE_KEYS, "close receipt v2.persistence", problems):
+        require(persistence.get("method") == "flush_close_then_atomic_receipt",
+                "close receipt v2 persistence method mismatch")
+        require(persistence.get("receipt_written_after_close") is True,
+                "close receipt v2 must be written after the events close")
+
+
+def _probe_health_core(health) -> object:
+    """The audit close event is written before the recorder adds its record
+    count to the receipt health, so that single derived field is ignored."""
+    if not isinstance(health, dict):
+        return health
+    core = dict(health)
+    counters = core.get("counters")
+    if isinstance(counters, dict):
+        core["counters"] = {key: value for key, value in counters.items() if key != "persisted"}
+    return core
+
+
 def _identity_problems(records: list[dict], capability: dict, receipt: dict | None,
                        *, check_capability: bool = True) -> list[str]:
     problems: list[str] = []
@@ -770,6 +1058,17 @@ def validate(directory: str | Path, *, manifest: dict | None = None,
     except (OSError, EOFError, zlib.error, UnicodeError, json.JSONDecodeError,
             evidence_codec.CodecError) as exc:
         raise LifecycleError(f"lifecycle evidence is unreadable: {exc}") from exc
+
+
+def load_records(directory: str | Path) -> list[dict]:
+    """Decode the envelope records of an audit directory for offline analysis."""
+    directory = Path(directory)
+    store = evidence_codec.EvidenceStore(directory, error=LifecycleError)
+    if not _present(store, EVENTS_FILE):
+        return []
+    data = _read_plain(store, EVENTS_FILE)
+    records, _ = _decode_records(data, allow_partial_tail=False)
+    return records
 
 
 def _validate(directory: Path, *, manifest: dict | None, recorder: str | Path | None,
@@ -856,7 +1155,7 @@ def _validate(directory: Path, *, manifest: dict | None, recorder: str | Path | 
     sequence_problems, sequence_summary = _sequence_problems(records)
     problems += sequence_problems
     problems += _nesting_problems(records, strict=not live_prefix)
-    problems += _probe_contract(manifest, records)
+    problems += _probe_contract(manifest, records, live_prefix=live_prefix)
 
     report["records"] = {
         "count": len(records),
@@ -867,10 +1166,14 @@ def _validate(directory: Path, *, manifest: dict | None, recorder: str | Path | 
     }
     probe = _scan_probe_events(store, allow_partial_tail=live_prefix)
     report["probe_events"] = {key: probe[key] for key in ("present", "scanned", "fault_events",
-                                                          "closed_unhealthy", "problems")}
+                                                          "closed_unhealthy", "probes_closed_present",
+                                                          "probe_fault_events", "problems")}
     if probe["fault_events"]:
         problems.append(f"audit events record {probe['fault_events']} explicit probe fault(s): "
                         "the lifecycle capture was unhealthy")
+    if probe["probe_fault_events"]:
+        problems.append(f"audit events record {probe['probe_fault_events']} lifecycle probe fault(s): "
+                        "the exact-store capture was unhealthy")
     if probe["closed_unhealthy"]:
         problems.append("audit spawn_hook_closed reports an unhealthy probe close")
     problems += probe["problems"]
@@ -902,7 +1205,14 @@ def _validate(directory: Path, *, manifest: dict | None, recorder: str | Path | 
     report["close_receipt"] = {"present": True, "records": receipt.get("records") if receipt else None,
                                "sha256": receipt.get("sha256") if receipt else None}
     if receipt is not None:
-        _cross_check_receipt(receipt, block, records, events_bytes, manifest_bytes, problems)
+        _cross_check_receipt(receipt, block, records, events_bytes, manifest_bytes, problems,
+                             manifest.get("lifecycle_probes"))
+        probes_block = manifest.get("lifecycle_probes")
+        if isinstance(probes_block, dict) and probes_block.get("enabled") is True:
+            if not probe["probes_closed_present"]:
+                problems.append("probe run has no lifecycle_probes_closed audit event")
+            elif _probe_health_core(probe["probes_closed_payload"])                     != _probe_health_core(receipt.get("probe_health")):
+                problems.append("lifecycle_probes_closed payload does not match the close receipt probe_health")
         problems += _identity_problems(records, block, receipt, check_capability=False)
         problems += _run_identity_bindings(directory, manifest, block, receipt, recorder)
     report["problems"] = problems
