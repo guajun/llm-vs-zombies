@@ -19,16 +19,17 @@ using Json = nlohmann::json;
 
 class MeasurementHost {
 public:
-    // Start a fresh measurement session on the owner game thread. Refuses only
-    // while a session is still open (Idle/Closed/Failed sessions may reopen).
+    // Start a fresh measurement session on the owner game thread. Refuses while
+    // a session is active (open or closing); Idle/Closed/Failed may reopen.
     bool Open(uint32_t ownerThread, std::string* error = nullptr) noexcept;
-    // Finalize the session as successful. Refuses when it is not open, when
-    // any fault was recorded, or when captured/delivered/persisted are not
-    // balanced; the session stays open in that case.
+    // Validate the session and move Open -> Closing. Not yet a success receipt:
+    // Commit() must follow only after persistence/cleanup has succeeded.
     bool Close(std::string* error = nullptr) noexcept;
-    // Finalize the session as failed/aborted, preserving faults and undelivered
-    // counts but emitting no successful close receipt. Use this when a run must
-    // stop but hooks and files still have to be cleaned up.
+    // Closing -> Closed and emit the success receipt. Refuses unless Closing.
+    bool Commit(std::string* error = nullptr) noexcept;
+    // Open or Closing -> Failed, preserving faults and undelivered counts and
+    // emitting no success receipt. Use when a run must stop but cleanup must
+    // still run; after Abort (or Commit) a new session may start.
     bool Abort(std::string* error = nullptr) noexcept;
     // Shared capture_sequence, allocated at the actual capture point (exit)
     // right before the record enters its queue. Returns 0 when refused (wrong
@@ -49,6 +50,7 @@ public:
     // True when a session is open and owned by this thread (probe bind check).
     bool BoundTo(uint32_t thread) const noexcept;
     bool SessionOpen() const noexcept;
+    bool Closing() const noexcept;
     bool Closed() const noexcept;
     bool Failed() const noexcept;
     uint64_t SessionId() const noexcept;
@@ -58,13 +60,12 @@ private:
     bool Refuse() noexcept;
 
     uint32_t owner_ = 0;
-    std::atomic<uint8_t> state_{0};  // 0 idle, 1 open, 2 closed, 3 failed
+    std::atomic<uint8_t> state_{0};  // 0 idle, 1 open, 2 closing, 3 closed, 4 failed
     uint64_t session_id_ = 0;
     uint64_t next_sequence_ = 1;
     uint64_t next_invocation_id_ = 1;
     std::atomic<uint64_t> captured_{0}, delivered_{0}, persisted_{0}, overflow_{0};
     std::atomic<uint64_t> wrong_thread_{0}, nesting_mismatch_{0}, incomplete_{0}, refused_{0};
-    std::atomic<bool> close_receipt_present_{false};
 };
 
 // The process-wide single host. Probe code calls this from inside the capture

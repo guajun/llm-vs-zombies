@@ -351,9 +351,7 @@ void Initialize(const std::filesystem::path& runDir) {
                 throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
         }
         if(measurementOpened) {
-            std::string closeError;
-            if(!lvz::measurement::Host().Close(&closeError))
-                lvz::measurement::Host().Abort();
+            lvz::measurement::Host().Abort();
         }
         checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();fpRaw.close();initialized=false;
         throw;
@@ -604,7 +602,6 @@ void Shutdown() {
             // following audited boundary"): fail closed rather than hide it.
             DrainHostedFires();
 #endif
-            foleytrace::Shutdown();
             Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","fp_environment_closed"},
                 {"version",lastObservationVersion},{"payload",fpMonitor->Close()}});
             if(silentaudio::Enabled())Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","sound_effects_closed"},
@@ -617,6 +614,9 @@ void Shutdown() {
         [&]() {
             std::string cleanupError;
             auto note=[&](const std::string& what) { if(cleanupError.empty()) cleanupError=what; };
+            // Foley owns its own hooks/output: terminate it unconditionally so a
+            // front-stage drain fault cannot leak its 12 hooks or output stream.
+            try { foleytrace::Shutdown(); } catch(const std::exception& exception) { note(exception.what()); }
             try {
                 const auto finalHealth=SpawnHookStatus();
                 Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},

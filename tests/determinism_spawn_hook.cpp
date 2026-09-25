@@ -176,6 +176,7 @@ int main() {
             Check(SpawnHookStatus()["measurement"]["persisted"]==7,"Persisted must be recorded by the adapter");
             std::string closeError;
             Check(lvz::measurement::Host().Close(&closeError),"Balanced session must close");
+            Check(lvz::measurement::Host().Commit(&closeError),"Balanced session must commit");
             Check(lvz::measurement::Host().CloseReceiptPresent(),"Close receipt must be present");
         }
         Reset(0);CallFixture();

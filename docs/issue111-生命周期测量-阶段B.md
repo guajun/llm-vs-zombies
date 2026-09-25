@@ -17,7 +17,7 @@
 - `DrainSpawnBatch()`：单一破坏性 drain，同时产出旧 `lvz.spawn.v1` 投影与新的
   `lvz.lifecycle-event.v1` 投影。
 - `determinism/audit.cpp` 最小接入：`Initialize` 开启会话、`Shutdown` 用
-  `RunMeasurementShutdown` 做异常安全收尾（drain/写盘任一失败也必达 Abort + 卸钩/关文件，
+  `RunMeasurementShutdown` 做异常安全收尾（drain/写盘/Foley 收尾任一失败也必达 Abort + 卸钩/关文件，
   首个错误在清理后传播）、`DrainAndCheckSpawns` 单次 drain 并记 delivered/persisted。
 - 离线夹具：`tests/determinism_measurement.cpp`（会话/关闭/终止/关闭序列/负例）与扩展的
   `tests/determinism_spawn_hook.cpp`（出口捕获顺序、嵌套 invocation、跨类型交错、drain 不重置、
@@ -54,12 +54,14 @@
 - 无受控边界的初始化事件：`version=null`、`version_phase=initialization`、`engine_call_id=null`。
 - `classification.cause` 恒为 `unknown`；未观测到死亡阶段不等于已确认非死亡。
 - `persisted` 只由记录适配器在写盘成功后递增；探针与 drain 只负责 `captured`/`delivered`。
-- 会话生命周期：`Open` 拒绝活跃会话重复开启并递增 session 身份；`Close` 在有 fault 或
-  `captured != delivered || delivered != persisted` 时失败并保持 open；此时用 `Abort()` 终止为 failed
-  （不产生成功回执、保留故障与未交付计数）。`audit::Shutdown` 经
-  `RunMeasurementShutdown(body, cleanup)` 保证：body 内 drain/写盘任一异常都保存为首个错误，
-  会话仍被终止（失败路径不产生成功回执），cleanup 必达（卸钩、flush、关文件、initialized=false），
-  最后传播首个错误；有在途调用或 hook 所有权问题时保留 DLL 并明确报告。
+- 会话生命周期（两阶段提交）：`Open` 拒绝活跃（open/closing）会话重复开启并递增 session 身份；
+  `Close` 验证无 fault 且 `captured==delivered==persisted` 后进入 closing（尚未产生回执）；
+  `Commit` 在清理/持久化成功后把 closing 提交为 closed 并产生成功回执；`Abort` 把 open/closing
+  终止为 failed（不产生回执、保留故障与未交付计数）。`audit::Shutdown` 经
+  `RunMeasurementShutdown(body, cleanup)` 保证：body 内 drain/写盘/Foley 收尾任一异常都保存为首个
+  错误，会话仍被终止（清理失败会降级为 failed，不会留下成功回执），cleanup 必达（Foley 卸钩/关流、
+  粒子/出生卸钩、flush、关文件、initialized=false），最后传播首个错误；有在途调用或 hook 所有权
+  问题时保留 DLL 并明确报告。
 
 ## 4. 校验
 

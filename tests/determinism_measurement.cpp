@@ -52,8 +52,11 @@ int main() {
               "delivery/persistence counters must balance for a clean close");
 
         Check(Host().Close(&error), "a balanced, fault-free session must close");
+        Check(Host().Closing() && !Host().CloseReceiptPresent(),
+              "Close must validate without yet emitting a receipt");
+        Check(Host().Commit(&error), "Commit must follow a validated close");
         Check(Host().CloseReceiptPresent() && Host().Health().at("close_receipt_present") == true,
-              "Close must emit the receipt flag");
+              "Commit must emit the receipt flag");
 
         // Post-close capture/delivery/persistence must be refused, not silently
         // appended to the already-final receipt.
@@ -68,7 +71,7 @@ int main() {
         // --- Session 2: Open-after-Close, repeated-Open refusal, incomplete-close refusal ---
         Check(Host().Open(GetCurrentThreadId(), &error), "Open after Close must start a new session");
         Check(Host().SessionId() == 2, "a new session needs a new identity");
-        Check(!Host().Open(GetCurrentThreadId(), &error) && error == "measurement session is already open",
+        Check(!Host().Open(GetCurrentThreadId(), &error) && error == "measurement session is already active",
               "Open must refuse an active session");
 
         Host().OnCaptured();
@@ -77,6 +80,7 @@ int main() {
         Host().OnDelivered(1);
         Host().OnPersisted(1);
         Check(Host().Close(&error), "a rebalanced session must close");
+        Check(Host().Commit(&error), "a rebalanced session must commit");
 
         // --- Session 3: fault reporting, faulted-close refusal, Abort, reopen ---
         Check(Host().Open(GetCurrentThreadId(), &error), "third Open must succeed");
@@ -154,7 +158,19 @@ int main() {
         Check(cleanupRan, "cleanup must run on a clean shutdown");
         Check(Host().Closed() && Host().CloseReceiptPresent(), "a clean shutdown must emit a success receipt");
 
-        std::cout << "measurement: shared capture_sequence, fault counters, session/close/abort/shutdown lifecycle passed\n";
+        // --- Shutdown sequence: a cleanup/flush failure must downgrade a
+        //     validated session to failed, never leaving a success receipt ---
+        Check(Host().Open(GetCurrentThreadId(), &error), "open cleanup-failure shutdown session");
+        cleanupRan = false;
+        const std::string cleanupFailure = lvz::measurement::RunMeasurementShutdown(
+            [&] { Host().OnCaptured(); Host().OnDelivered(1); Host().OnPersisted(1); },
+            [&] { cleanupRan = true; throw std::runtime_error("flush failed"); });
+        Check(cleanupFailure == "flush failed", "cleanup failure must be preserved");
+        Check(cleanupRan, "cleanup must have run before the failure propagated");
+        Check(Host().Failed() && !Host().CloseReceiptPresent(),
+              "cleanup failure must downgrade to failed without a success receipt");
+
+        std::cout << "measurement: shared capture_sequence, fault counters, session/close/commit/abort/shutdown lifecycle passed\n";
         return 0;
     } catch (const std::exception& exception) {
         std::cerr << exception.what() << '\n';

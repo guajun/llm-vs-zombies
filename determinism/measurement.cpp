@@ -4,10 +4,11 @@
 namespace lvz::measurement {
 namespace {
 MeasurementHost host;
-constexpr uint8_t kOpen = 1, kClosed = 2, kFailed = 3;
+constexpr uint8_t kOpen = 1, kClosing = 2, kClosed = 3, kFailed = 4;
 const char* StateName(uint8_t state) {
     switch (state) {
         case kOpen: return "open";
+        case kClosing: return "closing";
         case kClosed: return "closed";
         case kFailed: return "failed";
         default: return "idle";
@@ -26,8 +27,9 @@ bool MeasurementHost::Refuse() noexcept {
 }
 
 bool MeasurementHost::Open(uint32_t ownerThread, std::string* error) noexcept {
-    if (state_.load() == kOpen) {
-        if (error) *error = "measurement session is already open";
+    const uint8_t state = state_.load();
+    if (state == kOpen || state == kClosing) {
+        if (error) *error = "measurement session is already active";
         return false;
     }
     owner_ = ownerThread;
@@ -42,7 +44,6 @@ bool MeasurementHost::Open(uint32_t ownerThread, std::string* error) noexcept {
     nesting_mismatch_.store(0);
     incomplete_.store(0);
     refused_.store(0);
-    close_receipt_present_.store(false);
     state_.store(kOpen);
     return true;
 }
@@ -63,14 +64,23 @@ bool MeasurementHost::Close(std::string* error) noexcept {
         if (error) *error = "measurement batch is incomplete";
         return false;
     }
-    close_receipt_present_.store(true);
+    state_.store(kClosing);
+    return true;
+}
+
+bool MeasurementHost::Commit(std::string* error) noexcept {
+    if (state_.load() != kClosing) {
+        if (error) *error = "measurement session is not closing";
+        return false;
+    }
     state_.store(kClosed);
     return true;
 }
 
 bool MeasurementHost::Abort(std::string* error) noexcept {
-    if (state_.load() != kOpen) {
-        if (error) *error = "measurement session is not open";
+    const uint8_t state = state_.load();
+    if (state != kOpen && state != kClosing) {
+        if (error) *error = "measurement session is not active";
         return false;
     }
     // No successful close receipt: faults and undelivered counts stay visible.
@@ -105,9 +115,10 @@ void MeasurementHost::OnNestingMismatch() noexcept { if (!Refuse()) nesting_mism
 void MeasurementHost::OnIncomplete() noexcept { if (!Refuse()) incomplete_.fetch_add(1); }
 
 Json MeasurementHost::Health() const noexcept {
+    const uint8_t state = state_.load();
     return {
         {"session", session_id_},
-        {"state", StateName(state_.load())},
+        {"state", StateName(state)},
         {"captured", captured_.load()},
         {"delivered", delivered_.load()},
         {"persisted", persisted_.load()},
@@ -116,7 +127,7 @@ Json MeasurementHost::Health() const noexcept {
         {"nesting_mismatch", nesting_mismatch_.load()},
         {"incomplete_events", incomplete_.load()},
         {"refused", refused_.load()},
-        {"close_receipt_present", close_receipt_present_.load()},
+        {"close_receipt_present", state == kClosed},
     };
 }
 
@@ -132,14 +143,17 @@ std::string RunMeasurementShutdown(const std::function<void()>& body,
     } catch (const std::exception& exception) {
         firstError = exception.what();
     }
-    // Finalize the session: a clean body gets a successful close; any failure
-    // is terminated as failed/aborted with no success receipt and preserved
-    // fault/undelivered counts.
+    // Two-phase finalize: validate (Open -> Closing) or terminate as failed.
+    // A success receipt is only committed after cleanup has confirmed the
+    // persistence/flush/close conditions below.
+    bool closing = false;
     if (firstError.empty()) {
         std::string closeError;
         if (!Host().Close(&closeError)) {
             Host().Abort();
             firstError = "Measurement session close failed: " + closeError;
+        } else {
+            closing = true;
         }
     } else {
         Host().Abort();
@@ -149,12 +163,19 @@ std::string RunMeasurementShutdown(const std::function<void()>& body,
     } catch (const std::exception& exception) {
         if (firstError.empty()) firstError = exception.what();
     }
+    if (firstError.empty()) {
+        Host().Commit();
+    } else if (closing) {
+        // Validated but cleanup/persistence failed: never leave a success receipt.
+        Host().Abort();
+    }
     return firstError;
 }
 
 bool MeasurementHost::SessionOpen() const noexcept { return state_.load() == kOpen; }
+bool MeasurementHost::Closing() const noexcept { return state_.load() == kClosing; }
 bool MeasurementHost::Closed() const noexcept { return state_.load() == kClosed; }
 bool MeasurementHost::Failed() const noexcept { return state_.load() == kFailed; }
 uint64_t MeasurementHost::SessionId() const noexcept { return session_id_; }
-bool MeasurementHost::CloseReceiptPresent() const noexcept { return close_receipt_present_.load(); }
+bool MeasurementHost::CloseReceiptPresent() const noexcept { return state_.load() == kClosed; }
 }
