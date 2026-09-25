@@ -8,6 +8,8 @@
 #include "model.hpp"
 #include "json_diff.hpp"
 #include "memory.hpp"
+#include "measurement.hpp"
+#include "stream_close.hpp"
 #include "spawn_hook.hpp"
 #include "reanimation_audit.hpp"
 #include "particle_shake.hpp"
@@ -79,7 +81,8 @@ void Write(std::ofstream& stream, const Json& value) {
 void DrainAndCheckSpawns() {
     const auto health=SpawnHookStatus();
     if(health.value("active_initializers",size_t(0))==0) {
-        for(auto& spawn:DrainSpawnEvents()) {
+        auto batch=DrainSpawnBatch();
+        for(auto& spawn:batch.legacy) {
             const auto& boundary=spawn.at("boundary");
             const bool controlled=boundary.is_object();
             Json version=nullptr;
@@ -90,6 +93,7 @@ void DrainAndCheckSpawns() {
                 {"native_phase","zombie_initialize_exit"},{"version",version},
                 {"payload",std::move(spawn)}});
         }
+        lvz::measurement::Host().OnPersisted(batch.count);
     }
     if(!health.value("healthy",false)) {
         Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_fault"},
@@ -319,14 +323,17 @@ void Initialize(const std::filesystem::path& runDir) {
     fpMonitor=std::make_unique<fpenv::Monitor>(ownerThread);fpFaultWritten=false;
     previous=nullptr; previousZombies.clear();lastObservationVersion=Json::object();
     reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
-    bool hookInstalled=false;
+    bool hookInstalled=false, measurementOpened=false;
     try {
         silentaudio::Initialize(runDir);
         if(silentaudio::Enabled()){
             soundCounterRaw.open(directory/"sound-counter-raw.jsonl",std::ios::out|std::ios::binary);
             if(!soundCounterRaw)throw std::runtime_error("Cannot open sound counter raw evidence");
         }
-        std::string error;
+        std::string error, measureError;
+        if(!lvz::measurement::Host().Open(ownerThread, &measureError))
+            throw std::runtime_error(measureError);
+        measurementOpened=true;
         if(!InstallSpawnHook(error)) throw std::runtime_error(error);
         hookInstalled=true;
         if(!InstallParticleShakeHook(error)) throw std::runtime_error(error);
@@ -343,6 +350,9 @@ void Initialize(const std::filesystem::path& runDir) {
             std::string removeError;
             if(!RemoveSpawnHook(removeError))
                 throw std::runtime_error("Audit initialization failed; keep DLL loaded: "+removeError);
+        }
+        if(measurementOpened) {
+            lvz::measurement::Host().Abort();
         }
         checksums.close();changes.close();events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();soundCounterRaw.close();fpRaw.close();initialized=false;
         throw;
@@ -583,35 +593,52 @@ void Flush() {
 }
 void Shutdown() {
     if(!initialized) return;
-    RequireThread();DrainAndCheckSpawns();DrainAndCheckParticleShake();
+    RequireThread();
+    const std::string firstError=lvz::measurement::RunMeasurementShutdown(
+        [&]() {
+            DrainAndCheckSpawns();DrainAndCheckParticleShake();
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
-    // A shot that never reached its next audited pre_step is written here and
-    // then rejected by the strict reader ("hosted fire has no following audited
-    // boundary"): fail closed rather than hide the shot.
-    DrainHostedFires();
+            // A shot that never reached its next audited pre_step is written
+            // here and then rejected by the strict reader ("hosted fire has no
+            // following audited boundary"): fail closed rather than hide it.
+            DrainHostedFires();
 #endif
-    foleytrace::Shutdown();
-    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","fp_environment_closed"},
-        {"version",lastObservationVersion},{"payload",fpMonitor->Close()}});
-    if(silentaudio::Enabled())Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","sound_effects_closed"},
-        {"version",lastObservationVersion},{"payload",silentaudio::Health()}});
-    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","draw_schedule_closed"},
-        {"version",lastObservationVersion},{"payload",lvz::recording::DrawGateStatus()}});
-    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_closed"},
-        {"version",lastObservationVersion},{"payload",ParticleShakeStatus()}});
-    const auto finalHealth=SpawnHookStatus();
-    Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},
-        {"version",lastObservationVersion},{"payload",finalHealth}});
-    std::string error;
-    if(!RemoveParticleShakeHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
-    if(!RemoveSpawnHook(error)) throw std::runtime_error("Keep runtime DLL loaded: "+error);
-    Flush(); checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();fpRaw.close();
-    if(soundCounterRaw.is_open()){soundCounterRaw.close();if(soundCounterRaw.fail())throw std::runtime_error("Sound counter raw evidence close failed");}
-    if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()||fpRaw.fail()) throw std::runtime_error("Audit output close failed");
-    initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
-    reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
+            Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","fp_environment_closed"},
+                {"version",lastObservationVersion},{"payload",fpMonitor->Close()}});
+            if(silentaudio::Enabled())Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","sound_effects_closed"},
+                {"version",lastObservationVersion},{"payload",silentaudio::Health()}});
+            Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","draw_schedule_closed"},
+                {"version",lastObservationVersion},{"payload",lvz::recording::DrawGateStatus()}});
+            Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","particle_shake_closed"},
+                {"version",lastObservationVersion},{"payload",ParticleShakeStatus()}});
+        },
+        [&]() {
+            std::string cleanupError;
+            auto note=[&](const std::string& what) { if(cleanupError.empty()) cleanupError=what; };
+            // Foley owns its own hooks/output: terminate it unconditionally so a
+            // front-stage drain fault cannot leak its 12 hooks or output stream.
+            try { foleytrace::Shutdown(); } catch(const std::exception& exception) { note(exception.what()); }
+            try {
+                const auto finalHealth=SpawnHookStatus();
+                Write(events,{{"schema",kSchema},{"seq",sequence++},{"kind","spawn_hook_closed"},
+                    {"version",lastObservationVersion},{"payload",finalHealth}});
+            } catch(const std::exception& exception) { note(exception.what()); }
+            std::string error;
+            if(!RemoveParticleShakeHook(error)) note("Keep runtime DLL loaded: "+error);
+            if(!RemoveSpawnHook(error)) note("Keep runtime DLL loaded: "+error);
+            try { Flush(); } catch(const std::exception& exception) { note(exception.what()); }
+            checksums.close(); changes.close(); events.close();reanimationHandles.close();particleSeeds.close();engineCallRaw.close();fpRaw.close();
+            const std::string soundCloseError = CloseOptionalStream(soundCounterRaw, "Sound counter raw evidence");
+            if(!soundCloseError.empty()) note(soundCloseError);
+            if(checksums.fail()||changes.fail()||events.fail()||reanimationHandles.fail()||particleSeeds.fail()||engineCallRaw.fail()||fpRaw.fail()) note("Audit output close failed");
+            initialized=false;previous=nullptr;previousZombies.clear();lastObservationVersion=Json::object();
+            reanimationAuditor.Reset();reanimationEvidence=nullptr;previousReanimationEvidence=nullptr;reanimationLinksValid=true;
 #ifdef LVZ_AVZ_HOSTED_FIRE_AUDIT
-    ResetHostedFire();
+            ResetHostedFire();
 #endif
+            if(!cleanupError.empty()) throw std::runtime_error(cleanupError);
+        });
+    if(!firstError.empty())
+        throw std::runtime_error(firstError);
 }
 }

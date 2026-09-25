@@ -1,4 +1,5 @@
 #include "determinism/spawn_hook.hpp"
+#include "determinism/measurement.hpp"
 #include "determinism/model.hpp"
 #include <Windows.h>
 #include <array>
@@ -87,6 +88,103 @@ int main() {
     using namespace lvz::determinism;
     std::string error;
     try {
+        // --- #111 stage B: lifecycle projection + shared capture_sequence (clean session) ---
+        Check(lvz::measurement::Host().Open(GetCurrentThreadId()),"Open measurement session");
+        Check(InstallSpawnHookForTest(reinterpret_cast<uintptr_t>(&SpawnFixture),
+            reinterpret_cast<uintptr_t>(&SpawnFixtureEpilogue),reinterpret_cast<uintptr_t>(&fixtureMt),error),error.c_str());
+        SetSpawnBoundary(42,7,3,0x200000002ull);
+        Reset(2);CallFixture();
+        {
+            auto batch=DrainSpawnBatch();
+            Check(batch.count==2 && batch.legacy.size()==2 && batch.lifecycle.size()==2,
+                "Lifecycle/legacy projection must drain the same records");
+            const auto& child=batch.lifecycle[0];
+            const auto& parent=batch.lifecycle[1];
+            // Actual capture order is exit order: the nested child exits before
+            // its parent, so the child receives the smaller capture_sequence.
+            Check(child["capture_sequence"]==1 && parent["capture_sequence"]==2,
+                "capture_sequence must reflect actual exit order");
+            // Every event carries an invocation_id; only the top-level parent
+            // reference is null. The parent entered first (id 1), child id 2.
+            Check(parent["invocation"]["invocation_id"]==1 && parent["invocation"]["depth"]==0
+                && parent["invocation"]["parent_invocation_id"].is_null(),
+                "Top-level event must carry invocation_id with a null parent reference");
+            Check(child["invocation"]["invocation_id"]==2 && child["invocation"]["depth"]==1
+                && child["invocation"]["parent_invocation_id"]==1,
+                "Nested event must resolve its parent by invocation_id");
+            Check(child["version"]["epoch"]==3 && child["version"]["tick"]==42
+                && child["version"]["revision"]==7 && child["version_phase"]=="controlled_boundary",
+                "Lifecycle event must bind the controlled boundary version");
+            Check(child["engine_call_id"]==0x200000002ull,"Lifecycle event must keep the 64-bit original call id");
+            Check(child["entity"]["id"]==0x3ea0001u && child["entity"]["slot"]==1
+                && child["entity"]["generation"]==1002,"Lifecycle event must identify slot+generation");
+            Check(child["classification"]["class"]=="initialization"
+                && child["classification"]["cause"]=="unknown","Lifecycle classification must stay neutral");
+            Check(child["complete"]==true && child["probe"]["name"]=="zombie-initialize-exit",
+                "Lifecycle event must declare completeness and probe identity");
+        }
+        Reset(0);CallFixture();
+        {
+            auto batch=DrainSpawnBatch();
+            Check(batch.lifecycle[0]["capture_sequence"]==3 && batch.lifecycle[0]["invocation"]["invocation_id"]==3,
+                "capture_sequence must not reset on drain and invocation_id must advance");
+        }
+        // Cross-type interleaving: another probe allocates in the same domains.
+        Check(lvz::measurement::Host().NextSequence()==4,"Another probe must interleave in the shared sequence domain");
+        Check(lvz::measurement::Host().NextInvocationId()==4,"Another probe must interleave in the invocation domain");
+        Reset(0);CallFixture();
+        {
+            auto batch=DrainSpawnBatch();
+            Check(batch.lifecycle[0]["capture_sequence"]==5 && batch.lifecycle[0]["invocation"]["invocation_id"]==5,
+                "Spawn after another probe stays ordered in both domains");
+        }
+        ClearSpawnBoundary();Reset(0);CallFixture();
+        {
+            auto batch=DrainSpawnBatch();
+            Check(batch.lifecycle[0]["capture_sequence"]==6
+                && batch.lifecycle[0]["version"].is_null()
+                && batch.lifecycle[0]["version_phase"]=="initialization"
+                && batch.lifecycle[0]["engine_call_id"].is_null(),
+                "Initialization lifecycle event must not forge a controlled identity");
+        }
+        // Reinstall within the same session must not reset invocation identity:
+        // a child's parent reference must stay resolvable after the probe is
+        // removed and reinstalled.
+        Check(RemoveSpawnHook(error),error.c_str());
+        Check(InstallSpawnHookForTest(reinterpret_cast<uintptr_t>(&SpawnFixture),
+            reinterpret_cast<uintptr_t>(&SpawnFixtureEpilogue),reinterpret_cast<uintptr_t>(&fixtureMt),error),error.c_str());
+        SetSpawnBoundary(42,7,3,0x200000002ull);
+        Reset(2);CallFixture();
+        {
+            auto batch=DrainSpawnBatch();
+            const auto& child=batch.lifecycle[0];
+            const auto& parent=batch.lifecycle[1];
+            Check(child["capture_sequence"]==7 && parent["capture_sequence"]==8,
+                "Reinstall must not reset the shared capture_sequence domain");
+            Check(child["invocation"]["invocation_id"]==8 && child["invocation"]["parent_invocation_id"]==7
+                && parent["invocation"]["invocation_id"]==7,
+                "Reinstall must not reset invocation_id scope");
+        }
+        {
+            auto health=SpawnHookStatus()["measurement"];
+            Check(health["captured"]==7 && health["delivered"]==7 && health["persisted"]==0,
+                "Measurement ledger must count captured/delivered but leave persisted to the adapter");
+            Check(health["overflow"]==0 && health["wrong_thread"]==0 && health["nesting_mismatch"]==0
+                && health["incomplete_events"]==0 && health["close_receipt_present"]==false,
+                "Healthy measurement ledger must have no faults and no premature close receipt");
+            lvz::measurement::Host().OnPersisted(7);
+            Check(SpawnHookStatus()["measurement"]["persisted"]==7,"Persisted must be recorded by the adapter");
+            std::string closeError;
+            Check(lvz::measurement::Host().Close(&closeError),"Balanced session must close");
+            Check(lvz::measurement::Host().Commit(&closeError),"Balanced session must commit");
+            Check(lvz::measurement::Host().CloseReceiptPresent(),"Close receipt must be present");
+        }
+        Reset(0);CallFixture();
+        Check(SpawnHookStatus()["queued"]==0 && SpawnHookStatus()["measurement"]["captured"]==7,
+            "Post-close spawn must be refused and not captured");
+        Check(RemoveSpawnHook(error),error.c_str());
+        // --- legacy spawn ABI tests (fresh session) ---
+        Check(lvz::measurement::Host().Open(GetCurrentThreadId()),"Reopen measurement session");
         Check(!InstallSpawnHookForTest(0,0,0,error),"Unknown code should be rejected");
         for(uint32_t type=0;type<3;++type) {
             Reset(type);CallFixture();
