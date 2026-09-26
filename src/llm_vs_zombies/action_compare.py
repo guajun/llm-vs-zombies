@@ -76,18 +76,18 @@ ACTION_NORMALIZATION = ("request.request_id", "response.request_id", "request.br
 
 
 def _normalize_step(step: dict) -> dict:
-    request = dict(step.get("request")) if isinstance(step.get("request"), dict) else step.get("request")
+    """Copy the complete step, then normalize only declared identity fields.
+
+    The request envelope's run-scoped ``branch`` plus the already justified
+    protocol/run identity keys are removed; every other field, including
+    ``pixels_evidence`` and capture payloads, is preserved verbatim.
+    """
+    import copy as _copy
+    value = _copy.deepcopy(step)
+    request = value.get("request")
     if isinstance(request, dict):
         request.pop("branch", None)
-    value = {"request": _normalize(request)}
-    if "result" in step:
-        value["result"] = _normalize(step.get("result"))
-    if "capture_response" in step:
-        value["capture_response"] = _normalize(step.get("capture_response"))
-    for key in ("state_after", "observation_after", "after_version"):
-        if key in step:
-            value[key] = _normalize(step.get(key))
-    return value
+    return _normalize(value)
 
 
 def compare_action_steps(left_steps: list[dict], right_steps: list[dict]) -> dict:

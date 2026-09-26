@@ -694,85 +694,195 @@ def _seal_document(root: Path, name: str, *, allow_compress: bool = False) -> di
 
 REVALIDATION_SCHEMA = "lvz.stage-d-revalidation.v1"
 REVALIDATION_SEAL_SCHEMA = "lvz.stage-d-revalidation-seal.v1"
+_PERMITTED_FAILED_GATES = {"archive_integrity", "recording", "full_cycle", "ten_cold_starts"}
+_PERMITTED_UNVERIFIED_GATES = {"build_and_tests", "initial_state", "disconnect_recovery",
+                               "failure_recovery", "engine_replay"}
+_OLD_READER_REASONS = ("native event after recording close",
+                       "native audit target/coverage identity differs from hello")
 
 
-def revalidate_child(root: Path, child: str) -> dict:
-    """Strict offline revalidation of one retained child run."""
-    from llm_vs_zombies import audit_compare, engine_replay
+def _digest_any(target: Path) -> str | None:
+    target = Path(target)
+    if target.is_file():
+        return sha256_file(target)
+    compressed = target.parent / (target.name + ".gz")
+    return sha256_file(compressed) if compressed.is_file() else None
+
+
+def _gate_problems(suite_report: dict) -> list[str]:
+    problems: list[str] = []
+    checks = suite_report.get("checks") if isinstance(suite_report.get("checks"), dict) else {}
+    for name, item in checks.items():
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        if status == "pass":
+            continue
+        if status == "unverified":
+            if name not in _PERMITTED_UNVERIFIED_GATES:
+                problems.append(f"gate {name} is unverified")
+            continue
+        if status == "fail":
+            if name not in _PERMITTED_FAILED_GATES:
+                problems.append(f"gate {name} failed: {json.dumps(item.get('detail'))[:160]}")
+            elif name in ("archive_integrity", "recording"):
+                detail = json.dumps(item, ensure_ascii=False)
+                if not any(reason in detail for reason in _OLD_READER_REASONS):
+                    problems.append(f"gate {name} failed for a non-old-reader reason: {detail[:160]}")
+            continue
+        problems.append(f"gate {name} has unsupported status {status!r}")
+    return problems
+
+
+def _tool_identity(root: Path) -> dict:
+    sources: dict[str, str] = {}
+    for relative in ("src/llm_vs_zombies/action_compare.py",
+                     "src/llm_vs_zombies/audit_compare.py",
+                     "src/llm_vs_zombies/lifecycle_events.py",
+                     "src/llm_vs_zombies/lifecycle_report.py",
+                     "src/llm_vs_zombies/lifecycle_compare.py",
+                     "tools/issue111_lifecycle_experiment.py"):
+        path = root / relative
+        if path.is_file():
+            sources[relative] = sha256_file(path)
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, timeout=60)
+    return {"git_head": head.stdout.strip() or None, "sources": sources}
+
+
+def _child_revalidation(root: Path, name: str, metadata: dict, child: str) -> dict:
+    """Strict revalidation of one retained child using the production readers."""
+    from llm_vs_zombies import audit_compare, engine_replay, lifecycle_report
+    suite = Path(metadata["suite"])
     directory = root / "experiments" / "runs" / child
     audit_dir = directory / "audit"
-    record = {"schema": REVALIDATION_SCHEMA, "run": child, "ok": False, "checks": {}, "inputs": {}}
+    record: dict = {"child": child, "ok": False, "checks": {}, "inputs": {}, "problems": []}
     try:
+        facts, problems = _child_facts(root, name, metadata["mode"], child,
+                                       (metadata.get("probes") or {}).get("mode"),
+                                       metadata.get("expected_recorder_sha256"))
+        record["problems"].extend(problems)
+        expected_build = metadata.get("expected_recorder_sha256")
+        if facts is None or not facts.get("build") or facts.get("build") != expected_build:
+            record["problems"].append("recorder build does not match the frozen expected build")
+        for label, key in (("run_manifest", "run_manifest_sha256"),
+                           ("replay_initial", "replay_initial_sha256"),
+                           ("experiment_end", "experiment_end_sha256")):
+            record["inputs"][label] = (facts or {}).get(key)
         audit = audit_compare.AuditLog(audit_dir, require_closed=True)
         audit.verify_files()
-        record["checks"]["audit"] = {"frames": len(audit.frames), "verified": True}
-        report = lifecycle_events.validate(audit_dir, require_close=True)
-        if report.get("status") != "valid":
-            raise ExperimentError("strict lifecycle validation is not valid: "
-                                  + "; ".join(report.get("problems") or []))
-        record["checks"]["lifecycle"] = {"status": "valid", "records": report["records"]["count"]}
+        record["checks"]["audit"] = {"frames": len(audit.frames), "files": len(audit.evidence_files)}
         initial, steps = engine_replay._trace_steps(directory / "decisions" / "evaluation.jsonl")
         engine_replay._validate_steps(initial, steps, audit)
-        record["checks"]["trace"] = {"steps": len([s for s in steps if s["request"].get("method")
+        record["checks"]["trace"] = {"steps": len([step for step in steps
+                                                   if step["request"].get("method")
                                                    in engine_replay.STEP_METHODS])}
-        for name, target in (("manifest.json", audit_dir / "manifest.json"),
-                             (lifecycle_events.EVENTS_FILE, audit_dir / lifecycle_events.EVENTS_FILE),
-                             (lifecycle_events.RECEIPT_FILE, audit_dir / lifecycle_events.RECEIPT_FILE),
-                             ("evaluation.json", directory / "evaluation.json")):
-            if target.is_file():
-                record["inputs"][name] = sha256_file(target)
-            elif (target.parent / (target.name + ".gz")).is_file():
-                record["inputs"][name] = sha256_file(target.parent / (target.name + ".gz"))
-        record["ok"] = True
-    except Exception as error:  # revalidation evidence must state its own failure
-        record["error"] = f"{type(error).__name__}: {error}"
-    path = root / "experiments" / "runs" / name if (root / "experiments" / "runs" / name).is_dir() else None
+        plan_path = plan_abspath(root, metadata)
+        report = lifecycle_report.report_for_run(directory, plan=plan_path,
+                                                 plan_binding=suite / "lifecycle-plan-binding.json")
+        problems_list = list(report.get("coverage", {}).get("full_window_problems") or [])
+        problems_list += list(report.get("coverage", {}).get("binding_problems") or [])
+        record["problems"].extend(problems_list)
+        record["checks"]["window"] = {"start": report["coverage"].get("window_start"),
+                                      "end": report["coverage"].get("window_end"),
+                                      "first_kill": report.get("first_kill", {}).get("proven")}
+        record["inputs"]["window_report"] = hashlib.sha256(
+            json.dumps(report, sort_keys=True).encode("utf-8")).hexdigest()
+        for label, target in (("audit_manifest", audit_dir / "manifest.json"),
+                              ("lifecycle_events", audit_dir / lifecycle_events.EVENTS_FILE),
+                              ("lifecycle_receipt", audit_dir / lifecycle_events.RECEIPT_FILE),
+                              ("source_trace", directory / "decisions" / "evaluation.jsonl"),
+                              ("suite_report", suite / "evaluation.json"),
+                              ("plan_binding", suite / "lifecycle-plan-binding.json")):
+            record["inputs"][label] = _digest_any(target)
+        record["ok"] = not record["problems"]
+    except Exception as error:
+        record["problems"].append(f"{type(error).__name__}: {error}")
     return record
 
 
-def revalidate(root: Path, name: str) -> dict:
+def revalidation_document(root: Path, name: str, *, child_checker=None) -> dict:
+    """Pure computation of the current revalidation evidence; never writes."""
     root = Path(root).resolve()
     metadata = _read_prepared(root, name)
-    document = {"schema": REVALIDATION_SCHEMA, "run": name, "root": str(root),
-                "prepared_plan_sha256": metadata["plan"]["sha256"],
-                "recorder_sha256": metadata.get("expected_recorder_sha256"),
-                "children": [], "ok": False}
+    suite = Path(metadata["suite"])
+    _, binding_problems = _validate_binding(suite, metadata)
+    document: dict = {"schema": REVALIDATION_SCHEMA, "run": name, "root": str(root),
+                      "tool": _tool_identity(root),
+                      "prepared_plan_sha256": metadata["plan"]["sha256"],
+                      "recorder_sha256": metadata.get("expected_recorder_sha256"),
+                      "binding_sha256": _digest_any(suite / "lifecycle-plan-binding.json"),
+                      "children": [], "problems": list(binding_problems), "ok": False}
+    try:
+        suite_report = json.loads((suite / "evaluation.json").read_bytes())
+        document["problems"].extend(_gate_problems(suite_report))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        document["problems"].append(f"suite evaluation.json is unreadable: {exc}")
+    checker = child_checker or _child_revalidation
     for child in metadata["expected_children"]:
-        record = revalidate_child(root, child)
-        document["children"].append(record)
-    document["ok"] = all(record["ok"] for record in document["children"]) and bool(document["children"])
-    out = root / "experiments" / "runs" / name / "revalidation.json"
-    out.write_text(json.dumps(document, ensure_ascii=False, indent=2) + chr(10), encoding="utf-8")
+        document["children"].append(checker(root, name, metadata, child))
+    document["ok"] = (not document["problems"] and bool(document["children"])
+                      and all(record.get("ok") for record in document["children"]))
+    return document
+
+
+def revalidate(root: Path, name: str) -> dict:
+    """Explicitly write the current revalidation document (no seal)."""
+    root = Path(root).resolve()
+    document = revalidation_document(root, name)
+    target = root / "experiments" / "runs" / name / "revalidation.json"
+    target.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
     return document
 
 
 def seal_revalidation(root: Path, name: str) -> dict:
+    """Seal the stored revalidation document; refuse invalid evidence."""
     root = Path(root).resolve()
-    revalidated = revalidate(root, name)
-    document = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
-                "revalidation_sha256": sha256_file(root / "experiments" / "runs" / name / "revalidation.json"),
-                "children": revalidated["children"], "ok": revalidated["ok"]}
-    document["seal_id"] = sha256_bytes(canonical(document))
+    revalidation_path = root / "experiments" / "runs" / name / "revalidation.json"
+    if not revalidation_path.is_file():
+        raise ExperimentError("revalidation.json is missing; run revalidate first")
+    document = revalidation_document(root, name)
+    stored = json.loads(revalidation_path.read_bytes())
+    if stored != document:
+        raise ExperimentError("stored revalidation does not match the current evidence")
+    if document.get("ok") is not True:
+        raise ExperimentError("refusing to seal invalid revalidation: "
+                              + "; ".join(document.get("problems") or ["child checks failed"]))
+    core = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
+            "revalidation_sha256": sha256_file(revalidation_path)}
+    core["seal_id"] = sha256_bytes(canonical(core))
     target = root / "experiments" / "runs" / name / "revalidation-seal.json"
     if target.is_file():
         existing = json.loads(target.read_bytes())
-        if existing != document:
+        if existing != core:
             raise ExperimentError("existing revalidation seal does not match the current evidence")
         return existing
-    target.write_text(json.dumps(document, ensure_ascii=False, indent=2) + chr(10), encoding="utf-8")
-    return document
+    target.write_text(json.dumps(core, ensure_ascii=False, indent=2), encoding="utf-8")
+    return core
 
 
 def verify_revalidation(root: Path, name: str) -> dict:
+    """Read-only verification: never writes, creates or regenerates anything."""
     root = Path(root).resolve()
-    target = root / "experiments" / "runs" / name / "revalidation-seal.json"
-    if not target.is_file():
-        raise ExperimentError(f"revalidation seal is missing: {target}")
-    existing = json.loads(target.read_bytes())
-    current = seal_revalidation(root, name)
-    if existing != current:
-        raise ExperimentError("revalidation seal does not match the current evidence")
-    return {"schema": REVALIDATION_SEAL_SCHEMA, "run": name, "ok": True, "seal_id": existing["seal_id"]}
+    revalidation_path = root / "experiments" / "runs" / name / "revalidation.json"
+    seal_path = root / "experiments" / "runs" / name / "revalidation-seal.json"
+    if not revalidation_path.is_file():
+        raise ExperimentError(f"revalidation.json is missing: {revalidation_path}")
+    if not seal_path.is_file():
+        raise ExperimentError(f"revalidation seal is missing: {seal_path}")
+    stored = json.loads(revalidation_path.read_bytes())
+    seal = json.loads(seal_path.read_bytes())
+    current = revalidation_document(root, name)
+    if stored != current:
+        raise ExperimentError("stored revalidation does not match the independent recomputation")
+    if current.get("ok") is not True:
+        raise ExperimentError("refusing to verify an invalid revalidation seal")
+    expected_seal = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
+                     "revalidation_sha256": sha256_file(revalidation_path)}
+    expected_seal["seal_id"] = sha256_bytes(canonical(expected_seal))
+    if seal != expected_seal:
+        raise ExperimentError("revalidation seal does not match the stored evidence hashes")
+    return {"schema": REVALIDATION_SEAL_SCHEMA, "run": name, "ok": True, "seal_id": seal["seal_id"]}
 
 
 def seal_check(root: Path, name: str) -> dict:
