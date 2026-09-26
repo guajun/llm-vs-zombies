@@ -694,11 +694,26 @@ def _seal_document(root: Path, name: str, *, allow_compress: bool = False) -> di
 
 REVALIDATION_SCHEMA = "lvz.stage-d-revalidation.v1"
 REVALIDATION_SEAL_SCHEMA = "lvz.stage-d-revalidation-seal.v1"
-_PERMITTED_FAILED_GATES = {"archive_integrity", "recording", "full_cycle", "ten_cold_starts"}
-_PERMITTED_UNVERIFIED_GATES = {"build_and_tests", "initial_state", "disconnect_recovery",
-                               "failure_recovery", "engine_replay"}
-_OLD_READER_REASONS = ("native event after recording close",
-                       "native audit target/coverage identity differs from hello")
+_EXPECTED_GATES = {"build_and_tests", "private_launch", "runtime_windows", "session_cleanup",
+                   "archive_integrity", "host_identity", "resource_limits", "scenario", "fixed_rng",
+                   "initial_state", "single_step", "pause_invariance", "disconnect_recovery",
+                   "failure_recovery", "recording", "full_cycle", "engine_replay", "ten_cold_starts",
+                   "shared_profile_unchanged"}
+_UNVERIFIED_GATES = {"build_and_tests", "initial_state", "disconnect_recovery", "failure_recovery",
+                     "engine_replay"}
+_FROZEN_FAILED_GATES = {"full_cycle", "ten_cold_starts"}
+_OLD_READER_SECONDARY = {"stage": "strict_packaging", "type": "EvidenceError",
+                         "message": "native event after recording close"}
+_CLEANUP_KEYS = ("recording_closed", "client_closed", "trace_closed", "owned_process_stopped")
+_VALIDATOR_SOURCES = ("src/llm_vs_zombies/action_compare.py",
+                      "src/llm_vs_zombies/audit_compare.py",
+                      "src/llm_vs_zombies/engine_replay.py",
+                      "src/llm_vs_zombies/evidence_codec.py",
+                      "src/llm_vs_zombies/records.py",
+                      "src/llm_vs_zombies/lifecycle_events.py",
+                      "src/llm_vs_zombies/lifecycle_report.py",
+                      "src/llm_vs_zombies/lifecycle_compare.py",
+                      "tools/issue111_lifecycle_experiment.py")
 
 
 def _digest_any(target: Path) -> str | None:
@@ -709,45 +724,151 @@ def _digest_any(target: Path) -> str | None:
     return sha256_file(compressed) if compressed.is_file() else None
 
 
-def _gate_problems(suite_report: dict) -> list[str]:
-    problems: list[str] = []
-    checks = suite_report.get("checks") if isinstance(suite_report.get("checks"), dict) else {}
-    for name, item in checks.items():
-        if not isinstance(item, dict):
-            continue
-        status = item.get("status")
-        if status == "pass":
-            continue
-        if status == "unverified":
-            if name not in _PERMITTED_UNVERIFIED_GATES:
-                problems.append(f"gate {name} is unverified")
-            continue
-        if status == "fail":
-            if name not in _PERMITTED_FAILED_GATES:
-                problems.append(f"gate {name} failed: {json.dumps(item.get('detail'))[:160]}")
-            elif name in ("archive_integrity", "recording"):
-                detail = json.dumps(item, ensure_ascii=False)
-                if not any(reason in detail for reason in _OLD_READER_REASONS):
-                    problems.append(f"gate {name} failed for a non-old-reader reason: {detail[:160]}")
-            continue
-        problems.append(f"gate {name} has unsupported status {status!r}")
-    return problems
+def _is_hex40(value) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value)
 
 
-def _tool_identity(root: Path) -> dict:
-    sources: dict[str, str] = {}
-    for relative in ("src/llm_vs_zombies/action_compare.py",
-                     "src/llm_vs_zombies/audit_compare.py",
-                     "src/llm_vs_zombies/lifecycle_events.py",
-                     "src/llm_vs_zombies/lifecycle_report.py",
-                     "src/llm_vs_zombies/lifecycle_compare.py",
-                     "tools/issue111_lifecycle_experiment.py"):
-        path = root / relative
-        if path.is_file():
-            sources[relative] = sha256_file(path)
+def _git_head(root: Path) -> str | None:
     head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                           capture_output=True, text=True, timeout=60)
-    return {"git_head": head.stdout.strip() or None, "sources": sources}
+    value = head.stdout.strip()
+    return value if _is_hex40(value) else None
+
+
+def _validator_identity(root: Path) -> dict:
+    """Fingerprint the complete validator implementation actually used."""
+    sources: dict[str, str] = {}
+    for relative in _VALIDATOR_SOURCES:
+        path = root / relative
+        if not path.is_file():
+            raise ExperimentError(f"validator source is missing: {relative}")
+        sources[relative] = sha256_file(path)
+    return {"sources": sources}
+
+
+def _gate_problems(suite_report: dict, metadata: dict, plan, expected_children: list[str]) -> list[str]:
+    """Strict, inventory-complete acceptance gate policy.
+
+    Only the declared frozen short-run exclusions and the single structured
+    old-reader packaging error are permitted; anything missing, malformed or
+    different is rejected.
+    """
+    problems: list[str] = []
+    if not isinstance(suite_report, dict) or suite_report.get("schema") != "lvz.evaluation.v1":
+        return ["suite evaluation schema is not lvz.evaluation.v1"]
+    try:
+        if _plan_identity(_load_plan_from_report(suite_report)) != metadata["plan"]["normalized_sha256"]:
+            problems.append("suite report plan does not match the prepared plan")
+    except ExperimentError as exc:
+        problems.append(f"suite report plan is invalid: {exc}")
+    checks = suite_report.get("checks")
+    if not isinstance(checks, dict):
+        return problems + ["suite report has no gate inventory"]
+    if set(checks) != _EXPECTED_GATES:
+        problems.append(f"gate inventory differs: missing={sorted(_EXPECTED_GATES - set(checks))} "
+                        f"unexpected={sorted(set(checks) - _EXPECTED_GATES)}")
+    on_arm = (metadata.get("probes") or {}).get("mode") == "on"
+    for name in sorted(_EXPECTED_GATES):
+        item = checks.get(name)
+        if not isinstance(item, dict) or item.get("status") not in ("pass", "unverified", "fail"):
+            problems.append(f"gate {name} has no typed status")
+            continue
+        status = item["status"]
+        if name in _UNVERIFIED_GATES:
+            if status != "unverified":
+                problems.append(f"gate {name} must be unverified in the frozen short run")
+            elif name == "build_and_tests" and metadata.get("run_builds"):
+                problems.append("build_and_tests is unverified although builds were requested")
+            continue
+        if name in _FROZEN_FAILED_GATES:
+            if not metadata.get("single_cold"):
+                problems.append(f"gate {name} may only be excluded in the single-cold frozen plan")
+            elif status not in ("fail", "pass"):
+                problems.append(f"gate {name} has an unexpected status")
+            continue
+        if name in ("recording", "archive_integrity") and on_arm:
+            if status != "fail":
+                problems.append(f"probe-on arm gate {name} must carry the retained old-reader failure")
+            continue
+        if status != "pass":
+            problems.append(f"gate {name} status is {status!r}; only pass is accepted here")
+    if not on_arm and (checks.get("recording", {}).get("status") != "pass"
+                       or checks.get("archive_integrity", {}).get("status") != "pass"):
+        problems.append("probe-off arm must pass recording and archive_integrity")
+    stop_when = plan.stop_when if isinstance(getattr(plan, "stop_when", None), dict) else None
+    wave_floor = stop_when.get("wave_at_least") if stop_when else None
+    cases = suite_report.get("cases")
+    if not isinstance(cases, list) or len(cases) != len(plan.seeds):
+        problems.append("suite cases do not match the frozen seed count")
+        return problems
+    expected_by_seed = {}
+    for child in expected_children:
+        seed = None
+        if "-s" in child:
+            try:
+                seed = int(child.rsplit("-s", 1)[1].split("-", 1)[0])
+            except ValueError:
+                seed = None
+        expected_by_seed[seed] = child
+    if set(expected_by_seed) != set(plan.seeds):
+        problems.append("expected children do not map exactly onto the frozen seeds")
+    seen_seeds = set()
+    for case in cases:
+        if not isinstance(case, dict):
+            problems.append("suite case is not an object")
+            continue
+        seed = case.get("seed")
+        seen_seeds.add(seed)
+        child = expected_by_seed.get(seed)
+        if child is None:
+            problems.append(f"suite case seed {seed!r} has no expected child")
+            continue
+        if case.get("source") != "live_engine":
+            problems.append(f"case {child}: source is not live_engine")
+        run_path = str(case.get("expected_run") or "")
+        if Path(run_path).name != child:
+            problems.append(f"case {child}: expected_run does not name the child")
+        if case.get("outcome") != "stop_condition_reached":
+            problems.append(f"case {child}: endpoint outcome is not stop_condition_reached")
+        if isinstance(wave_floor, int):
+            wave = case.get("maximum_wave")
+            if not isinstance(wave, int) or wave < wave_floor:
+                problems.append(f"case {child}: frozen stop_when wave was not reached")
+        cold_starts = case.get("cold_starts")
+        if not isinstance(cold_starts, list) or len(cold_starts) != 1:
+            problems.append(f"case {child}: exactly one single-cold start is required")
+        sessions = case.get("sessions")
+        if not isinstance(sessions, list) or len(sessions) != 1:
+            problems.append(f"case {child}: exactly one retained source session is required")
+            continue
+        session = sessions[0]
+        if not isinstance(session, dict) or Path(str(session.get("run", ""))).name != child:
+            problems.append(f"case {child}: session does not name the child")
+            continue
+        if session.get("primary_error") is not None:
+            problems.append(f"case {child}: session has a primary error")
+        failures = session.get("infrastructure_failures")
+        if failures not in ([], ["recording"]):
+            problems.append(f"case {child}: infrastructure failures are not the retained set: {failures!r}")
+        secondary = session.get("secondary_errors")
+        if on_arm and failures == ["recording"]:
+            if secondary != [_OLD_READER_SECONDARY]:
+                problems.append(f"case {child}: secondary errors are not exactly the retained old-reader error")
+            if case.get("status") != "failed":
+                problems.append(f"case {child}: the retained old-reader failure must keep the original failed status")
+        else:
+            if secondary not in ([], None):
+                problems.append(f"case {child}: unexpected secondary errors")
+            if case.get("status") != "completed":
+                problems.append(f"case {child}: status is not completed")
+        if session.get("cleanup_passed") is not True:
+            problems.append(f"case {child}: cleanup did not pass")
+        cleanup = session.get("cleanup")
+        if not isinstance(cleanup, dict) or any(cleanup.get(key) is not True for key in _CLEANUP_KEYS):
+            problems.append(f"case {child}: cleanup flags are not all complete")
+    if seen_seeds != set(plan.seeds):
+        problems.append("suite cases do not cover exactly the frozen seeds")
+    return problems
 
 
 def _child_revalidation(root: Path, name: str, metadata: dict, child: str) -> dict:
@@ -806,16 +927,18 @@ def revalidation_document(root: Path, name: str, *, child_checker=None) -> dict:
     root = Path(root).resolve()
     metadata = _read_prepared(root, name)
     suite = Path(metadata["suite"])
+    plan = _load_plan(plan_abspath(root, metadata))
     _, binding_problems = _validate_binding(suite, metadata)
     document: dict = {"schema": REVALIDATION_SCHEMA, "run": name, "root": str(root),
-                      "tool": _tool_identity(root),
+                      "tool": _validator_identity(root),
                       "prepared_plan_sha256": metadata["plan"]["sha256"],
                       "recorder_sha256": metadata.get("expected_recorder_sha256"),
                       "binding_sha256": _digest_any(suite / "lifecycle-plan-binding.json"),
                       "children": [], "problems": list(binding_problems), "ok": False}
     try:
         suite_report = json.loads((suite / "evaluation.json").read_bytes())
-        document["problems"].extend(_gate_problems(suite_report))
+        document["problems"].extend(_gate_problems(suite_report, metadata, plan,
+                                                   metadata["expected_children"]))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         document["problems"].append(f"suite evaluation.json is unreadable: {exc}")
     checker = child_checker or _child_revalidation
@@ -849,7 +972,9 @@ def seal_revalidation(root: Path, name: str) -> dict:
         raise ExperimentError("refusing to seal invalid revalidation: "
                               + "; ".join(document.get("problems") or ["child checks failed"]))
     core = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
-            "revalidation_sha256": sha256_file(revalidation_path)}
+            "revalidation_sha256": sha256_file(revalidation_path),
+            "implementation_commit": _git_head(root),
+            "implementation_sources": document["tool"]["sources"]}
     core["seal_id"] = sha256_bytes(canonical(core))
     target = root / "experiments" / "runs" / name / "revalidation-seal.json"
     if target.is_file():
@@ -877,10 +1002,16 @@ def verify_revalidation(root: Path, name: str) -> dict:
         raise ExperimentError("stored revalidation does not match the independent recomputation")
     if current.get("ok") is not True:
         raise ExperimentError("refusing to verify an invalid revalidation seal")
-    expected_seal = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
-                     "revalidation_sha256": sha256_file(revalidation_path)}
-    expected_seal["seal_id"] = sha256_bytes(canonical(expected_seal))
-    if seal != expected_seal:
+    if not _is_hex40(seal.get("implementation_commit")):
+        raise ExperimentError("revalidation seal has no implementation commit identity")
+    if seal.get("implementation_sources") != current["tool"]["sources"]:
+        raise ExperimentError("revalidation seal validator sources differ from the recorded tool")
+    expected = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
+                "revalidation_sha256": sha256_file(revalidation_path),
+                "implementation_commit": seal.get("implementation_commit"),
+                "implementation_sources": seal.get("implementation_sources")}
+    expected["seal_id"] = sha256_bytes(canonical(expected))
+    if seal != expected:
         raise ExperimentError("revalidation seal does not match the stored evidence hashes")
     return {"schema": REVALIDATION_SEAL_SCHEMA, "run": name, "ok": True, "seal_id": seal["seal_id"]}
 
