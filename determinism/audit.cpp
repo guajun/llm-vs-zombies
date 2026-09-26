@@ -146,6 +146,9 @@ bool RewriteProbeCapability(const std::filesystem::path& auditDir,const Json& pr
     if(!(input>>manifest)||!manifest.is_object()) {
         error="Cannot read the audit manifest for final probe counters"; return false;
     }
+    // Windows cannot replace the destination while this reader still holds
+    // its handle. Release it before the atomic MoveFileExW below.
+    input.close();
     if(!manifest.contains("lifecycle_probes")||!manifest.at("lifecycle_probes").is_object()) return true;
     Json& block=manifest["lifecycle_probes"];
     block["probe_counters"]=probeStatus.contains("counters")?probeStatus.at("counters"):Json::object();

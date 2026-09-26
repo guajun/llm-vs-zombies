@@ -3,197 +3,587 @@
   "title": "LLM vs Zombies lifecycle close receipt (v1 or v2)",
   "$id": "lvz.lifecycle-close-receipt",
   "oneOf": [
-    {"$ref": "#/$defs/receipt_v1"},
-    {"$ref": "#/$defs/receipt_v2"}
+    {
+      "$ref": "#/$defs/receipt_v1"
+    },
+    {
+      "$ref": "#/$defs/receipt_v2"
+    }
   ],
   "$defs": {
     "receipt_v1": {
       "type": "object",
-      "required": ["schema", "run_id", "branch_id", "session_id", "sequence_domain", "envelope_schema",
-                   "event_schema", "probe", "build", "manifest_sha256", "records",
-                   "first_capture_sequence", "last_capture_sequence", "bytes", "sha256",
-                   "counters", "probe_health", "completed", "persistence"],
+      "required": [
+        "schema",
+        "run_id",
+        "branch_id",
+        "session_id",
+        "sequence_domain",
+        "envelope_schema",
+        "event_schema",
+        "probe",
+        "build",
+        "manifest_sha256",
+        "records",
+        "first_capture_sequence",
+        "last_capture_sequence",
+        "bytes",
+        "sha256",
+        "counters",
+        "probe_health",
+        "completed",
+        "persistence"
+      ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"const": "lvz.lifecycle-close-receipt.v1"},
-        "run_id": {"type": "string", "minLength": 1},
-        "branch_id": {"type": "string", "minLength": 1},
-        "session_id": {"type": "integer", "minimum": 1},
-        "sequence_domain": {"const": "lvz.measurement.capture-sequence"},
-        "envelope_schema": {"const": "lvz.lifecycle-record.v1"},
-        "event_schema": {"const": "lvz.lifecycle-event.v1"},
-        "probe": {"$ref": "#/$defs/probe"},
-        "build": {"$ref": "#/$defs/build"},
-        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "records": {"type": "integer", "minimum": 0},
-        "first_capture_sequence": {"type": ["integer", "null"], "minimum": 1},
-        "last_capture_sequence": {"type": ["integer", "null"], "minimum": 1},
-        "bytes": {"type": "integer", "minimum": 0},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "counters": {"$ref": "#/$defs/initialization_counters"},
+        "schema": {
+          "const": "lvz.lifecycle-close-receipt.v1"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence_domain": {
+          "const": "lvz.measurement.capture-sequence"
+        },
+        "envelope_schema": {
+          "const": "lvz.lifecycle-record.v1"
+        },
+        "event_schema": {
+          "const": "lvz.lifecycle-event.v1"
+        },
+        "probe": {
+          "$ref": "#/$defs/probe"
+        },
+        "build": {
+          "$ref": "#/$defs/build"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_capture_sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "last_capture_sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "counters": {
+          "$ref": "#/$defs/initialization_counters"
+        },
         "probe_health": {
           "type": "object",
-          "required": ["captured", "queued", "wrong_thread_calls", "faults", "overflow",
-                       "active_initializers", "healthy"],
+          "required": [
+            "captured",
+            "queued",
+            "wrong_thread_calls",
+            "faults",
+            "overflow",
+            "active_initializers",
+            "healthy"
+          ],
           "additionalProperties": false,
           "properties": {
-            "captured": {"type": "integer", "minimum": 0},
-            "queued": {"type": "integer", "minimum": 0},
-            "wrong_thread_calls": {"type": "integer", "minimum": 0},
-            "faults": {"type": "integer", "minimum": 0},
-            "overflow": {"type": "integer", "minimum": 0},
-            "active_initializers": {"type": "integer", "minimum": 0},
-            "healthy": {"const": true}
+            "captured": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "queued": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wrong_thread_calls": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "faults": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "overflow": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "active_initializers": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "healthy": {
+              "const": true
+            }
           }
         },
-        "completed": {"const": true},
-        "persistence": {"$ref": "#/$defs/persistence"}
+        "completed": {
+          "const": true
+        },
+        "persistence": {
+          "$ref": "#/$defs/persistence"
+        }
       }
     },
     "receipt_v2": {
       "type": "object",
-      "required": ["schema", "run_id", "branch_id", "session_id", "sequence_domain", "envelope_schema",
-                   "event_schemas", "probe", "build", "manifest_sha256", "records",
-                   "first_capture_sequence", "last_capture_sequence", "bytes", "sha256",
-                   "counters", "probe_health", "completed", "persistence"],
+      "required": [
+        "schema",
+        "run_id",
+        "branch_id",
+        "session_id",
+        "sequence_domain",
+        "envelope_schema",
+        "event_schemas",
+        "probe",
+        "build",
+        "manifest_sha256",
+        "records",
+        "first_capture_sequence",
+        "last_capture_sequence",
+        "bytes",
+        "sha256",
+        "counters",
+        "probe_health",
+        "completed",
+        "persistence"
+      ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"const": "lvz.lifecycle-close-receipt.v2"},
-        "run_id": {"type": "string", "minLength": 1},
-        "branch_id": {"type": "string", "minLength": 1},
-        "session_id": {"type": "integer", "minimum": 1},
-        "sequence_domain": {"const": "lvz.measurement.capture-sequence"},
-        "envelope_schema": {"const": "lvz.lifecycle-record.v1"},
+        "schema": {
+          "const": "lvz.lifecycle-close-receipt.v2"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence_domain": {
+          "const": "lvz.measurement.capture-sequence"
+        },
+        "envelope_schema": {
+          "const": "lvz.lifecycle-record.v1"
+        },
         "event_schemas": {
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
-          "items": {"enum": ["lvz.lifecycle-event.v1", "lvz.lifecycle-event.v2"]}
+          "items": {
+            "enum": [
+              "lvz.lifecycle-event.v1",
+              "lvz.lifecycle-event.v2"
+            ]
+          }
         },
-        "probe": {"$ref": "#/$defs/probe"},
-        "build": {"$ref": "#/$defs/build"},
-        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "records": {"type": "integer", "minimum": 0},
-        "first_capture_sequence": {"type": ["integer", "null"], "minimum": 1},
-        "last_capture_sequence": {"type": ["integer", "null"], "minimum": 1},
-        "bytes": {"type": "integer", "minimum": 0},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "probe": {
+          "$ref": "#/$defs/probe"
+        },
+        "build": {
+          "$ref": "#/$defs/build"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_capture_sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "last_capture_sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "counters": {
           "type": "object",
-          "required": ["initialization", "probes", "total"],
+          "required": [
+            "initialization",
+            "probes",
+            "total"
+          ],
           "additionalProperties": false,
           "properties": {
-            "initialization": {"$ref": "#/$defs/initialization_counters"},
-            "probes": {"$ref": "#/$defs/probe_counters"},
-            "total": {"$ref": "#/$defs/total_counters"}
+            "initialization": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "persisted"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "persisted": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "$ref": "#/$defs/initialization_counters"
+                }
+              ]
+            },
+            "probes": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "persisted"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "persisted": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "$ref": "#/$defs/probe_counters"
+                }
+              ]
+            },
+            "total": {
+              "$ref": "#/$defs/total_counters"
+            }
           }
         },
         "probe_health": {
           "type": "object",
-          "required": ["installed", "active", "healthy", "pending_candidate", "patched_sites",
-                       "counters", "sites", "reader_protected", "pending_callbacks"],
+          "required": [
+            "installed",
+            "active",
+            "healthy",
+            "pending_candidate",
+            "patched_sites",
+            "counters",
+            "sites",
+            "reader_protected",
+            "pending_callbacks"
+          ],
           "additionalProperties": false,
           "properties": {
-            "installed": {"type": "boolean"},
-            "active": {"type": "boolean"},
-            "healthy": {"const": true},
-            "pending_candidate": {"const": false},
-            "patched_sites": {"type": "array", "items": {"type": "string"}},
-            "counters": {"$ref": "#/$defs/probe_counters"},
-            "sites": {"type": "array", "items": {"$ref": "#/$defs/site"}},
-            "reader_protected": {"const": false},
-            "pending_callbacks": {"const": 0}
+            "installed": {
+              "type": "boolean"
+            },
+            "active": {
+              "type": "boolean"
+            },
+            "healthy": {
+              "const": true
+            },
+            "pending_candidate": {
+              "const": false
+            },
+            "patched_sites": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "counters": {
+              "$ref": "#/$defs/probe_counters"
+            },
+            "sites": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/site"
+              }
+            },
+            "reader_protected": {
+              "const": false
+            },
+            "pending_callbacks": {
+              "const": 0
+            }
           }
         },
-        "completed": {"const": true},
-        "persistence": {"$ref": "#/$defs/persistence"}
+        "completed": {
+          "const": true
+        },
+        "persistence": {
+          "$ref": "#/$defs/persistence"
+        }
       }
     },
     "probe": {
       "type": "object",
-      "required": ["name", "schema"],
+      "required": [
+        "name",
+        "schema"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": {"const": "zombie-initialize-exit"},
-        "schema": {"const": "lvz.spawn.v1"}
+        "name": {
+          "const": "zombie-initialize-exit"
+        },
+        "schema": {
+          "const": "lvz.spawn.v1"
+        }
       }
     },
     "build": {
       "type": "object",
-      "required": ["module", "sha256"],
+      "required": [
+        "module",
+        "sha256"
+      ],
       "additionalProperties": false,
       "properties": {
-        "module": {"type": "string", "minLength": 1},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "module": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     },
     "initialization_counters": {
       "type": "object",
-      "required": ["captured", "delivered", "persisted", "overflow", "wrong_thread",
-                   "nesting_mismatch", "incomplete_events"],
+      "required": [
+        "captured",
+        "delivered",
+        "persisted",
+        "overflow",
+        "wrong_thread",
+        "nesting_mismatch",
+        "incomplete_events"
+      ],
       "additionalProperties": false,
       "properties": {
-        "captured": {"type": "integer", "minimum": 0},
-        "delivered": {"type": "integer", "minimum": 0},
-        "persisted": {"type": "integer", "minimum": 0},
-        "overflow": {"type": "integer", "minimum": 0},
-        "wrong_thread": {"type": "integer", "minimum": 0},
-        "nesting_mismatch": {"type": "integer", "minimum": 0},
-        "incomplete_events": {"type": "integer", "minimum": 0}
+        "captured": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "delivered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "persisted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "overflow": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wrong_thread": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nesting_mismatch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "incomplete_events": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "probe_counters": {
       "type": "object",
-      "required": ["captured", "queued", "delivered", "persisted", "overflow", "wrong_thread",
-                   "inactive_suppressed", "classify_refused", "read_failed", "live_skips",
-                   "unmatched_commits", "pair_mismatch", "overwritten_pending", "faults"],
+      "required": [
+        "captured",
+        "queued",
+        "delivered",
+        "persisted",
+        "overflow",
+        "wrong_thread",
+        "inactive_suppressed",
+        "classify_refused",
+        "read_failed",
+        "live_skips",
+        "unmatched_commits",
+        "pair_mismatch",
+        "overwritten_pending",
+        "faults"
+      ],
       "additionalProperties": false,
       "properties": {
-        "captured": {"type": "integer", "minimum": 0},
-        "queued": {"type": "integer", "minimum": 0},
-        "delivered": {"type": "integer", "minimum": 0},
-        "persisted": {"type": "integer", "minimum": 0},
-        "overflow": {"type": "integer", "minimum": 0},
-        "wrong_thread": {"type": "integer", "minimum": 0},
-        "inactive_suppressed": {"type": "integer", "minimum": 0},
-        "classify_refused": {"type": "integer", "minimum": 0},
-        "read_failed": {"type": "integer", "minimum": 0},
-        "live_skips": {"type": "integer", "minimum": 0},
-        "unmatched_commits": {"type": "integer", "minimum": 0},
-        "pair_mismatch": {"type": "integer", "minimum": 0},
-        "overwritten_pending": {"type": "integer", "minimum": 0},
-        "faults": {"type": "integer", "minimum": 0}
+        "captured": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "queued": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "delivered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "persisted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "overflow": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wrong_thread": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inactive_suppressed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "classify_refused": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "read_failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "live_skips": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unmatched_commits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pair_mismatch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "overwritten_pending": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "faults": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "total_counters": {
       "type": "object",
-      "required": ["persisted", "records", "bytes"],
+      "required": [
+        "persisted",
+        "records",
+        "bytes"
+      ],
       "additionalProperties": false,
       "properties": {
-        "persisted": {"type": "integer", "minimum": 0},
-        "records": {"type": "integer", "minimum": 0},
-        "bytes": {"type": "integer", "minimum": 0}
+        "persisted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "site": {
       "type": "object",
-      "required": ["id", "va", "window_bytes", "bytes", "continuation_va"],
+      "required": [
+        "id",
+        "va",
+        "window_bytes",
+        "bytes",
+        "continuation_va"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "va": {"type": "integer", "minimum": 1},
-        "window_bytes": {"type": "integer", "minimum": 1, "maximum": 7},
-        "bytes": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255}},
-        "continuation_va": {"type": "integer", "minimum": 0}
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "va": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "window_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7
+        },
+        "bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
+        },
+        "continuation_va": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "persistence": {
       "type": "object",
-      "required": ["method", "receipt_written_after_close"],
+      "required": [
+        "method",
+        "receipt_written_after_close"
+      ],
       "additionalProperties": false,
       "properties": {
-        "method": {"const": "flush_close_then_atomic_receipt"},
-        "receipt_written_after_close": {"const": true}
+        "method": {
+          "const": "flush_close_then_atomic_receipt"
+        },
+        "receipt_written_after_close": {
+          "const": true
+        }
       }
     }
   }

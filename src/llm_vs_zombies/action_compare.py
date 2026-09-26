@@ -72,6 +72,24 @@ def load_action_transcript(run: str | Path) -> tuple[dict, list[dict]]:
     return initial, steps
 
 
+ACTION_NORMALIZATION = ("request.request_id", "response.request_id", "request.branch (run identity)")
+
+
+def _normalize_step(step: dict) -> dict:
+    """Copy the complete step, then normalize only declared identity fields.
+
+    The request envelope's run-scoped ``branch`` plus the already justified
+    protocol/run identity keys are removed; every other field, including
+    ``pixels_evidence`` and capture payloads, is preserved verbatim.
+    """
+    import copy as _copy
+    value = _copy.deepcopy(step)
+    request = value.get("request")
+    if isinstance(request, dict):
+        request.pop("branch", None)
+    return _normalize(value)
+
+
 def compare_action_steps(left_steps: list[dict], right_steps: list[dict]) -> dict:
     """Compare request order/method/params and results semantically."""
     if len(left_steps) != len(right_steps):
@@ -83,12 +101,13 @@ def compare_action_steps(left_steps: list[dict], right_steps: list[dict]) -> dic
             return {"equal": False, "reason": "action_method", "index": index,
                     "left": left["request"].get("method"), "right": right["request"].get("method"),
                     "scope": "request order/method/params and results"}
-        difference = audit_compare.first_difference(_normalize(left), _normalize(right))
+        difference = audit_compare.first_difference(_normalize_step(left), _normalize_step(right))
         if difference:
             return {"equal": False, "reason": "action_or_result", "index": index,
                     "difference": difference, "scope": "request order/method/params and results"}
     return {"equal": True, "steps": len(left_steps),
-            "scope": "request order/method/params and results"}
+            "scope": "request order/method/params and results",
+            "normalized": list(ACTION_NORMALIZATION)}
 
 
 def _outcome(run: Path, initial: dict) -> dict:

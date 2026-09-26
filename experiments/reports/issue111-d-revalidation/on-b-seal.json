@@ -1,0 +1,18 @@
+{
+  "schema": "lvz.stage-d-revalidation-seal.v1",
+  "run": "issue111-d-hosted-v2-on-b",
+  "revalidation_sha256": "7b13b625db965291a13049f9c6fb96ed58eff2ba6deee01e95ee50643ea695c7",
+  "implementation_commit": "6f04b8798003946a497f47a64bdd544f3f1f3582",
+  "implementation_sources": {
+    "src/llm_vs_zombies/action_compare.py": "71482e151e2f5bf9e3e83bc4f9b8cec338124afe3627a71d32eef0340fa9a4a6",
+    "src/llm_vs_zombies/audit_compare.py": "7f56efdf1606667f6704f8330554c6418f86132e8ac35272b338714e633729d9",
+    "src/llm_vs_zombies/engine_replay.py": "c7a3e84ae9fd80acb2dac51c9c606a48c6f7445b3baa73f5ab9d45d514ee1aa9",
+    "src/llm_vs_zombies/evidence_codec.py": "d359b2409ebc169b12f110ec940e5ad3077b12524a8f504ec8a1ad345dfd43f5",
+    "src/llm_vs_zombies/records.py": "ff21a2a242c4c0e7f348b70b402cf0aa7bd38e7128d32ea98623da9a7daffa30",
+    "src/llm_vs_zombies/lifecycle_events.py": "52db0dc3b5b9c2e06a9e908f2f3588171cf75eb319d2876b77e02aa56518717c",
+    "src/llm_vs_zombies/lifecycle_report.py": "2cb603b40d1c8ca9f5581ba4ac59c4f06dbaad266c7918002ddcfb8d919ef9a0",
+    "src/llm_vs_zombies/lifecycle_compare.py": "d559d2a06f886b837926de33cf25c9a1de4a0e43846f8a655ef78c64a9c789c9",
+    "tools/issue111_lifecycle_experiment.py": "6f209791388bce19aa19b46ccc4326d99b7f798c8eabdac44d4cd914e6348354"
+  },
+  "seal_id": "b8ac4aab16facf26092dcff789e49a22d5bdca888dce96db5fa8bcc8d164ebdd"
+}

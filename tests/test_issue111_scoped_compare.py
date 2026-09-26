@@ -32,6 +32,11 @@ def make_off_run(source: Path, target: Path) -> Path:
     manifest_bytes = (json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
     (audit / "manifest.json").write_bytes(manifest_bytes)
     (audit / lifecycle_events.EVENTS_FILE).write_bytes(b"")
+    events_path = audit / "events.jsonl"
+    if events_path.is_file():
+        kept = [line for line in events_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("kind") != "lifecycle_probes_closed"]
+        events_path.write_text("".join(line + chr(10) for line in kept), encoding="utf-8")
     receipt = {
         "schema": lifecycle_events.RECEIPT_SCHEMA,
         "run_id": target.name, "branch_id": "branch-probe", "session_id": 11,
@@ -79,7 +84,8 @@ def write_trace(run: Path, *, executed_ticks=1, method="advance") -> None:
     records = [
         {"schema": 1, "seq": 0, "kind": "replay_initial", "data": marker},
         {"schema": 1, "seq": 1, "kind": "request",
-         "data": {"protocol": 1, "request_id": "a", "method": method, "params": {"ticks": 1}}},
+         "data": {"protocol": 1, "request_id": "a", "branch": "run-branch-identity",
+                  "method": method, "params": {"ticks": 1}}},
         {"schema": 1, "seq": 2, "kind": "response",
          "data": {"protocol": 1, "request_id": "a", "ok": True,
                   "result": {"executed_ticks": executed_ticks,
@@ -177,6 +183,30 @@ class ScopedCompareTests(unittest.TestCase):
         (self.on_b / "experiment-end.json").unlink()
         with self.assertRaises(action_compare.ActionCompareError):
             action_compare.compare_actions(self.on_run, self.on_b)
+
+    def test_action_envelope_branch_identity_is_normalized_but_params_are_not(self):
+        path = self.on_b / "decisions" / "evaluation.jsonl"
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        records[1]["data"]["branch"] = "different-run-branch"
+        path.write_text("".join(json.dumps(r, separators=(",", ":")) + chr(10) for r in records),
+                        encoding="utf-8")
+        scoped = lifecycle_compare.compare_scoped(self.on_run, self.on_b, scope="common")
+        self.assertTrue(scoped["equal"], scoped)
+        records[1]["data"]["params"]["branch"] = "semantic-parameter"
+        path.write_text("".join(json.dumps(r, separators=(",", ":")) + chr(10) for r in records),
+                        encoding="utf-8")
+        scoped = lifecycle_compare.compare_scoped(self.on_run, self.on_b, scope="common")
+        self.assertFalse(scoped["equal"])
+        self.assertEqual(scoped["actions"]["reason"], "action_or_result")
+
+    def test_outcome_difference_is_reported(self):
+        end = self.on_b / "experiment-end.json"
+        value = json.loads(end.read_text(encoding="utf-8"))
+        value["maximum_wave"] = value.get("maximum_wave", 2) + 1
+        end.write_text(json.dumps(value) + chr(10), encoding="utf-8")
+        scoped = lifecycle_compare.compare_scoped(self.on_run, self.on_b, scope="common")
+        self.assertFalse(scoped["equal"])
+        self.assertEqual(scoped["actions"]["reason"], "outcome")
 
     def test_real_particle_identity_mismatch_is_reported(self):
         from tests.test_audit_compare import particle_audit

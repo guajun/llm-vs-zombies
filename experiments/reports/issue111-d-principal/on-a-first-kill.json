@@ -1,0 +1,5329 @@
+{
+  "schema": "lvz.lifecycle-analysis.v1",
+  "window": {
+    "boundaries": 2402,
+    "first_coordinate": {
+      "line": 1,
+      "seq": 20,
+      "kind": "pre_step",
+      "version": {
+        "epoch": 3,
+        "revision": 5,
+        "tick": 0
+      },
+      "request_id": "e465b861e3a7406e8cfeaefade077a60",
+      "engine_call_id": 1,
+      "native_clock_before": 54152,
+      "native_clock_after": null
+    },
+    "last_coordinate": {
+      "line": 2402,
+      "seq": 2682,
+      "kind": "post_step",
+      "version": {
+        "epoch": 3,
+        "revision": 0,
+        "tick": 1201
+      },
+      "request_id": "7ab3ec02464d446bbd3754af632dac9a",
+      "engine_call_id": 1201,
+      "native_clock_before": 55352,
+      "native_clock_after": 55353
+    }
+  },
+  "facts": {
+    "first_confirmed_death": {
+      "kind": "boundary_observation",
+      "entity": {
+        "id": 3749445638,
+        "slot": 6,
+        "generation": 57212
+      },
+      "coordinates": [
+        {
+          "line": 1880,
+          "seq": 2033,
+          "kind": "post_step",
+          "version": {
+            "epoch": 3,
+            "revision": 0,
+            "tick": 940
+          },
+          "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+          "engine_call_id": 940,
+          "native_clock_before": 55091,
+          "native_clock_after": 55092
+        }
+      ],
+      "before": {
+        "type": 16,
+        "state": 73,
+        "hp": 270,
+        "armor1": 0,
+        "armor2": 0,
+        "disappeared": 0,
+        "at_wave": 0
+      },
+      "after": {
+        "type": 16,
+        "state": 2,
+        "hp": 270,
+        "armor1": 0,
+        "armor2": 0,
+        "disappeared": 0,
+        "at_wave": 0
+      },
+      "stage": "ash",
+      "cause": "unverified",
+      "confirmed": true
+    },
+    "first_removal": {
+      "kind": "boundary_observation",
+      "entity": {
+        "id": 3749838848,
+        "slot": 0,
+        "generation": 57218
+      },
+      "coordinates": [
+        {
+          "line": 1880,
+          "seq": 2033,
+          "kind": "post_step",
+          "version": {
+            "epoch": 3,
+            "revision": 0,
+            "tick": 940
+          },
+          "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+          "engine_call_id": 940,
+          "native_clock_before": 55091,
+          "native_clock_after": 55092
+        }
+      ],
+      "before": {
+        "type": 3,
+        "state": 11,
+        "hp": 500,
+        "armor1": 0,
+        "armor2": 0,
+        "disappeared": 0,
+        "at_wave": 0
+      },
+      "after": {
+        "type": 3,
+        "state": 11,
+        "hp": 500,
+        "armor1": 0,
+        "armor2": 0,
+        "disappeared": 1,
+        "at_wave": 0
+      },
+      "channel": "disappeared_flag",
+      "classification": "without_confirmed_death",
+      "reason": "disappeared flag set without a prior death-stage observation"
+    },
+    "unknown_removals": {
+      "count": 66,
+      "first": {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749838848,
+          "slot": 0,
+          "generation": 57218
+        },
+        "coordinates": [
+          {
+            "line": 1880,
+            "seq": 2033,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 940
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 940,
+            "native_clock_before": 55091,
+            "native_clock_after": 55092
+          }
+        ],
+        "before": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "after": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "channel": "disappeared_flag",
+        "classification": "without_confirmed_death",
+        "reason": "disappeared flag set without a prior death-stage observation"
+      },
+      "rule": "disappeared 0->1 or slot release without a prior confirmed death-stage observation"
+    },
+    "disappeared_without_confirmed_death": {
+      "count": 33,
+      "first": {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749838848,
+          "slot": 0,
+          "generation": 57218
+        },
+        "coordinates": [
+          {
+            "line": 1880,
+            "seq": 2033,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 940
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 940,
+            "native_clock_before": 55091,
+            "native_clock_after": 55092
+          }
+        ],
+        "before": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "after": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "channel": "disappeared_flag",
+        "classification": "without_confirmed_death",
+        "reason": "disappeared flag set without a prior death-stage observation"
+      },
+      "rule": "disappeared 0->1 without a prior death-stage observation"
+    },
+    "removal_events": {
+      "count": 66,
+      "channels": {
+        "disappeared_flag": 33,
+        "slot_release": 33
+      }
+    },
+    "death_stage_observations": [
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749445638,
+          "slot": 6,
+          "generation": 57212
+        },
+        "coordinates": [
+          {
+            "line": 1880,
+            "seq": 2033,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 940
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 940,
+            "native_clock_before": 55091,
+            "native_clock_after": 55092
+          }
+        ],
+        "before": {
+          "type": 16,
+          "state": 73,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "after": {
+          "type": 16,
+          "state": 2,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "stage": "ash",
+        "cause": "unverified",
+        "confirmed": true
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750101006,
+          "slot": 14,
+          "generation": 57222
+        },
+        "coordinates": [
+          {
+            "line": 1880,
+            "seq": 2033,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 940
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 940,
+            "native_clock_before": 55091,
+            "native_clock_after": 55092
+          }
+        ],
+        "before": {
+          "type": 16,
+          "state": 73,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "after": {
+          "type": 16,
+          "state": 2,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "stage": "ash",
+        "cause": "unverified",
+        "confirmed": true
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750756376,
+          "slot": 24,
+          "generation": 57232
+        },
+        "coordinates": [
+          {
+            "line": 1880,
+            "seq": 2033,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 940
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 940,
+            "native_clock_before": 55091,
+            "native_clock_after": 55092
+          }
+        ],
+        "before": {
+          "type": 16,
+          "state": 73,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "after": {
+          "type": 16,
+          "state": 2,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "stage": "ash",
+        "cause": "unverified",
+        "confirmed": true
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751411746,
+          "slot": 34,
+          "generation": 57242
+        },
+        "coordinates": [
+          {
+            "line": 1880,
+            "seq": 2033,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 940
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 940,
+            "native_clock_before": 55091,
+            "native_clock_after": 55092
+          }
+        ],
+        "before": {
+          "type": 16,
+          "state": 73,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "after": {
+          "type": 16,
+          "state": 2,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "stage": "ash",
+        "cause": "unverified",
+        "confirmed": true
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3752067116,
+          "slot": 44,
+          "generation": 57252
+        },
+        "coordinates": [
+          {
+            "line": 1880,
+            "seq": 2033,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 940
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 940,
+            "native_clock_before": 55091,
+            "native_clock_after": 55092
+          }
+        ],
+        "before": {
+          "type": 16,
+          "state": 73,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "after": {
+          "type": 16,
+          "state": 2,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 0,
+          "at_wave": 0
+        },
+        "stage": "ash",
+        "cause": "unverified",
+        "confirmed": true
+      }
+    ],
+    "removals": [
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749838848,
+          "slot": 0,
+          "generation": 57218
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749773313,
+          "slot": 1,
+          "generation": 57217
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 18,
+          "state": 20,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749576708,
+          "slot": 4,
+          "generation": 57214
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 22,
+          "state": 0,
+          "hp": 824,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749511173,
+          "slot": 5,
+          "generation": 57213
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 21,
+          "state": 76,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 474,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749380103,
+          "slot": 7,
+          "generation": 57211
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 15,
+          "state": 15,
+          "hp": 448,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749314568,
+          "slot": 8,
+          "generation": 57210
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 12,
+          "state": 0,
+          "hp": 1324,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749249033,
+          "slot": 9,
+          "generation": 57209
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 4,
+          "state": 0,
+          "hp": 270,
+          "armor1": 1074,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749904395,
+          "slot": 11,
+          "generation": 57219
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 4,
+          "state": 0,
+          "hp": 270,
+          "armor1": 1100,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749969932,
+          "slot": 12,
+          "generation": 57220
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 12,
+          "state": 0,
+          "hp": 1244,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750035469,
+          "slot": 13,
+          "generation": 57221
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 15,
+          "state": 15,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750166543,
+          "slot": 15,
+          "generation": 57223
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 21,
+          "state": 76,
+          "hp": 420,
+          "armor1": 0,
+          "armor2": 420,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750232080,
+          "slot": 16,
+          "generation": 57224
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 22,
+          "state": 0,
+          "hp": 824,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750428691,
+          "slot": 19,
+          "generation": 57227
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 18,
+          "state": 20,
+          "hp": 420,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750494228,
+          "slot": 20,
+          "generation": 57228
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750559765,
+          "slot": 21,
+          "generation": 57229
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 4,
+          "state": 0,
+          "hp": 270,
+          "armor1": 1074,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750625302,
+          "slot": 22,
+          "generation": 57230
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 12,
+          "state": 0,
+          "hp": 1324,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750690839,
+          "slot": 23,
+          "generation": 57231
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 15,
+          "state": 15,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750821913,
+          "slot": 25,
+          "generation": 57233
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 21,
+          "state": 76,
+          "hp": 420,
+          "armor1": 0,
+          "armor2": 420,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3750887450,
+          "slot": 26,
+          "generation": 57234
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 22,
+          "state": 0,
+          "hp": 824,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751084061,
+          "slot": 29,
+          "generation": 57237
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 18,
+          "state": 20,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751149598,
+          "slot": 30,
+          "generation": 57238
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751215135,
+          "slot": 31,
+          "generation": 57239
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 4,
+          "state": 0,
+          "hp": 270,
+          "armor1": 1100,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751280672,
+          "slot": 32,
+          "generation": 57240
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 12,
+          "state": 0,
+          "hp": 1298,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751346209,
+          "slot": 33,
+          "generation": 57241
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 15,
+          "state": 15,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751477283,
+          "slot": 35,
+          "generation": 57243
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 21,
+          "state": 76,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 474,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751542820,
+          "slot": 36,
+          "generation": 57244
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 22,
+          "state": 0,
+          "hp": 798,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751739431,
+          "slot": 39,
+          "generation": 57247
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 18,
+          "state": 20,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751870505,
+          "slot": 41,
+          "generation": 57249
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 4,
+          "state": 0,
+          "hp": 270,
+          "armor1": 1100,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3751936042,
+          "slot": 42,
+          "generation": 57250
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 12,
+          "state": 0,
+          "hp": 1324,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3752001579,
+          "slot": 43,
+          "generation": 57251
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 15,
+          "state": 15,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3752132653,
+          "slot": 45,
+          "generation": 57253
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 21,
+          "state": 76,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 474,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3752198190,
+          "slot": 46,
+          "generation": 57254
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 22,
+          "state": 0,
+          "hp": 824,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3752394801,
+          "slot": 49,
+          "generation": 57257
+        },
+        "coordinates": [
+          {
+            "line": 1882,
+            "seq": 2035,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 941
+            },
+            "request_id": "3955bede46da45f3a07a47ccbd1232c2",
+            "engine_call_id": 941,
+            "native_clock_before": 55092,
+            "native_clock_after": 55093
+          }
+        ],
+        "before": {
+          "type": 18,
+          "state": 20,
+          "hp": 474,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 0
+        },
+        "after": null,
+        "channel": "slot_release",
+        "classification": "unknown_removal",
+        "reason": "slot no longer held this full identity at the boundary"
+      }
+    ],
+    "slot_reuse": {
+      "count": 0,
+      "first": null
+    },
+    "initial_residue": [
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749052416,
+          "slot": 0,
+          "generation": 57206
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 21,
+          "state": 0,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 500,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748986881,
+          "slot": 1,
+          "generation": 57205
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 18,
+          "state": 20,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748921346,
+          "slot": 2,
+          "generation": 57204
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 16,
+          "state": 0,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748855811,
+          "slot": 3,
+          "generation": 57203
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 15,
+          "state": 0,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748790276,
+          "slot": 4,
+          "generation": 57202
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 10,
+          "state": 0,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748724741,
+          "slot": 5,
+          "generation": 57201
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 4,
+          "state": 0,
+          "hp": 270,
+          "armor1": 1100,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748659206,
+          "slot": 6,
+          "generation": 57200
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748593671,
+          "slot": 7,
+          "generation": 57199
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 32,
+          "state": 0,
+          "hp": 6000,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748528136,
+          "slot": 8,
+          "generation": 57198
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 23,
+          "state": 0,
+          "hp": 3000,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748462601,
+          "slot": 9,
+          "generation": 57197
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 12,
+          "state": 0,
+          "hp": 1350,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749117962,
+          "slot": 10,
+          "generation": 57207
+        },
+        "coordinates": [
+          {
+            "line": 1,
+            "seq": 20,
+            "kind": "pre_step",
+            "version": {
+              "epoch": 3,
+              "revision": 5,
+              "tick": 0
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": null
+          }
+        ],
+        "before": null,
+        "after": {
+          "type": 22,
+          "state": 0,
+          "hp": 850,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "classification": "preexisting_disappeared",
+        "reason": "present at the first sampled boundary; not a window event"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749052416,
+          "slot": 0,
+          "generation": 57206
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 21,
+          "state": 0,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 500,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748986881,
+          "slot": 1,
+          "generation": 57205
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 18,
+          "state": 20,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748921346,
+          "slot": 2,
+          "generation": 57204
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 16,
+          "state": 0,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748855811,
+          "slot": 3,
+          "generation": 57203
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 15,
+          "state": 0,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748790276,
+          "slot": 4,
+          "generation": 57202
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 10,
+          "state": 0,
+          "hp": 270,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748724741,
+          "slot": 5,
+          "generation": 57201
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 4,
+          "state": 0,
+          "hp": 270,
+          "armor1": 1100,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748659206,
+          "slot": 6,
+          "generation": 57200
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 3,
+          "state": 11,
+          "hp": 500,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748593671,
+          "slot": 7,
+          "generation": 57199
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 32,
+          "state": 0,
+          "hp": 6000,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748528136,
+          "slot": 8,
+          "generation": 57198
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 23,
+          "state": 0,
+          "hp": 3000,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3748462601,
+          "slot": 9,
+          "generation": 57197
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 12,
+          "state": 0,
+          "hp": 1350,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      },
+      {
+        "kind": "boundary_observation",
+        "entity": {
+          "id": 3749117962,
+          "slot": 10,
+          "generation": 57207
+        },
+        "coordinates": [
+          {
+            "line": 2,
+            "seq": 32,
+            "kind": "post_step",
+            "version": {
+              "epoch": 3,
+              "revision": 0,
+              "tick": 1
+            },
+            "request_id": "e465b861e3a7406e8cfeaefade077a60",
+            "engine_call_id": 1,
+            "native_clock_before": 54152,
+            "native_clock_after": 54153
+          }
+        ],
+        "before": {
+          "type": 22,
+          "state": 0,
+          "hp": 850,
+          "armor1": 0,
+          "armor2": 0,
+          "disappeared": 1,
+          "at_wave": 4294967294
+        },
+        "after": null,
+        "classification": "initial_residue_release",
+        "reason": "cold-start residue leaving the pool; not a window removal"
+      }
+    ]
+  },
+  "capture_level": {
+    "death": "exact_store_phase_or_validated_applyburn_chain",
+    "removal": "exact_store_mdead",
+    "recycle": "exact_store_guard_commit_pair",
+    "reason": "validated lvz.lifecycle-event.v2 facts from the installed store probes; the ApplyBurn chain is only a death with matching locked callsite bytes and frame returns, and the full-window gate requires the frozen plan/endpoint proof",
+    "unimplemented_fact_classes": []
+  },
+  "first_kill": {
+    "proven": true,
+    "source": "exact-store capture facts",
+    "reasons": [],
+    "prerequisites": {
+      "receipt_valid": true,
+      "probe_capability": true,
+      "initialization_capture": true,
+      "full_window": true,
+      "health_clean": true
+    },
+    "boundary_gate": {
+      "gate": "unverified",
+      "proven": false,
+      "reasons": [
+        "ZombieInitialize exit capture is installed and validated for initialization facts, but no death/removal/recycle capture point is installed, so removals are inferred only at boundary resolution",
+        "multiple changes inside one boundary cannot be ordered (no call-internal ordering)",
+        "boundary observations cannot exclude an earlier unobserved removal before the first sampled boundary",
+        "death-stage boundary observations are not production capture facts"
+      ],
+      "initialization_capture": "installed"
+    }
+  },
+  "coverage": {
+    "audit_manifest_target": "pvz-1.0.0.1051-en",
+    "source": "boundary samples",
+    "initialization_capture": "installed",
+    "lifecycle_recording": "valid",
+    "frozen_plan": "C:\\Users\\MSI-NB\\Documents\\Codex\\work\\pi-issue111-stage-d\\experiments\\plans\\issue99-shovel-control.json",
+    "full_window_problems": [],
+    "window_start_index": 0,
+    "window_start": {
+      "epoch": 3,
+      "revision": 5,
+      "tick": 0
+    },
+    "window_end": {
+      "epoch": 3,
+      "revision": 0,
+      "tick": 1201
+    }
+  },
+  "state_phase_counts": {
+    "0": 19789,
+    "20": 3436,
+    "11": 4478,
+    "76": 3435,
+    "73": 3425,
+    "15": 3435,
+    "2": 2615,
+    "69": 2605,
+    "71": 505
+  },
+  "problems": [],
+  "source": {
+    "directory": "C:\\Users\\MSI-NB\\Documents\\Codex\\work\\pi-issue111-stage-d\\experiments\\runs\\issue111-d-hosted-v2-on-a-s42-c0\\audit",
+    "target": "pvz-1.0.0.1051-en",
+    "boundaries": 2402,
+    "window_start_index": 0,
+    "window_end_index": 2401,
+    "window_boundaries": 2402
+  },
+  "lifecycle": {
+    "schema": "lvz.lifecycle-validation.v1",
+    "status": "valid",
+    "records": 253,
+    "close_receipt_present": true,
+    "problems": []
+  },
+  "capture_facts": {
+    "facts": [
+      {
+        "capture_sequence": 12,
+        "entity": 3749052416,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 10,
+          "invocation_id": 10,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 13,
+        "entity": 3748986881,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 9,
+          "invocation_id": 9,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 14,
+        "entity": 3748921346,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 8,
+          "invocation_id": 8,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 15,
+        "entity": 3748855811,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 7,
+          "invocation_id": 7,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 16,
+        "entity": 3748790276,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 6,
+          "invocation_id": 6,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 17,
+        "entity": 3748724741,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 5,
+          "invocation_id": 5,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 18,
+        "entity": 3748659206,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 4,
+          "invocation_id": 4,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 19,
+        "entity": 3748593671,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 3,
+          "invocation_id": 3,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 20,
+        "entity": 3748528136,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 2,
+          "invocation_id": 2,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 21,
+        "entity": 3748462601,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 1,
+          "invocation_id": 1,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 22,
+        "entity": 3749117962,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 11,
+          "invocation_id": 11,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 23,
+        "entity": 3749052416,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 24,
+        "entity": 3749052416,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 25,
+        "entity": 3748986881,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 26,
+        "entity": 3748986881,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 27,
+        "entity": 3748921346,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 28,
+        "entity": 3748921346,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 29,
+        "entity": 3748855811,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 30,
+        "entity": 3748855811,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 31,
+        "entity": 3748790276,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 32,
+        "entity": 3748790276,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 33,
+        "entity": 3748724741,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 34,
+        "entity": 3748724741,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 35,
+        "entity": 3748659206,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 36,
+        "entity": 3748659206,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 37,
+        "entity": 3748593671,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 38,
+        "entity": 3748593671,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 39,
+        "entity": 3748528136,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 40,
+        "entity": 3748528136,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 41,
+        "entity": 3748462601,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 42,
+        "entity": 3748462601,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 43,
+        "entity": 3749117962,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 44,
+        "entity": 3749117962,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 95,
+        "entity": 3749838848,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 55,
+          "invocation_id": 22,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 96,
+        "entity": 3749773313,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 54,
+          "invocation_id": 21,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 97,
+        "entity": 3749576708,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 51,
+          "invocation_id": 18,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 98,
+        "entity": 3749511173,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 50,
+          "invocation_id": 17,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 99,
+        "entity": 3749314568,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 47,
+          "invocation_id": 14,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 100,
+        "entity": 3749249033,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 46,
+          "invocation_id": 13,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 101,
+        "entity": 3750035469,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 58,
+          "invocation_id": 25,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 102,
+        "entity": 3750166543,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 60,
+          "invocation_id": 27,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 103,
+        "entity": 3750428691,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 64,
+          "invocation_id": 31,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 104,
+        "entity": 3750625302,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 67,
+          "invocation_id": 34,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 105,
+        "entity": 3750690839,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 68,
+          "invocation_id": 35,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 106,
+        "entity": 3750756376,
+        "kind": "zombie_phase_transition",
+        "site": "phase-applyburn",
+        "before": 73,
+        "after": 2,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "class": "confirmed_death_stage",
+        "stage": "ash",
+        "initialization": {
+          "capture_sequence": 69,
+          "invocation_id": 36,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization"
+      },
+      {
+        "capture_sequence": 107,
+        "entity": 3750887450,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 71,
+          "invocation_id": 38,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 108,
+        "entity": 3751084061,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 74,
+          "invocation_id": 41,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 109,
+        "entity": 3751149598,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 75,
+          "invocation_id": 42,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 110,
+        "entity": 3751346209,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 78,
+          "invocation_id": 45,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 111,
+        "entity": 3751411746,
+        "kind": "zombie_phase_transition",
+        "site": "phase-applyburn",
+        "before": 73,
+        "after": 2,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "class": "confirmed_death_stage",
+        "stage": "ash",
+        "initialization": {
+          "capture_sequence": 79,
+          "invocation_id": 46,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization"
+      },
+      {
+        "capture_sequence": 112,
+        "entity": 3751739431,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 84,
+          "invocation_id": 51,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 113,
+        "entity": 3751870505,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 86,
+          "invocation_id": 53,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 114,
+        "entity": 3751936042,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 87,
+          "invocation_id": 54,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 115,
+        "entity": 3752132653,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 90,
+          "invocation_id": 57,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 116,
+        "entity": 3752198190,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 91,
+          "invocation_id": 58,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 117,
+        "entity": 3749445638,
+        "kind": "zombie_phase_transition",
+        "site": "phase-applyburn",
+        "before": 73,
+        "after": 2,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "class": "confirmed_death_stage",
+        "stage": "ash",
+        "initialization": {
+          "capture_sequence": 49,
+          "invocation_id": 16,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization"
+      },
+      {
+        "capture_sequence": 118,
+        "entity": 3749380103,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 48,
+          "invocation_id": 15,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 119,
+        "entity": 3749904395,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 56,
+          "invocation_id": 23,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 120,
+        "entity": 3749969932,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 57,
+          "invocation_id": 24,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 121,
+        "entity": 3750101006,
+        "kind": "zombie_phase_transition",
+        "site": "phase-applyburn",
+        "before": 73,
+        "after": 2,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "class": "confirmed_death_stage",
+        "stage": "ash",
+        "initialization": {
+          "capture_sequence": 59,
+          "invocation_id": 26,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization"
+      },
+      {
+        "capture_sequence": 122,
+        "entity": 3750232080,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 61,
+          "invocation_id": 28,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 123,
+        "entity": 3750494228,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 65,
+          "invocation_id": 32,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 124,
+        "entity": 3750559765,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 66,
+          "invocation_id": 33,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 125,
+        "entity": 3750821913,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 70,
+          "invocation_id": 37,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 126,
+        "entity": 3751215135,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 76,
+          "invocation_id": 43,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 127,
+        "entity": 3751280672,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 77,
+          "invocation_id": 44,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 128,
+        "entity": 3751477283,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 80,
+          "invocation_id": 47,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 129,
+        "entity": 3751542820,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 81,
+          "invocation_id": 48,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 130,
+        "entity": 3752001579,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 88,
+          "invocation_id": 55,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 131,
+        "entity": 3752067116,
+        "kind": "zombie_phase_transition",
+        "site": "phase-applyburn",
+        "before": 73,
+        "after": 2,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "class": "confirmed_death_stage",
+        "stage": "ash",
+        "initialization": {
+          "capture_sequence": 89,
+          "invocation_id": 56,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization"
+      },
+      {
+        "capture_sequence": 132,
+        "entity": 3752394801,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "gameplay",
+        "time_scope": "inside",
+        "initialization": {
+          "capture_sequence": 94,
+          "invocation_id": 61,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": 599
+        },
+        "predecessor": "initialization",
+        "class": "confirmed_death_path",
+        "death_path": "applyburn_diewithloot_dienoloot"
+      },
+      {
+        "capture_sequence": 133,
+        "entity": 3749838848,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 134,
+        "entity": 3749838848,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 135,
+        "entity": 3749773313,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 136,
+        "entity": 3749773313,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 137,
+        "entity": 3749576708,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 138,
+        "entity": 3749576708,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 139,
+        "entity": 3749511173,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 140,
+        "entity": 3749511173,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 141,
+        "entity": 3749380103,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 142,
+        "entity": 3749380103,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 143,
+        "entity": 3749314568,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 144,
+        "entity": 3749314568,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 145,
+        "entity": 3749249033,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 146,
+        "entity": 3749249033,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 147,
+        "entity": 3749904395,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 148,
+        "entity": 3749904395,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 149,
+        "entity": 3749969932,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 150,
+        "entity": 3749969932,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 151,
+        "entity": 3750035469,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 152,
+        "entity": 3750035469,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 153,
+        "entity": 3750166543,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 154,
+        "entity": 3750166543,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 155,
+        "entity": 3750232080,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 156,
+        "entity": 3750232080,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 157,
+        "entity": 3750428691,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 158,
+        "entity": 3750428691,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 159,
+        "entity": 3750494228,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 160,
+        "entity": 3750494228,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 161,
+        "entity": 3750559765,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 162,
+        "entity": 3750559765,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 163,
+        "entity": 3750625302,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 164,
+        "entity": 3750625302,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 165,
+        "entity": 3750690839,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 166,
+        "entity": 3750690839,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 167,
+        "entity": 3750821913,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 168,
+        "entity": 3750821913,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 169,
+        "entity": 3750887450,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 170,
+        "entity": 3750887450,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 171,
+        "entity": 3751084061,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 172,
+        "entity": 3751084061,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 173,
+        "entity": 3751149598,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 174,
+        "entity": 3751149598,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 175,
+        "entity": 3751215135,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 176,
+        "entity": 3751215135,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 177,
+        "entity": 3751280672,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 178,
+        "entity": 3751280672,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 179,
+        "entity": 3751346209,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 180,
+        "entity": 3751346209,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 181,
+        "entity": 3751477283,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 182,
+        "entity": 3751477283,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 183,
+        "entity": 3751542820,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 184,
+        "entity": 3751542820,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 185,
+        "entity": 3751739431,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 186,
+        "entity": 3751739431,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 187,
+        "entity": 3751870505,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 188,
+        "entity": 3751870505,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 189,
+        "entity": 3751936042,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 190,
+        "entity": 3751936042,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 191,
+        "entity": 3752001579,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 192,
+        "entity": 3752001579,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 193,
+        "entity": 3752132653,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 194,
+        "entity": 3752132653,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 195,
+        "entity": 3752198190,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 196,
+        "entity": 3752198190,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 197,
+        "entity": 3752394801,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 198,
+        "entity": 3752394801,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "gameplay",
+        "time_scope": "inside"
+      }
+    ],
+    "entities": {
+      "3748462601": {
+        "id": 3748462601,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3748528136": {
+        "id": 3748528136,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3748593671": {
+        "id": 3748593671,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3748659206": {
+        "id": 3748659206,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3748724741": {
+        "id": 3748724741,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3748790276": {
+        "id": 3748790276,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3748855811": {
+        "id": 3748855811,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3748921346": {
+        "id": 3748921346,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3748986881": {
+        "id": 3748986881,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3749052416": {
+        "id": 3749052416,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3749117962": {
+        "id": 3749117962,
+        "confirmed_death_stage": false,
+        "removal_without_death": true,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": []
+      },
+      "3749249033": {
+        "id": 3749249033,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3749314568": {
+        "id": 3749314568,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3749380103": {
+        "id": 3749380103,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3749445638": {
+        "id": 3749445638,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": false,
+        "recycle_states": [],
+        "phase_transitions": [
+          {
+            "capture_sequence": 117,
+            "entity": 3749445638,
+            "kind": "zombie_phase_transition",
+            "site": "phase-applyburn",
+            "before": 73,
+            "after": 2,
+            "scope": "gameplay",
+            "time_scope": "inside",
+            "class": "confirmed_death_stage",
+            "stage": "ash",
+            "initialization": {
+              "capture_sequence": 49,
+              "invocation_id": 16,
+              "invocation_depth": 0,
+              "parent_invocation_id": null,
+              "engine_call_id": 599
+            },
+            "predecessor": "initialization"
+          }
+        ],
+        "dying": true
+      },
+      "3749511173": {
+        "id": 3749511173,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3749576708": {
+        "id": 3749576708,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3749773313": {
+        "id": 3749773313,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3749838848": {
+        "id": 3749838848,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3749904395": {
+        "id": 3749904395,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3749969932": {
+        "id": 3749969932,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750035469": {
+        "id": 3750035469,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750101006": {
+        "id": 3750101006,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": false,
+        "recycle_states": [],
+        "phase_transitions": [
+          {
+            "capture_sequence": 121,
+            "entity": 3750101006,
+            "kind": "zombie_phase_transition",
+            "site": "phase-applyburn",
+            "before": 73,
+            "after": 2,
+            "scope": "gameplay",
+            "time_scope": "inside",
+            "class": "confirmed_death_stage",
+            "stage": "ash",
+            "initialization": {
+              "capture_sequence": 59,
+              "invocation_id": 26,
+              "invocation_depth": 0,
+              "parent_invocation_id": null,
+              "engine_call_id": 599
+            },
+            "predecessor": "initialization"
+          }
+        ],
+        "dying": true
+      },
+      "3750166543": {
+        "id": 3750166543,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750232080": {
+        "id": 3750232080,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750428691": {
+        "id": 3750428691,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750494228": {
+        "id": 3750494228,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750559765": {
+        "id": 3750559765,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750625302": {
+        "id": 3750625302,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750690839": {
+        "id": 3750690839,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750756376": {
+        "id": 3750756376,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": false,
+        "recycle_states": [],
+        "phase_transitions": [
+          {
+            "capture_sequence": 106,
+            "entity": 3750756376,
+            "kind": "zombie_phase_transition",
+            "site": "phase-applyburn",
+            "before": 73,
+            "after": 2,
+            "scope": "gameplay",
+            "time_scope": "inside",
+            "class": "confirmed_death_stage",
+            "stage": "ash",
+            "initialization": {
+              "capture_sequence": 69,
+              "invocation_id": 36,
+              "invocation_depth": 0,
+              "parent_invocation_id": null,
+              "engine_call_id": 599
+            },
+            "predecessor": "initialization"
+          }
+        ],
+        "dying": true
+      },
+      "3750821913": {
+        "id": 3750821913,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3750887450": {
+        "id": 3750887450,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751084061": {
+        "id": 3751084061,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751149598": {
+        "id": 3751149598,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751215135": {
+        "id": 3751215135,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751280672": {
+        "id": 3751280672,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751346209": {
+        "id": 3751346209,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751411746": {
+        "id": 3751411746,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": false,
+        "recycle_states": [],
+        "phase_transitions": [
+          {
+            "capture_sequence": 111,
+            "entity": 3751411746,
+            "kind": "zombie_phase_transition",
+            "site": "phase-applyburn",
+            "before": 73,
+            "after": 2,
+            "scope": "gameplay",
+            "time_scope": "inside",
+            "class": "confirmed_death_stage",
+            "stage": "ash",
+            "initialization": {
+              "capture_sequence": 79,
+              "invocation_id": 46,
+              "invocation_depth": 0,
+              "parent_invocation_id": null,
+              "engine_call_id": 599
+            },
+            "predecessor": "initialization"
+          }
+        ],
+        "dying": true
+      },
+      "3751477283": {
+        "id": 3751477283,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751542820": {
+        "id": 3751542820,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751739431": {
+        "id": 3751739431,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751870505": {
+        "id": 3751870505,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3751936042": {
+        "id": 3751936042,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3752001579": {
+        "id": 3752001579,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3752067116": {
+        "id": 3752067116,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": false,
+        "recycle_states": [],
+        "phase_transitions": [
+          {
+            "capture_sequence": 131,
+            "entity": 3752067116,
+            "kind": "zombie_phase_transition",
+            "site": "phase-applyburn",
+            "before": 73,
+            "after": 2,
+            "scope": "gameplay",
+            "time_scope": "inside",
+            "class": "confirmed_death_stage",
+            "stage": "ash",
+            "initialization": {
+              "capture_sequence": 89,
+              "invocation_id": 56,
+              "invocation_depth": 0,
+              "parent_invocation_id": null,
+              "engine_call_id": 599
+            },
+            "predecessor": "initialization"
+          }
+        ],
+        "dying": true
+      },
+      "3752132653": {
+        "id": 3752132653,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3752198190": {
+        "id": 3752198190,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      },
+      "3752394801": {
+        "id": 3752394801,
+        "confirmed_death_stage": true,
+        "removal_without_death": false,
+        "removal": true,
+        "recycle_states": [
+          "candidate",
+          "committed"
+        ],
+        "phase_transitions": [],
+        "dying": true
+      }
+    },
+    "summary": {
+      "fact_count": 137,
+      "gameplay_facts": 104,
+      "preview_facts": 33,
+      "confirmed_death_stages": 38,
+      "unclassified_facts": 0,
+      "initialization_facts": 116,
+      "same_call_lifetimes": 0,
+      "unknown_predecessors": 0,
+      "unknown_onsets": 0,
+      "proof_facts": 104,
+      "context_facts": 0,
+      "uncontrolled_facts": 0,
+      "time_scope_counts": {
+        "inside": 126,
+        "before": 0,
+        "after": 0,
+        "uncontrolled": 11,
+        "undeclared": 0
+      },
+      "removals": 44,
+      "recycle_candidates": 44,
+      "recycle_commits": 44
+    },
+    "first_kill": {
+      "proven": true,
+      "prerequisites": {
+        "receipt_valid": true,
+        "probe_capability": true,
+        "initialization_capture": true,
+        "full_window": true,
+        "health_clean": true
+      },
+      "entity": 3749838848,
+      "capture_sequence": 95,
+      "blocking_facts": [],
+      "reasons": []
+    },
+    "preview_facts": [
+      {
+        "capture_sequence": 12,
+        "entity": 3749052416,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 10,
+          "invocation_id": 10,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 13,
+        "entity": 3748986881,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 9,
+          "invocation_id": 9,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 14,
+        "entity": 3748921346,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 8,
+          "invocation_id": 8,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 15,
+        "entity": 3748855811,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 7,
+          "invocation_id": 7,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 16,
+        "entity": 3748790276,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 6,
+          "invocation_id": 6,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 17,
+        "entity": 3748724741,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 5,
+          "invocation_id": 5,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 18,
+        "entity": 3748659206,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 4,
+          "invocation_id": 4,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 19,
+        "entity": 3748593671,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 3,
+          "invocation_id": 3,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 20,
+        "entity": 3748528136,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 2,
+          "invocation_id": 2,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 21,
+        "entity": 3748462601,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 1,
+          "invocation_id": 1,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 22,
+        "entity": 3749117962,
+        "kind": "zombie_removal_marked",
+        "source": "dienoloot_mdead_store",
+        "before": 0,
+        "after": 1,
+        "scope": "preview",
+        "time_scope": "uncontrolled",
+        "initialization": {
+          "capture_sequence": 11,
+          "invocation_id": 11,
+          "invocation_depth": 0,
+          "parent_invocation_id": null,
+          "engine_call_id": null
+        },
+        "predecessor": "initialization",
+        "class": "removal_unclassified"
+      },
+      {
+        "capture_sequence": 23,
+        "entity": 3749052416,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 24,
+        "entity": 3749052416,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 25,
+        "entity": 3748986881,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 26,
+        "entity": 3748986881,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 27,
+        "entity": 3748921346,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 28,
+        "entity": 3748921346,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 29,
+        "entity": 3748855811,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 30,
+        "entity": 3748855811,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 31,
+        "entity": 3748790276,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 32,
+        "entity": 3748790276,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 33,
+        "entity": 3748724741,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 34,
+        "entity": 3748724741,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 35,
+        "entity": 3748659206,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 36,
+        "entity": 3748659206,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 37,
+        "entity": 3748593671,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 38,
+        "entity": 3748593671,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 39,
+        "entity": 3748528136,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 40,
+        "entity": 3748528136,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 41,
+        "entity": 3748462601,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 42,
+        "entity": 3748462601,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 43,
+        "entity": 3749117962,
+        "kind": "zombie_slot_recycle_candidate",
+        "class": "slot_recycle_candidate",
+        "scope": "preview",
+        "time_scope": "inside"
+      },
+      {
+        "capture_sequence": 44,
+        "entity": 3749117962,
+        "kind": "zombie_slot_recycle_commit",
+        "class": "slot_recycle_commit",
+        "scope": "preview",
+        "time_scope": "inside"
+      }
+    ],
+    "context_facts": [],
+    "uncontrolled_facts": [],
+    "unknown_facts": []
+  }
+}

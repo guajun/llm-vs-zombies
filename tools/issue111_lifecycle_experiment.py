@@ -49,6 +49,8 @@ MODE_SCHEMA = "lvz.lifecycle-experiment.v1"
 REPORT_SCHEMA = "lvz.lifecycle-experiment-report.v1"
 SEAL_SCHEMA = "lvz.lifecycle-seal.v1"
 MODE_ENV = "LVZ_LIFECYCLE_RECORDING"
+FROZEN_HOSTED_SCRIPT = "logger/avz/hosted/jing_dian_12.cpp"
+FROZEN_HOSTED_SCRIPT_SHA256 = "ff7f049a0607c6518e0a755fe7a81c5823035e03a822d409a6a97be8647cd171"
 MODE_VALUES = {"off": "0", "on": "1"}
 PROBES_ENV = "LVZ_LIFECYCLE_PROBES"
 PROBES_VALUES = {"off": "0", "on": "1"}
@@ -125,9 +127,54 @@ def plan_abspath(root: Path, metadata: dict) -> Path:
     return path if path.is_absolute() else Path(root) / path
 
 
+def _hosted_identity(root: Path, receipt: Path, *, verify_current: bool) -> dict:
+    """Read and (on pre-launch) verify the hosted-build receipt.
+
+    Prepared metadata validation only checks the stored identity; the mutable
+    current script/DLL are re-hashed by run's pre-launch path.
+    """
+    receipt = Path(receipt)
+    if not receipt.is_absolute():
+        receipt = root / receipt
+    receipt = receipt.resolve()
+    if not receipt.is_file():
+        raise ExperimentError(f"hosted-build receipt is missing: {receipt}")
+    try:
+        document = json.loads(receipt.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ExperimentError(f"hosted-build receipt is unreadable: {exc}") from exc
+    if not isinstance(document, dict) or document.get("schema") != "lvz.hosted-build.v1":
+        raise ExperimentError("hosted-build receipt schema is not lvz.hosted-build.v1")
+    script = root / FROZEN_HOSTED_SCRIPT
+    if not script.is_file():
+        raise ExperimentError(f"frozen hosted script is missing: {script}")
+    script_sha = sha256_file(script)
+    if script_sha != FROZEN_HOSTED_SCRIPT_SHA256:
+        raise ExperimentError("frozen hosted script bytes changed")
+    if document.get("hosted_script_sha256") != script_sha:
+        raise ExperimentError("hosted-build receipt does not match the frozen script bytes")
+    if not str(document.get("hosted_script", "")).replace("\\", "/").endswith(FROZEN_HOSTED_SCRIPT):
+        raise ExperimentError("hosted-build receipt was built from a different script")
+    if verify_current:
+        dll = root / "build" / "recorder.dll"
+        if not dll.is_file():
+            raise ExperimentError("hosted recorder.dll is missing")
+        dll_sha = sha256_file(dll)
+        if document.get("recorder_sha256") != dll_sha:
+            raise ExperimentError("hosted-build receipt does not match the actual recorder.dll bytes")
+        dll_sha = dll_sha
+    else:
+        dll_sha = document.get("recorder_sha256")
+    if not _valid_sha256(dll_sha):
+        raise ExperimentError("hosted-build receipt has no recorder build identity")
+    return {"receipt": str(receipt.relative_to(root)) if receipt.is_relative_to(root) else str(receipt),
+            "receipt_sha256": sha256_file(receipt), "script": FROZEN_HOSTED_SCRIPT,
+            "script_sha256": script_sha, "recorder_sha256": dll_sha}
+
+
 def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = True,
             probes: str | None = None, single_cold: bool = False,
-            build_sha256: str | None = None) -> dict:
+            build_sha256: str | None = None, hosted_build: Path | None = None) -> dict:
     """Lock plan/root/mode/probe/child identities without creating the suite output."""
     root = Path(root).resolve()
     if mode not in MODE_VALUES:
@@ -138,6 +185,12 @@ def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = 
         raise ExperimentError("the probe arm requires lifecycle recording to stay on")
     if build_sha256 is not None and not _valid_sha256(build_sha256):
         raise ExperimentError("expected recorder build must be a lowercase sha256")
+    hosted = None
+    if hosted_build is not None:
+        hosted = _hosted_identity(root, Path(hosted_build), verify_current=True)
+        if build_sha256 is not None and build_sha256 != hosted["recorder_sha256"]:
+            raise ExperimentError("explicit recorder pin conflicts with the hosted-build identity")
+        build_sha256 = hosted["recorder_sha256"]
     plan_path = Path(plan).resolve()
     parsed = _load_plan(plan_path)
     suite = run_directory(root, name)
@@ -166,6 +219,7 @@ def prepare(root: Path, name: str, plan: Path, mode: str, *, run_builds: bool = 
         "run_builds": bool(run_builds),
         "single_cold": bool(single_cold),
         "expected_recorder_sha256": build_sha256,
+        "hosted": hosted,
         "suite": str(suite),
         "expected_children": expected_children(name, parsed, single_cold),
         "launch_command": launch_command(root, name, plan_path, run_builds=run_builds,
@@ -213,6 +267,14 @@ def _read_prepared(root: Path, name: str) -> dict:
     pin = metadata.get("expected_recorder_sha256")
     if pin is not None and not _valid_sha256(pin):
         raise ExperimentError("lifecycle mode file has a malformed recorder build pin")
+    hosted = metadata.get("hosted")
+    if hosted is not None:
+        if not isinstance(hosted, dict):
+            raise ExperimentError("lifecycle mode file has a malformed hosted identity")
+        stored = _hosted_identity(root, Path(hosted.get("receipt", "")), verify_current=False)
+        if stored["script_sha256"] != hosted.get("script_sha256")                 or stored["recorder_sha256"] != hosted.get("recorder_sha256"):
+            raise ExperimentError("prepared hosted identity changed on disk")
+        pin = stored["recorder_sha256"]
     single_cold = metadata.get("single_cold", False)
     if type(single_cold) is not bool:
         raise ExperimentError("lifecycle mode file has a malformed single_cold flag")
@@ -307,6 +369,12 @@ def run_experiment(root: Path, name: str, *, suite_runner=None,
     try:
         runner = suite_runner
         if runner is None:
+            hosted = metadata.get("hosted")
+            if isinstance(hosted, dict):
+                current = _hosted_identity(root, Path(hosted.get("receipt", "")), verify_current=True)
+                if current["recorder_sha256"] != hosted.get("recorder_sha256"):
+                    raise ExperimentError("hosted recorder.dll changed since prepare; refusing to launch")
+
             def runner():
                 return evaluation.run_suite(root, plan, suite, run_builds=metadata["run_builds"],
                                             single_cold=metadata.get("single_cold", False))
@@ -624,6 +692,330 @@ def _seal_document(root: Path, name: str, *, allow_compress: bool = False) -> di
     return document
 
 
+REVALIDATION_SCHEMA = "lvz.stage-d-revalidation.v1"
+REVALIDATION_SEAL_SCHEMA = "lvz.stage-d-revalidation-seal.v1"
+_EXPECTED_GATES = {"build_and_tests", "private_launch", "runtime_windows", "session_cleanup",
+                   "archive_integrity", "host_identity", "resource_limits", "scenario", "fixed_rng",
+                   "initial_state", "single_step", "pause_invariance", "disconnect_recovery",
+                   "failure_recovery", "recording", "full_cycle", "engine_replay", "ten_cold_starts",
+                   "shared_profile_unchanged"}
+_UNVERIFIED_GATES = {"build_and_tests", "initial_state", "disconnect_recovery", "failure_recovery",
+                     "engine_replay"}
+_FROZEN_FAILED_GATES = {"full_cycle", "ten_cold_starts"}
+_OLD_READER_SECONDARY = {"stage": "strict_packaging", "type": "EvidenceError",
+                         "message": "native event after recording close"}
+_CLEANUP_KEYS = ("recording_closed", "client_closed", "trace_closed", "owned_process_stopped")
+_VALIDATOR_SOURCES = ("src/llm_vs_zombies/action_compare.py",
+                      "src/llm_vs_zombies/audit_compare.py",
+                      "src/llm_vs_zombies/engine_replay.py",
+                      "src/llm_vs_zombies/evidence_codec.py",
+                      "src/llm_vs_zombies/records.py",
+                      "src/llm_vs_zombies/lifecycle_events.py",
+                      "src/llm_vs_zombies/lifecycle_report.py",
+                      "src/llm_vs_zombies/lifecycle_compare.py",
+                      "tools/issue111_lifecycle_experiment.py")
+
+
+def _digest_any(target: Path) -> str | None:
+    target = Path(target)
+    if target.is_file():
+        return sha256_file(target)
+    compressed = target.parent / (target.name + ".gz")
+    return sha256_file(compressed) if compressed.is_file() else None
+
+
+def _is_hex40(value) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value)
+
+
+def _git_head(root: Path) -> str | None:
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, timeout=60)
+    value = head.stdout.strip()
+    return value if _is_hex40(value) else None
+
+
+def _validator_identity(root: Path) -> dict:
+    """Fingerprint the complete validator implementation actually used."""
+    sources: dict[str, str] = {}
+    for relative in _VALIDATOR_SOURCES:
+        path = root / relative
+        if not path.is_file():
+            raise ExperimentError(f"validator source is missing: {relative}")
+        sources[relative] = sha256_file(path)
+    return {"sources": sources}
+
+
+def _gate_problems(suite_report: dict, metadata: dict, plan, expected_children: list[str]) -> list[str]:
+    """Strict, inventory-complete acceptance gate policy.
+
+    Only the declared frozen short-run exclusions and the single structured
+    old-reader packaging error are permitted; anything missing, malformed or
+    different is rejected.
+    """
+    problems: list[str] = []
+    if not isinstance(suite_report, dict) or suite_report.get("schema") != "lvz.evaluation.v1":
+        return ["suite evaluation schema is not lvz.evaluation.v1"]
+    try:
+        if _plan_identity(_load_plan_from_report(suite_report)) != metadata["plan"]["normalized_sha256"]:
+            problems.append("suite report plan does not match the prepared plan")
+    except ExperimentError as exc:
+        problems.append(f"suite report plan is invalid: {exc}")
+    checks = suite_report.get("checks")
+    if not isinstance(checks, dict):
+        return problems + ["suite report has no gate inventory"]
+    if set(checks) != _EXPECTED_GATES:
+        problems.append(f"gate inventory differs: missing={sorted(_EXPECTED_GATES - set(checks))} "
+                        f"unexpected={sorted(set(checks) - _EXPECTED_GATES)}")
+    on_arm = (metadata.get("probes") or {}).get("mode") == "on"
+    for name in sorted(_EXPECTED_GATES):
+        item = checks.get(name)
+        if not isinstance(item, dict) or item.get("status") not in ("pass", "unverified", "fail"):
+            problems.append(f"gate {name} has no typed status")
+            continue
+        status = item["status"]
+        if name in _UNVERIFIED_GATES:
+            if status != "unverified":
+                problems.append(f"gate {name} must be unverified in the frozen short run")
+            elif name == "build_and_tests" and metadata.get("run_builds"):
+                problems.append("build_and_tests is unverified although builds were requested")
+            continue
+        if name in _FROZEN_FAILED_GATES:
+            if not metadata.get("single_cold"):
+                problems.append(f"gate {name} may only be excluded in the single-cold frozen plan")
+            elif status not in ("fail", "pass"):
+                problems.append(f"gate {name} has an unexpected status")
+            continue
+        if name in ("recording", "archive_integrity") and on_arm:
+            if status != "fail":
+                problems.append(f"probe-on arm gate {name} must carry the retained old-reader failure")
+            continue
+        if status != "pass":
+            problems.append(f"gate {name} status is {status!r}; only pass is accepted here")
+    if not on_arm and (checks.get("recording", {}).get("status") != "pass"
+                       or checks.get("archive_integrity", {}).get("status") != "pass"):
+        problems.append("probe-off arm must pass recording and archive_integrity")
+    stop_when = plan.stop_when if isinstance(getattr(plan, "stop_when", None), dict) else None
+    wave_floor = stop_when.get("wave_at_least") if stop_when else None
+    cases = suite_report.get("cases")
+    if not isinstance(cases, list) or len(cases) != len(plan.seeds):
+        problems.append("suite cases do not match the frozen seed count")
+        return problems
+    expected_by_seed = {}
+    for child in expected_children:
+        seed = None
+        if "-s" in child:
+            try:
+                seed = int(child.rsplit("-s", 1)[1].split("-", 1)[0])
+            except ValueError:
+                seed = None
+        expected_by_seed[seed] = child
+    if set(expected_by_seed) != set(plan.seeds):
+        problems.append("expected children do not map exactly onto the frozen seeds")
+    seen_seeds = set()
+    for case in cases:
+        if not isinstance(case, dict):
+            problems.append("suite case is not an object")
+            continue
+        seed = case.get("seed")
+        seen_seeds.add(seed)
+        child = expected_by_seed.get(seed)
+        if child is None:
+            problems.append(f"suite case seed {seed!r} has no expected child")
+            continue
+        if case.get("source") != "live_engine":
+            problems.append(f"case {child}: source is not live_engine")
+        run_path = str(case.get("expected_run") or "")
+        if Path(run_path).name != child:
+            problems.append(f"case {child}: expected_run does not name the child")
+        if case.get("outcome") != "stop_condition_reached":
+            problems.append(f"case {child}: endpoint outcome is not stop_condition_reached")
+        if isinstance(wave_floor, int):
+            wave = case.get("maximum_wave")
+            if not isinstance(wave, int) or wave < wave_floor:
+                problems.append(f"case {child}: frozen stop_when wave was not reached")
+        cold_starts = case.get("cold_starts")
+        if not isinstance(cold_starts, list) or len(cold_starts) != 1:
+            problems.append(f"case {child}: exactly one single-cold start is required")
+        sessions = case.get("sessions")
+        if not isinstance(sessions, list) or len(sessions) != 1:
+            problems.append(f"case {child}: exactly one retained source session is required")
+            continue
+        session = sessions[0]
+        if not isinstance(session, dict) or Path(str(session.get("run", ""))).name != child:
+            problems.append(f"case {child}: session does not name the child")
+            continue
+        if session.get("primary_error") is not None:
+            problems.append(f"case {child}: session has a primary error")
+        failures = session.get("infrastructure_failures")
+        if failures not in ([], ["recording"]):
+            problems.append(f"case {child}: infrastructure failures are not the retained set: {failures!r}")
+        secondary = session.get("secondary_errors")
+        if on_arm and failures == ["recording"]:
+            if secondary != [_OLD_READER_SECONDARY]:
+                problems.append(f"case {child}: secondary errors are not exactly the retained old-reader error")
+            if case.get("status") != "failed":
+                problems.append(f"case {child}: the retained old-reader failure must keep the original failed status")
+        else:
+            if secondary not in ([], None):
+                problems.append(f"case {child}: unexpected secondary errors")
+            if case.get("status") != "completed":
+                problems.append(f"case {child}: status is not completed")
+        if session.get("cleanup_passed") is not True:
+            problems.append(f"case {child}: cleanup did not pass")
+        cleanup = session.get("cleanup")
+        if not isinstance(cleanup, dict) or any(cleanup.get(key) is not True for key in _CLEANUP_KEYS):
+            problems.append(f"case {child}: cleanup flags are not all complete")
+    if seen_seeds != set(plan.seeds):
+        problems.append("suite cases do not cover exactly the frozen seeds")
+    return problems
+
+
+def _child_revalidation(root: Path, name: str, metadata: dict, child: str) -> dict:
+    """Strict revalidation of one retained child using the production readers."""
+    from llm_vs_zombies import audit_compare, engine_replay, lifecycle_report
+    suite = Path(metadata["suite"])
+    directory = root / "experiments" / "runs" / child
+    audit_dir = directory / "audit"
+    record: dict = {"child": child, "ok": False, "checks": {}, "inputs": {}, "problems": []}
+    try:
+        facts, problems = _child_facts(root, name, metadata["mode"], child,
+                                       (metadata.get("probes") or {}).get("mode"),
+                                       metadata.get("expected_recorder_sha256"))
+        record["problems"].extend(problems)
+        expected_build = metadata.get("expected_recorder_sha256")
+        if facts is None or not facts.get("build") or facts.get("build") != expected_build:
+            record["problems"].append("recorder build does not match the frozen expected build")
+        for label, key in (("run_manifest", "run_manifest_sha256"),
+                           ("replay_initial", "replay_initial_sha256"),
+                           ("experiment_end", "experiment_end_sha256")):
+            record["inputs"][label] = (facts or {}).get(key)
+        audit = audit_compare.AuditLog(audit_dir, require_closed=True)
+        audit.verify_files()
+        record["checks"]["audit"] = {"frames": len(audit.frames), "files": len(audit.evidence_files)}
+        initial, steps = engine_replay._trace_steps(directory / "decisions" / "evaluation.jsonl")
+        engine_replay._validate_steps(initial, steps, audit)
+        record["checks"]["trace"] = {"steps": len([step for step in steps
+                                                   if step["request"].get("method")
+                                                   in engine_replay.STEP_METHODS])}
+        plan_path = plan_abspath(root, metadata)
+        report = lifecycle_report.report_for_run(directory, plan=plan_path,
+                                                 plan_binding=suite / "lifecycle-plan-binding.json")
+        problems_list = list(report.get("coverage", {}).get("full_window_problems") or [])
+        problems_list += list(report.get("coverage", {}).get("binding_problems") or [])
+        record["problems"].extend(problems_list)
+        record["checks"]["window"] = {"start": report["coverage"].get("window_start"),
+                                      "end": report["coverage"].get("window_end"),
+                                      "first_kill": report.get("first_kill", {}).get("proven")}
+        record["inputs"]["window_report"] = hashlib.sha256(
+            json.dumps(report, sort_keys=True).encode("utf-8")).hexdigest()
+        for label, target in (("audit_manifest", audit_dir / "manifest.json"),
+                              ("lifecycle_events", audit_dir / lifecycle_events.EVENTS_FILE),
+                              ("lifecycle_receipt", audit_dir / lifecycle_events.RECEIPT_FILE),
+                              ("source_trace", directory / "decisions" / "evaluation.jsonl"),
+                              ("suite_report", suite / "evaluation.json"),
+                              ("plan_binding", suite / "lifecycle-plan-binding.json")):
+            record["inputs"][label] = _digest_any(target)
+        record["ok"] = not record["problems"]
+    except Exception as error:
+        record["problems"].append(f"{type(error).__name__}: {error}")
+    return record
+
+
+def revalidation_document(root: Path, name: str, *, child_checker=None) -> dict:
+    """Pure computation of the current revalidation evidence; never writes."""
+    root = Path(root).resolve()
+    metadata = _read_prepared(root, name)
+    suite = Path(metadata["suite"])
+    plan = _load_plan(plan_abspath(root, metadata))
+    _, binding_problems = _validate_binding(suite, metadata)
+    document: dict = {"schema": REVALIDATION_SCHEMA, "run": name, "root": str(root),
+                      "tool": _validator_identity(root),
+                      "prepared_plan_sha256": metadata["plan"]["sha256"],
+                      "recorder_sha256": metadata.get("expected_recorder_sha256"),
+                      "binding_sha256": _digest_any(suite / "lifecycle-plan-binding.json"),
+                      "children": [], "problems": list(binding_problems), "ok": False}
+    try:
+        suite_report = json.loads((suite / "evaluation.json").read_bytes())
+        document["problems"].extend(_gate_problems(suite_report, metadata, plan,
+                                                   metadata["expected_children"]))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        document["problems"].append(f"suite evaluation.json is unreadable: {exc}")
+    checker = child_checker or _child_revalidation
+    for child in metadata["expected_children"]:
+        document["children"].append(checker(root, name, metadata, child))
+    document["ok"] = (not document["problems"] and bool(document["children"])
+                      and all(record.get("ok") for record in document["children"]))
+    return document
+
+
+def revalidate(root: Path, name: str) -> dict:
+    """Explicitly write the current revalidation document (no seal)."""
+    root = Path(root).resolve()
+    document = revalidation_document(root, name)
+    target = root / "experiments" / "runs" / name / "revalidation.json"
+    target.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+    return document
+
+
+def seal_revalidation(root: Path, name: str) -> dict:
+    """Seal the stored revalidation document; refuse invalid evidence."""
+    root = Path(root).resolve()
+    revalidation_path = root / "experiments" / "runs" / name / "revalidation.json"
+    if not revalidation_path.is_file():
+        raise ExperimentError("revalidation.json is missing; run revalidate first")
+    document = revalidation_document(root, name)
+    stored = json.loads(revalidation_path.read_bytes())
+    if stored != document:
+        raise ExperimentError("stored revalidation does not match the current evidence")
+    if document.get("ok") is not True:
+        raise ExperimentError("refusing to seal invalid revalidation: "
+                              + "; ".join(document.get("problems") or ["child checks failed"]))
+    core = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
+            "revalidation_sha256": sha256_file(revalidation_path),
+            "implementation_commit": _git_head(root),
+            "implementation_sources": document["tool"]["sources"]}
+    core["seal_id"] = sha256_bytes(canonical(core))
+    target = root / "experiments" / "runs" / name / "revalidation-seal.json"
+    if target.is_file():
+        existing = json.loads(target.read_bytes())
+        if existing != core:
+            raise ExperimentError("existing revalidation seal does not match the current evidence")
+        return existing
+    target.write_text(json.dumps(core, ensure_ascii=False, indent=2), encoding="utf-8")
+    return core
+
+
+def verify_revalidation(root: Path, name: str) -> dict:
+    """Read-only verification: never writes, creates or regenerates anything."""
+    root = Path(root).resolve()
+    revalidation_path = root / "experiments" / "runs" / name / "revalidation.json"
+    seal_path = root / "experiments" / "runs" / name / "revalidation-seal.json"
+    if not revalidation_path.is_file():
+        raise ExperimentError(f"revalidation.json is missing: {revalidation_path}")
+    if not seal_path.is_file():
+        raise ExperimentError(f"revalidation seal is missing: {seal_path}")
+    stored = json.loads(revalidation_path.read_bytes())
+    seal = json.loads(seal_path.read_bytes())
+    current = revalidation_document(root, name)
+    if stored != current:
+        raise ExperimentError("stored revalidation does not match the independent recomputation")
+    if current.get("ok") is not True:
+        raise ExperimentError("refusing to verify an invalid revalidation seal")
+    if not _is_hex40(seal.get("implementation_commit")):
+        raise ExperimentError("revalidation seal has no implementation commit identity")
+    if seal.get("implementation_sources") != current["tool"]["sources"]:
+        raise ExperimentError("revalidation seal validator sources differ from the recorded tool")
+    expected = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
+                "revalidation_sha256": sha256_file(revalidation_path),
+                "implementation_commit": seal.get("implementation_commit"),
+                "implementation_sources": seal.get("implementation_sources")}
+    expected["seal_id"] = sha256_bytes(canonical(expected))
+    if seal != expected:
+        raise ExperimentError("revalidation seal does not match the stored evidence hashes")
+    return {"schema": REVALIDATION_SEAL_SCHEMA, "run": name, "ok": True, "seal_id": seal["seal_id"]}
+
+
 def seal_check(root: Path, name: str) -> dict:
     """``check`` as used by the seal path (kept for call-site clarity)."""
     return check(root, name)
@@ -680,6 +1072,8 @@ def main(argv: list[str] | None = None) -> int:
                                 help="one source cold start per arm; no extra replay or recovery child")
     prepare_parser.add_argument("--expected-recorder-sha256", default=None,
                                 help="pin the recorder build every child audit must declare")
+    prepare_parser.add_argument("--hosted-build", type=Path, default=None,
+                                help="hosted-build receipt to verify and bind (script/DLL hashes)")
     prepare_parser.add_argument("--skip-build", action="store_true",
                                 help="record that the existing build is reused; never implicit")
     run_parser = sub.add_parser("run", help="run the real evaluation suite with the mode environment")
@@ -690,18 +1084,31 @@ def main(argv: list[str] | None = None) -> int:
     seal_parser.add_argument("--run", required=True)
     verify_parser = sub.add_parser("verify", help="read-only verification of an existing seal")
     verify_parser.add_argument("--run", required=True)
+    revalidate_parser = sub.add_parser("revalidate", help="strict offline revalidation of retained runs")
+    revalidate_parser.add_argument("--run", required=True)
+    seal_reval_parser = sub.add_parser("seal-revalidation", help="seal the revalidation evidence")
+    seal_reval_parser.add_argument("--run", required=True)
+    verify_reval_parser = sub.add_parser("verify-revalidation", help="read-only verification of the revalidation seal")
+    verify_reval_parser.add_argument("--run", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
             report = prepare(args.root, args.name, args.plan, args.mode, run_builds=not args.skip_build,
                              probes=args.probes, single_cold=args.single_cold,
-                             build_sha256=args.expected_recorder_sha256)
+                             build_sha256=args.expected_recorder_sha256,
+                             hosted_build=args.hosted_build)
         elif args.command == "run":
             report = run_experiment(args.root, args.name)
         elif args.command == "check":
             report = check(args.root, args.run)
         elif args.command == "seal":
             report = seal(args.root, args.run)
+        elif args.command == "revalidate":
+            report = revalidate(args.root, args.run)
+        elif args.command == "seal-revalidation":
+            report = seal_revalidation(args.root, args.run)
+        elif args.command == "verify-revalidation":
+            report = verify_revalidation(args.root, args.run)
         else:
             report = verify_seal(args.root, args.run)
     except ExperimentError as exc:

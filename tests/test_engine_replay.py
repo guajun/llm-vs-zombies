@@ -910,3 +910,13 @@ class ReplayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LifecycleGameIdentityTests(unittest.TestCase):
+    def test_recorder_lifecycle_capabilities_are_not_game_identity(self):
+        from llm_vs_zombies import engine_replay
+        game = {"schema": "lvz.audit.v1", "target": "x", "loaded_signatures_match": True}
+        manifest = dict(game, lifecycle_recording={"mode": "lvz.lifecycle-recording.v1", "enabled": False},
+                        lifecycle_probes={"mode": "lvz.lifecycle-probes.v1", "enabled": False})
+        self.assertEqual(engine_replay._game_identity(manifest), game)
+        self.assertEqual(engine_replay._game_identity(game), game)
