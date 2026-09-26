@@ -9,6 +9,7 @@
 - 真机结论均转抄自既有带日期的运行记录/评论/文档，本文件不产生新的真机通过结论。
 - 列含义：`实现`＝代码/合同在版本管理中；`离线验证`＝无游戏夹具/测试/静态检查；`真机验证`＝真实游戏运行记录；`证据可取回`＝证据位置，分为 `入库`（版本管理内）、`本地 run`（gitignored 的原实验检出运行目录，按运行名可找到）、`评论/报告留档`（数字已留档，原始文件未入库）。
 - 状态词汇：`已落实` / `进行中`（有 owner 与在途 PR）/ `待实施` / `有理由延期`。
+- 验收口径：**不阻塞独立开发 ≠ 满足验收/最终切换条件**。core#3 的公共结果合同与生产者封口是 #104 的待满足条件，#99/#105 的首次击杀是各自验收的待满足条件；它们不阻塞 core 提取与各仓独立开发，但不能用窗口化/真 fork 的非前置政策豁免，也不因相应 issue 创建或关闭而视为已满足。
 
 ## 0. 结论摘要
 
@@ -36,9 +37,9 @@
 | #110 离线死亡判定 | [PR #118](https://github.com/guajun/llm-vs-zombies/pull/118)，merge `389803f10bef8d1b2abdd7b1cee0b9328ac26332` | 2026-09-26 |
 | #111 阶段 D 真机验收 | [PR #117](https://github.com/guajun/llm-vs-zombies/pull/117)，merge `11917a78ed4f13f90f070e05d8330f9e5c40384a` | 2026-09-26 |
 | trajectory-core 离线包 | [PR #2](https://github.com/pvz-agent-lab/trajectory-core/pull/2)，merge `afb770ee36fdacbc06df6ef150c8258179b7dc73` | 2026-09-26 |
-| trajectory-core 目标/封口合同 | [core#3](https://github.com/pvz-agent-lab/trajectory-core/issues/3)，PR [#4](https://github.com/pvz-agent-lab/trajectory-core/pull/4)（在途，未合并） | 2026-09-26 |
+| trajectory-core 目标/封口合同 | [core#3](https://github.com/pvz-agent-lab/trajectory-core/issues/3)；[PR #4](https://github.com/pvz-agent-lab/trajectory-core/pull/4) OPEN，head `e68e092ed5d227327ec6c74d34569131704ae0b5`，本地 190 项与 8 个 CI job 通过，**未合并**；env/rollout 运行时对接未验证 | 2026-09-26 |
 | 迁移总任务与三个验收 issue | [#102](https://github.com/guajun/llm-vs-zombies/issues/102) / [#103](https://github.com/guajun/llm-vs-zombies/issues/103) / [#104](https://github.com/guajun/llm-vs-zombies/issues/104) / [#105](https://github.com/guajun/llm-vs-zombies/issues/105) | 2026-09-24 起 |
-| AvZ 薄 fork 治理 | [pvz-agent-lab/avz#1](https://github.com/pvz-agent-lab/avz/issues/1)（另一任务；本文件只引用） | OPEN |
+| AvZ 薄 fork 治理 | [pvz-agent-lab/avz#1](https://github.com/pvz-agent-lab/avz/issues/1)（另一任务；本文件只引用）；[avz PR #2](https://github.com/pvz-agent-lab/avz/pull/2) OPEN，按 review 修复中，**未合并** | OPEN |
 
 ## 2. P1 项
 
@@ -90,8 +91,8 @@
 
 | R# | #101 检查项 | 状态与证据 | 未完项 / 延期 | 唯一责任 |
 |---|---|---|---|---|
-| R14 | 代码已实现与真机证据已核验分别列出；检查历史运行能否满足真实托管与动作审计证据，缺什么补什么 | ✅ **代码实现**：托管脚本 [PR #85](https://github.com/guajun/llm-vs-zombies/pull/85)（`1b019acb…`）、状态落盘 [PR #86](https://github.com/guajun/llm-vs-zombies/pull/86)（`23dfe15d…`）、托管炮击审计 [PR #89](https://github.com/guajun/llm-vs-zombies/pull/89)（`9b00d703…`）、digest 真机对账修复 [PR #92](https://github.com/guajun/llm-vs-zombies/pull/92)（`40893d76…`）、协程双重恢复修复 [PR #90](https://github.com/guajun/llm-vs-zombies/pull/90)（`bad0ce2b…`）。**真机证据**：#99 四条正式轨迹（PR #107）每条 4 发 `hosted_fire`（tick 567、1168 各两发），同分支复跑一致；[[avz-script-hosting](avz-script-hosting.md) §8](avz-script-hosting.md) 记录严格 count/digest 对账 | 详见 R15。托管动作仍不是一等 `fire` 动作（无 request journal/不可重放），属协议扩展议题，不在 #84 原文范围 | #84（合并登记）；#99（运行证据） |
-| R15 | 在 #99 正式四轨迹中验收脚本动作覆盖与复跑；绝不因 #88 关闭自动推断所有真机测试通过 | ✅ #99 四条轨迹：对照/干预各原跑=复跑（`branches_reproduce=true`），`hosted_fire_count=4`/条；`hosted_fire`（脚本发炮）与 `action`（实验干预）在审计里分开记录，轨迹里只有后者是请求动作（[issue99-铲子同根分叉](issue99-铲子同根分叉.md) §6/§8）。#88 已关闭（根因 PR #90），但本项真机结论只以上述绑定构建哈希的运行与 #111 阶段 D（PR #117）为准 | 无（后续托管协议扩展另案） | #84；#99（证据）；#111（原生验收） |
+| R14 | 代码已实现与真机证据已核验分别列出；检查历史运行能否满足真实托管与动作审计证据，缺什么补什么 | ✅ **代码实现**：托管脚本 [PR #85](https://github.com/guajun/llm-vs-zombies/pull/85)（`1b019acb…`）、状态落盘 [PR #86](https://github.com/guajun/llm-vs-zombies/pull/86)（`23dfe15d…`）、托管炮击审计 [PR #89](https://github.com/guajun/llm-vs-zombies/pull/89)（`9b00d703…`）、digest 真机对账修复 [PR #92](https://github.com/guajun/llm-vs-zombies/pull/92)（`40893d76…`）、协程双重恢复修复 [PR #90](https://github.com/guajun/llm-vs-zombies/pull/90)（`bad0ce2b…`）。**真机证据**：#99 四条正式轨迹（PR #107）每条 4 发 `hosted_fire`（tick 567、1168 各两发），同分支复跑一致；[[avz-script-hosting](avz-script-hosting.md) §8](avz-script-hosting.md) 记录严格 count/digest 对账 | 详见 R15。托管动作不是一等 `fire` 动作：`hosted_fire` 记录不能作为请求动作再次提交或重放（无 request journal、无 `ordinal`）；冷重放通过**重新执行托管脚本**产生炮击并核对审计，不得既重跑脚本又重放日志造成重复发炮。这是请求动作重放层面的限制（`docs/avz-script-hosting.md` §8.6），属协议扩展议题，不在 #84 原文范围 | #84（合并登记）；#99（运行证据） |
+| R15 | 在 #99 正式四轨迹中验收脚本动作覆盖与复跑；绝不因 #88 关闭自动推断所有真机测试通过 | ✅ #99 四条轨迹：对照/干预各原跑=复跑（`branches_reproduce=true`），`hosted_fire_count=4`/条；`hosted_fire`（脚本发炮）与 `action`（实验干预）在审计里分开记录，轨迹里只有后者是请求动作（[issue99-铲子同根分叉](issue99-铲子同根分叉.md) §6/§8）；冷重放按"重新执行托管脚本 + 核对 `hosted_fire` 记录"通过，不把日志当请求动作重放。#88 已关闭（根因 PR #90），但本项真机结论只以上述绑定构建哈希的运行与 #111 阶段 D（PR #117）为准 | 无（后续托管协议扩展另案） | #84；#99（证据）；#111（原生验收） |
 
 ### 3.3 #99：薄数据闭环与验收口径
 
@@ -121,17 +122,17 @@
 
 ## 5. 未完成项与延期理由（汇总）
 
-| 未完成项 | 责任 | 延期/在途理由 | 阻塞迁移？ |
-|---|---|---|---|
-| A0/A1 焦点/光标档真机通过 | #50 | 需要交互式桌面会话才能让 `SetForegroundWindow`/`GetCursorPos` 成功；当前自动化不在交互桌面。可重跑取 `applied=true`，或由维护者明确缩减为 `wall` 档并接受结论边界 | 否（#103 首版不要求无窗口/独立桌面） |
-| A2/A3（≥300 s 长挂起、冻结挂起） | #50 | 需要放宽 pause 上界与 `process_snapshot --hold-seconds`；未实现 | 否 |
-| 版本化公共结果合同 | trajectory-core#3 | PR #4 在途；合同+负例+生产者封口由 core 交付，env/rollout 接入另跟踪 | 否（先 core 后接入） |
-| 正式生产者封口协议（无活动写入者） | trajectory-core#3 | 同 PR #4；core 只验证生产者回执，不伪造运行时事实 | 否 |
-| #100 路线矩阵与门槛替换证据 | #100 / pvz-env#1 / avz#1 | RFC 研究；#102 明确不阻塞短程串行迁移 | 否 |
-| AvZ 补丁盘点与 ADR | avz#1 | 另一个 Pi 在 `pvz-agent-lab/avz` 独立执行；本文件不重复盘点 | 否 |
-| #99/#105 正向首次击杀门槛 | #99 / #105 | #110 四轨迹离线无法证明全窗口绝对首杀（33 个未知直接消失）；#111 在新轨迹上已证明完整首杀，但不替代这两个 issue 自身验收 | **是方向性门槛，但 #102 明确不以未决的窗口化/真 fork 强加阻塞** |
-| #98 A/B/C 性能对照与固定窗口 | #98 | 独立 PERF 研究；先盘点时间戳覆盖，不能直接测量的成本不得强行给占比 | 否 |
-| 跨仓版本组合与旧入口退出 | #102 | #102 关闭条件之一，未完成 | 迁移本体后续 |
+| 未完成项 | 责任 | 延期/在途理由 | 是否阻塞独立开发 | 是否阻塞对应验收/最终切换 |
+|---|---|---|---|---|
+| A0/A1 焦点/光标档真机通过 | #50 | 需要交互式桌面会话才能让 `SetForegroundWindow`/`GetCursorPos` 成功；当前自动化不在交互桌面。可重跑取 `applied=true`，或由 #50 维护者明确收窄为 `wall` 档并接受结论边界 | 否 | 否——不在 #102/#103 已声明关闭条件内；#103 只要求在模式/隔离声明中不把窗口不可见等同于窗口无关（该推断已由 #100 更正） |
+| A2/A3（≥300 s 长挂起、冻结挂起） | #50 | 需要放宽 pause 上界与 `process_snapshot --hold-seconds`；未实现 | 否 | 否——未列入 #102/#103 门槛，属 #50 自身收窄项 |
+| 版本化公共结果合同 | trajectory-core#3 | [PR #4](https://github.com/pvz-agent-lab/trajectory-core/pull/4) OPEN（head `e68e092e…`，本地 190 项与 8 个 CI job 通过），**未合并**；env/rollout 运行时对接尚未验证 | 否（不阻塞 core 提取与各仓独立开发） | **是**——#104 的公共 schema/结果合同待满足；#102 关闭条件要求三项迁移验收有匹配版本证据 |
+| 正式生产者封口协议（无活动写入者） | trajectory-core#3 | 同 PR #4；core 只验证生产者回执，不伪造运行时事实 | 否 | **是**——#104 的正式封存生产者协议待满足，属 #102 关闭条件 |
+| #100 路线矩阵与门槛替换证据 | #100 / pvz-env#1 / avz#1 | RFC 研究，未选定路线；#102 明确其不是基础迁移前置 | 否 | 否——但若选定某路线并替换窗口验收门槛，#103 要求触发对应补验 |
+| AvZ 补丁盘点与 ADR | avz#1 | [avz PR #2](https://github.com/pvz-agent-lab/avz/pull/2) OPEN，按 review 修复中，**未合并**；本文件只回链，不重复盘点 | 否 | **是（最终切换条件）**——#102 要求四仓责任与版本组合明确；env 固定 AvZ 提交属 #103 验收内容 |
+| #99/#105 正向首次击杀门槛 | #99 / #105 | #110 四轨迹离线无法证明全窗口绝对首杀（33 个未知直接消失）；#111 在新轨迹上已证明完整首杀，但那是 #111 自身验收，且 #102/#111 明确 core 提取不等待首杀补证 | 否（#110/#111 与 core 提取已独立推进） | **是**——#99/#105 的正向门槛待满足，不能由 #110/#111 关闭替代，也不能用窗口化/真 fork 的非前置政策豁免 |
+| #98 A/B/C 性能对照与固定窗口 | #98 | 独立 PERF 研究；先盘点时间戳覆盖，不能直接测量的成本不得强行给占比 | 否 | 否——#102 明确非基础迁移前置 |
+| 跨仓版本组合与旧入口退出 | #102 | #102 关闭条件之一，未完成 | 否（各仓可独立开发并逐步固定版本） | **是**——即 #102 的最终切换条件 |
 
 ## 6. 本文件不改变的历史结论
 
