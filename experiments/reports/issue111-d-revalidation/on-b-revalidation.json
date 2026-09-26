@@ -1,0 +1,64 @@
+{
+  "schema": "lvz.stage-d-revalidation.v1",
+  "run": "issue111-d-hosted-v2-on-b",
+  "root": "C:\\Users\\MSI-NB\\Documents\\Codex\\work\\pi-issue111-stage-d",
+  "tool": {
+    "sources": {
+      "src/llm_vs_zombies/action_compare.py": "71482e151e2f5bf9e3e83bc4f9b8cec338124afe3627a71d32eef0340fa9a4a6",
+      "src/llm_vs_zombies/audit_compare.py": "7f56efdf1606667f6704f8330554c6418f86132e8ac35272b338714e633729d9",
+      "src/llm_vs_zombies/engine_replay.py": "c7a3e84ae9fd80acb2dac51c9c606a48c6f7445b3baa73f5ab9d45d514ee1aa9",
+      "src/llm_vs_zombies/evidence_codec.py": "d359b2409ebc169b12f110ec940e5ad3077b12524a8f504ec8a1ad345dfd43f5",
+      "src/llm_vs_zombies/records.py": "ff21a2a242c4c0e7f348b70b402cf0aa7bd38e7128d32ea98623da9a7daffa30",
+      "src/llm_vs_zombies/lifecycle_events.py": "52db0dc3b5b9c2e06a9e908f2f3588171cf75eb319d2876b77e02aa56518717c",
+      "src/llm_vs_zombies/lifecycle_report.py": "2cb603b40d1c8ca9f5581ba4ac59c4f06dbaad266c7918002ddcfb8d919ef9a0",
+      "src/llm_vs_zombies/lifecycle_compare.py": "d559d2a06f886b837926de33cf25c9a1de4a0e43846f8a655ef78c64a9c789c9",
+      "tools/issue111_lifecycle_experiment.py": "6f209791388bce19aa19b46ccc4326d99b7f798c8eabdac44d4cd914e6348354"
+    }
+  },
+  "prepared_plan_sha256": "57111c29abc788844294ddd861042ac572459b6ac01ac0abcd74f3e4021af62a",
+  "recorder_sha256": "a6e7dcf06060a4d3c3a87545b5e3044f2a47786b09cc2a293a42c9deeb9fb8ad",
+  "binding_sha256": "10d9673225507ad9c1285057896236aa7df20de0617157dd6f615db5d8d8f8dd",
+  "children": [
+    {
+      "child": "issue111-d-hosted-v2-on-b-s42-c0",
+      "ok": true,
+      "checks": {
+        "audit": {
+          "frames": 2402,
+          "files": 12
+        },
+        "trace": {
+          "steps": 13
+        },
+        "window": {
+          "start": {
+            "epoch": 3,
+            "revision": 5,
+            "tick": 0
+          },
+          "end": {
+            "epoch": 3,
+            "revision": 0,
+            "tick": 1201
+          },
+          "first_kill": true
+        }
+      },
+      "inputs": {
+        "run_manifest": "9c4ee6dc08c75923bbdfa4d1ae219eaf8bd9bc07677318658f5da91c77bdf131",
+        "replay_initial": "8a0611c76d4f22f812e6450ae91fc1ab84a863f7f8aedcc02097ebd478e03b9a",
+        "experiment_end": "9fdb89d6b90933e46e1aa46647172ad1d70ed4d306c9d6f9966b71b93d6e69ed",
+        "window_report": "936303de479b2ccdb43a441afce7c74003bff201dafa0a34aa8df9a852ba99ae",
+        "audit_manifest": "133f1afd8ae3ac78c2939d343b029182c9cc1b7937c9b815f5068dc73f2ff76e",
+        "lifecycle_events": "7ec5e8b612c2d189f6bdd14c4c879de384601b9b9401b875fa28d5f961cdcd70",
+        "lifecycle_receipt": "bb97a04494801fc82e4758cbc408c39c01c2912ce8acaf68d38c5e03bf1bf305",
+        "source_trace": "d4ddefec4809e6036a5af5ca8137f634e4320d507cccdf3a7e568ccef6003ad9",
+        "suite_report": "265cee3f12ed4d2fe5f29a2c340ff841e458dcf574774349c5115c6bceac3b24",
+        "plan_binding": "10d9673225507ad9c1285057896236aa7df20de0617157dd6f615db5d8d8f8dd"
+      },
+      "problems": []
+    }
+  ],
+  "problems": [],
+  "ok": true
+}

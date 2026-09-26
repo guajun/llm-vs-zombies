@@ -1,7 +1,7 @@
 {
   "schema": "lvz.stage-d-provenance.v2",
   "strict": true,
-  "tool_commit": "895f170a4858e6325961d94224b90e4521b54b9a",
+  "tool_commit": "6f04b8798003946a497f47a64bdd544f3f1f3582",
   "build_commit": "b15693714c84e74bff32f054a0d501c4e45252b1 (main; does NOT include PR117 7f06e73)",
   "arms": {
     "off-a": {
@@ -75,6 +75,28 @@
         "source_trace": "d4ddefec4809e6036a5af5ca8137f634e4320d507cccdf3a7e568ccef6003ad9",
         "revalidation": "a1d8982f1a299d79192fdef8136443ca903b709a4ba00161fe3fe630e7019d83"
       }
+    }
+  },
+  "strict_seals": {
+    "off-a": {
+      "implementation_commit": "6f04b8798003946a497f47a64bdd544f3f1f3582",
+      "strict_seal_sha256": "8264ec6469d8ef26f4003c607cbd6a6dca9721e1228bec818ce14feef5d94f63",
+      "revalidation_sha256": "762db6dad604f2abc4f5ef9ddeb3c21f514384c84b0aae57f6065ebf5aeb02b8"
+    },
+    "on-a": {
+      "implementation_commit": "6f04b8798003946a497f47a64bdd544f3f1f3582",
+      "strict_seal_sha256": "ec562289b0cf1975be4e0110ffde4cec7a380c5165c49c4f09a6506b8fd67552",
+      "revalidation_sha256": "2791e99ccfda6e54655cf2d9cc5b7baf306f8e8032bc8e276b9056e28802cbc0"
+    },
+    "off-b": {
+      "implementation_commit": "6f04b8798003946a497f47a64bdd544f3f1f3582",
+      "strict_seal_sha256": "4d62c505953c3c8d191dd8b8f1082021ffb57d86389724e603623d7607167378",
+      "revalidation_sha256": "599280a7192dd5ac0c13f67f76ef81de59b16001f86a49301127ceca19310f58"
+    },
+    "on-b": {
+      "implementation_commit": "6f04b8798003946a497f47a64bdd544f3f1f3582",
+      "strict_seal_sha256": "48910a2f24195c70b1ad85bea83579da73d846ce1ac63007b6e4445835424885",
+      "revalidation_sha256": "7b13b625db965291a13049f9c6fb96ed58eff2ba6deee01e95ee50643ea695c7"
     }
   }
 }
