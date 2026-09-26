@@ -2,7 +2,6 @@
   "schema": "lvz.stage-d-provenance.v2",
   "strict": true,
   "tool_commit": "6f04b8798003946a497f47a64bdd544f3f1f3582",
-  "build_commit": "b15693714c84e74bff32f054a0d501c4e45252b1 (main; does NOT include PR117 7f06e73)",
   "arms": {
     "off-a": {
       "original_status": "completed",
@@ -98,5 +97,8 @@
       "strict_seal_sha256": "48910a2f24195c70b1ad85bea83579da73d846ce1ac63007b6e4445835424885",
       "revalidation_sha256": "7b13b625db965291a13049f9c6fb96ed58eff2ba6deee01e95ee50643ea695c7"
     }
-  }
+  },
+  "native_base_commit": "b15693714c84e74bff32f054a0d501c4e45252b1",
+  "reviewed_native_close_fix": "7f06e73",
+  "build_identity": "Frozen hosted DLL a6e7dcf06060a4d3c3a87545b5e3044f2a47786b09cc2a293a42c9deeb9fb8ad; native base plus reviewed close fix and unchanged hosted script"
 }
