@@ -8,6 +8,8 @@
 `shovel(row,col)`（那是 `AShovel`，会把植物从草坪上铲掉）。实验用确定性的 AvZ 托管键控替代
 LLM，以隔离模型输出的不确定性。
 
+> **2026-09-26 证据身份补记（来自 #101 整改）**：本文记录的是 PR #107 开发期 `issue99-jd12r` 运行（`tree_id=529a2f4f…e447f`）。正式验收使用的是合并后的 `issue99-fc2` 运行与树：`experiments/trees/issue99-fc2-shovel-fork`，`tree_id=ce770e531a225234b53ac3b810bc3209e4417b257410605f105bc38b0bc90220`，seal `work/issue99-fc2-seal.json`（只读分析见 #110、trajectory-core PR #2）。两者结论一致（共同前缀 101、RNG 首差异 tick 101、语义首差异 tick 118、`gameplay_fork_demonstrated=true`），但运行身份、DLL/构建哈希、树 ID 与报告摘要不同，**不得互相充当复跑或封存证据**；本文历史结论不改写。
+
 ## 1. 冻结的实验计划
 
 计划基线：`main@c4d7e7387a99e27380dd70479d7c4f1d72d9c674`。两个计划文件只差"声明的动作"这
