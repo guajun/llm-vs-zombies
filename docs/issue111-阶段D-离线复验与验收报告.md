@@ -62,3 +62,16 @@ D 与 #111 仍未关闭，等待 principal 终审。
   experiment-end/audit/lifecycle/模式）、源码 trace + `_validate_steps`、冻结窗口/终点的
   `report_for_run`（无 full_window/binding problems）、suite gate 政策（仅允许已识别的旧读取器
   packaging 失败与 smoke 未验收项，其余失败拒绝）、以及工具身份（git head + 相关源码摘要）。
+
+
+## 最终提交与提交后只读验证（评审第 6 轮）
+
+- 实现提交（validator implementation）：`6f04b8798003946a497f47a64bdd544f3f1f3582`；证据提交：`06b6a859144dfffb109c208647047bf62505250d`（PR117 head）。
+- 四个臂的严格 seal 记录 implementation commit `6f04b87…` 与完整 validator 源码指纹；证据副本随仓库发布：
+  `experiments/reports/issue111-d-revalidation/<arm>-{revalidation,seal}.json`，摘要 `experiments/reports/issue111-d-provenance-v2.json`。
+- 最终 push 之后执行 `verify-revalidation`：off-a/on-a/off-b/on-b 全部 exit 0（只读，无写盘）。
+- 更早的弱 seal 作为历史保留：`*-weak-895f170.json`、`*-weak-f910aba.json`。
+
+### 已知剩余缺口
+
+- 未能提交一个“合成正例完整轨迹直接经过 `_child_revalidation`”的端到端测试：构造通过 `_validate_steps` 的合成 audit/trace 需要引擎调用审计写入器，本轮预算内未完成；生产 `_child_revalidation` 已在四条真实保留轨迹上完整执行并通过，门禁/seal/verify 的合成变异矩阵已覆盖。该正例测试是唯一未完成的请求项。
