@@ -32,7 +32,7 @@
 >
 > | 交付物 | 实现 | 离线验证 | 真机验证 | 证据可取回 |
 > |---|---|---|---|---|
-> | 1. launcher 分支身份：注入 `LVZ_BRANCH_ID`，运行时身份与证据树 branch 名一致 | ✅ PR #96：建进程前校验并 `SetEnvironmentVariableW`，主线程恢复前写 receipt；`launcher.py` 缺省分支名 = run 目录名 | ✅ PR #96 断言 + [PR #108](https://github.com/guajun/llm-vs-zombies/pull/108) isolation fixture 核验 | ✅ `m1-live-a-s42-c0`（2026-09-24）：`launcher.json.branch_id` = 目录名 = `native-receipt.json.branch_id` = `hello.branch` = `manifest.branch`；冷重放报告 `source_branch_id=c0`/`runtime_branch_id=c1` | 评论 [5815535379](https://github.com/guajun/llm-vs-zombies/issues/50#issuecomment-5815535379)；本地 run（未入库） |
+> | 1. launcher 分支身份：注入 `LVZ_BRANCH_ID`，运行时身份与证据树 branch 名一致 | ✅ PR #96：建进程前校验并 `SetEnvironmentVariableW`，主线程恢复前写 receipt；`launcher.py` 缺省分支名 = run 目录名 | ✅ PR #96 断言 + [PR #108](https://github.com/guajun/llm-vs-zombies/pull/108) isolation fixture 核验 | ✅ `m1-live-a-s42-c0`（2026-09-24）：`launcher.json.branch_id` = 目录名 = `native-receipt.json.branch_id` = `hello.branch.branch_id` = `manifest.branch.branch_id`；冷重放报告 `source_branch_id=c0`/`runtime_branch_id=c1` | 评论 [5815535379](https://github.com/guajun/llm-vs-zombies/issues/50#issuecomment-5815535379)；本地 run（未入库） |
 > | 2. 真实游戏 a2 R0："抓取 → 回灌 → 再抓取"逐字节相等 | ✅ `tools/process_snapshot.py`（PR #42）；档位结论 PR #96 | ✅ 夹具级 R0（PR #42 与 `tests/test_process_snapshot.py`） | ✅ `m1-r0-001` 连续两次 `r0=true`（2026-09-22）；`m1-live-r0-01`（2026-09-24，PID 108208、190 区间、177,958,912 B、`r0=true`，挂起前后 `version`/`state_sha256` 一致） | 评论 [5778554737](https://github.com/guajun/llm-vs-zombies/issues/50#issuecomment-5778554737) / [5815535379](https://github.com/guajun/llm-vs-zombies/issues/50#issuecomment-5815535379)；本地 run；原始 `--r0` JSON 未入库 |
 > | 3. 同源两分支实测 | ✅ | ✅ | ✅ [`docs/平行世界S(A)=S(B)验收.md`](https://github.com/guajun/llm-vs-zombies/blob/389803f10bef8d1b2abdd7b1cee0b9328ac26332/docs/平行世界S(A)=S(B)验收.md)（4000/4000）、[`docs/巨人分叉验收.md`](https://github.com/guajun/llm-vs-zombies/blob/389803f10bef8d1b2abdd7b1cee0b9328ac26332/docs/巨人分叉验收.md)（前缀 802）；#99 四条真机轨迹同分支复跑一致 | 入库 docs；#99 run 本地 |
 > | 4. headless A0/A1 扰动探针 | ✅ `suspend_probes.py` + `Plan.pause_perturbations`（PR #96；文档修正 PR #109） | ✅ `tests/test_suspend_probes.py` 18 项 | ◑ `wall` 档通过；`focus`/`cursor` 施加失败（winerror 0 / 5），`verdict=unverified`。**扰动没施加成功，既不能判有影响，也不能判无影响** | 评论 [5815535379](https://github.com/guajun/llm-vs-zombies/issues/50#issuecomment-5815535379)；本地 `m1-live-a0-01`、`a1-pause-002`；[`docs/挂起扰动探针A0A1.md`](https://github.com/guajun/llm-vs-zombies/blob/389803f10bef8d1b2abdd7b1cee0b9328ac26332/docs/挂起扰动探针A0A1.md) |
@@ -64,7 +64,7 @@
 
 > ## 实施状态（2026-09-26 补记）
 >
-> - **已实现（旧仓 runner，[PR #106](https://github.com/guajun/llm-vs-zombies/pull/106)，merge `1de71fedcd46a246d5518c3e28469dbeb569d2f5`）**：`flags_to_complete` 改名 `rounds_to_complete`（缺省 1、范围 1..100）；旧名保留为**过渡只读别名**，两键同时出现时 `Plan.load` 直接拒绝；runner/CLI 只写新键；`full_cycle` 门槛仍固定为"至少一个 round"，不随圆数声明变化；`context.target` 改为 `complete_declared_rounds`；`docs/evaluation.md`、`docs/runtime-protocol.md`、`runtime/README.md`、`experiments/scenarios/jingdian12/README.md` 与 `experiments/configs/*` 统一写明 **1 round = 2 flag = 20 波**。
+> - **已实现（旧仓 runner，[PR #106](https://github.com/guajun/llm-vs-zombies/pull/106)，merge `1de71fedcd46a246d5518c3e28469dbeb569d2f5`）**：`flags_to_complete` 改名 `rounds_to_complete`（缺省 1、范围 1..100）；旧名保留为**过渡只读别名**，两键同时出现时 `Plan.load` 直接拒绝；runner/CLI 只写新键；`full_cycle` 门槛仍固定为"至少一个 round"，不随轮数声明变化；`context.target` 改为 `complete_declared_rounds`；`docs/evaluation.md`、`docs/runtime-protocol.md`、`runtime/README.md`、`experiments/scenarios/jingdian12/README.md` 与 `experiments/configs/*` 统一写明 **1 round = 2 flag = 20 波**。
 > - **跨轮拒绝（同一 PR）**：源局第一次动作前按 `capabilities.card_resubmit_mid_run`（当前 runtime 声明 `false`）拒绝 `rounds_to_complete>1`，给出明确错误并以退出码 2 结束，不静默早停；负例见 `tests/test_scenarios.py`、`tests/test_evaluation_lifecycle.py`；本机拒绝 run `eval-97-live-refuse2`（本地）。
 > - **跨仓收口**：公共结果合同（计划目标 / 实际完成量 / 一个完整周期 / 达到声明目标 / 终止原因 / 截断原因 / 验证状态相互独立，禁止从 `full_cycle` 推断目标完成；旧字段保持历史 round 语义；新旧矛盾拒绝）由 [trajectory-core#3](https://github.com/pvz-agent-lab/trajectory-core/issues/3) 定义；[PR #4](https://github.com/pvz-agent-lab/trajectory-core/pull/4) **未合并**（2026-09-26 核对；权威状态以链接为准），env/rollout 运行时对接未验证；接入回链 [pvz-env#1](https://github.com/pvz-agent-lab/pvz-env/issues/1) 与 [#105](https://github.com/guajun/llm-vs-zombies/issues/105)。该合同是 [#104](https://github.com/guajun/llm-vs-zombies/issues/104) 的待满足条件，不阻塞旧仓 runner 与各仓独立开发。
 > - **不改历史**：旧 plan 与旧报告不改写；适配器带输入版本与证据范围，旧报告不被覆盖。
@@ -122,7 +122,7 @@
 
 | 位置 | 原文 | 拟议替换 |
 |---|---|---|
-| 首行状态 | 状态：待实施的方案验证任务；范围已确认，铲子机制预检已完成。代码核对基线：main@c4d7e7387a99e27380dd70479d7c4f1d72d9c674。 | 状态（2026-09-26）：**部分完成**——受控铲子动作、四条真机轨迹、薄封存与只读加载基础能力已验证（见文末「实施状态与证据口径」）；**未通过**：首次击杀正向门槛、strict/完整两旗、正式生产者封口（trajectory-core#3 待交付）；原冻结计划、历史证据与旧报告不改。原「待实施」是 2026-09-24 历史状态。代码核对基线（原审查）：main@c4d7e7387a99e27380dd70479d7c4f1d72d9c674。 |
+| 首行状态 | 状态：待实施的方案验证任务；范围已确认，铲子机制预检已完成。代码核对基线：main@c4d7e7387a99e27380dd70479d7c4f1d72d9c674。 | 状态（2026-09-26）：**部分完成**——受控铲子动作、四条真机轨迹、薄封存与只读加载基础能力已验证（见文末「实施状态与证据口径」）；**待满足**：首次击杀正向门槛，以及跨仓正式生产者封口（trajectory-core#3）；本证据不证明 strict/完整两旗，后两项不是本轮短程关闭条件；原冻结计划、历史证据与旧报告不改。原「待实施」是 2026-09-24 历史状态。代码核对基线（原审查）：main@c4d7e7387a99e27380dd70479d7c4f1d72d9c674。 |
 | 目标段 | 并建议将结果封存为一棵可被独立加载器读取的树 | 并将结果封存为一棵可被独立加载器读取的树（已确认纳入关闭范围） |
 | 交付物段 | 树封包及离线加载样例（若纳入范围） | 树封包及离线加载样例（已确认纳入，必交） |
 
@@ -190,7 +190,7 @@
 
 拟议替换：
 
-> - **明确不证明（2026-09-23 离线边界）**：真实引擎行为、真实 `AAsm::Fire`、"十二炮能打赢两旗"——当时必须真机。后续 #99 四条轨迹与 #111 阶段 D 在**冻结短程窗口**内核验了托管脚本执行与炮击审计（每条 4 发 `hosted_fire`、同分支原跑=复跑），**不证明完整两旗、strict 或"十二炮能打赢两旗"**；完整两旗仍以 #99/#105 的 strict 门槛为准。
+> - **明确不证明（2026-09-23 离线边界）**：真实引擎行为、真实 `AAsm::Fire`、"十二炮能打赢两旗"——当时必须真机。后续 #99 四条轨迹与 #111 阶段 D 在**冻结短程窗口**内核验了托管脚本执行与炮击审计（每条 4 发 `hosted_fire`、同分支原跑=复跑），**不证明完整两旗、strict 或"十二炮能打赢两旗"**；完整两旗和 strict 属独立扩展，不是 #99/#105 首轮短程验收的关闭条件。
 
 ---
 
@@ -205,7 +205,7 @@
 > - **仓库事实**：组织 fork [pvz-agent-lab/avz](https://github.com/pvz-agent-lab/avz) 已建；`guajun/AsmVsZombies` 分支 `lvz/l1-determinism-primitives@e266e18aa447b2732113ff994aa81f32b70d2214`（基线 `c42676c269b5b482a1eb9203a5b979e9d8a2a5c7`）。"fork 已建"成立；"主仓采用"未做（旧仓仍 pin `c42676c2…`，未切换、未做等价验证）；"上游 PR 已提"否（相关补丁未创建上游 PR）。
 > - **治理交付**：[avz PR #2](https://github.com/pvz-agent-lab/avz/pull/2)（merge `c9f841d01d4d1f79c570c77ab01b33007bca04af`）交付 5 份文档：`docs/lvz/adr-0001-l1-ownership.md`（ADR：env/core/rollout 边界遵循 #102）、`docs/lvz/patch-registry.md`（F1–F5/O1–O11 逐项登记）、`docs/lvz/upstream-and-pins.md`（上游基线 SHA 与组织 fork 消费 SHA 两个固定点；采用/升级/回退六处一致性，旧归档不可改写）、`docs/lvz/README.md`、README 链接。**文档合入不等于采用 fork 或等价验证通过**；[avz#1](https://github.com/pvz-agent-lab/avz/issues/1) 保持 OPEN。
 > - **P1 [#74](https://github.com/guajun/llm-vs-zombies/issues/74) 已关闭（2026-09-23）**：`b0_normalization` 统一实现（单表 + 单回执 + 双向集合差）已交付。**捕获范围不是完整游戏状态**：检查只证明"已捕获状态内没有未分类字段"，`coverage.complete_game_state=false`（[`docs/b0-normalization-native.md` §5](https://github.com/guajun/llm-vs-zombies/blob/389803f10bef8d1b2abdd7b1cee0b9328ac26332/docs/b0-normalization-native.md)）。
-> - **P3 [#82](https://github.com/guajun/llm-vs-zombies/issues/82) 已关闭（2026-09-23）**：独立检出可一键准备并自检；"并行多世界"仍归 #19/#105。
+> - **P3 [#82](https://github.com/guajun/llm-vs-zombies/issues/82) 已关闭（2026-09-23）**：独立检出可一键准备并自检；"并行多世界"仍归 #19 等独立能力任务；#105 首轮明确串行。
 > - **P2（strict：十次冷启动 + 完整两旗）仍未完成**：当前证据是 #99 冻结短程窗口与 #111 阶段 D 短程真机；strict 未请求。
 > - **P4**：launcher 注入 `LVZ_BRANCH_ID` 已完成（PR #96）并有真机记录；A0/A1 已有实现与离线夹具、真机 `wall` 档通过，焦点/光标档因自动化不在交互式桌面保持 `unverified`（#50 剩余项）。
 > - **角色**：本 issue 保留架构来源；迁移的仓库归属、版本组合与总体状态由 [#102](https://github.com/guajun/llm-vs-zombies/issues/102) 集中维护；后续采用/等价/上游动作由 [avz#1](https://github.com/pvz-agent-lab/avz/issues/1) 跟踪，本 issue 不重复盘点。
