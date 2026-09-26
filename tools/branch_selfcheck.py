@@ -507,8 +507,7 @@ def _limitations(real_game_run: bool) -> dict:
         "prerequisites": [
             "an a2 snapshot/restore implementation (N5, tools/process_snapshot.py): capture the sealed tree root "
             "image at a pause boundary and pass that image back to a live target",
-            "an executor named by --executor that launches the controlled target (launcher + pinned runtime build + "
-            "private profile), restores the root image, executes the sampled action sequence and returns per-tick "
+            "an executor named by --executor that launches the controlled target (launcher + pinned runtime build + chr(10)private profile), restores the root image, executes the sampled action sequence and returns per-tick "
             "audit states; pass the verify_r0 report verbatim as the run's restore evidence",
             "run identity equal to the sealed root identity: game, artifacts and runtime build must match, otherwise "
             "the sealed comparison is not the same root",

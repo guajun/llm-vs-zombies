@@ -692,6 +692,89 @@ def _seal_document(root: Path, name: str, *, allow_compress: bool = False) -> di
     return document
 
 
+REVALIDATION_SCHEMA = "lvz.stage-d-revalidation.v1"
+REVALIDATION_SEAL_SCHEMA = "lvz.stage-d-revalidation-seal.v1"
+
+
+def revalidate_child(root: Path, child: str) -> dict:
+    """Strict offline revalidation of one retained child run."""
+    from llm_vs_zombies import audit_compare, engine_replay
+    directory = root / "experiments" / "runs" / child
+    audit_dir = directory / "audit"
+    record = {"schema": REVALIDATION_SCHEMA, "run": child, "ok": False, "checks": {}, "inputs": {}}
+    try:
+        audit = audit_compare.AuditLog(audit_dir, require_closed=True)
+        audit.verify_files()
+        record["checks"]["audit"] = {"frames": len(audit.frames), "verified": True}
+        report = lifecycle_events.validate(audit_dir, require_close=True)
+        if report.get("status") != "valid":
+            raise ExperimentError("strict lifecycle validation is not valid: "
+                                  + "; ".join(report.get("problems") or []))
+        record["checks"]["lifecycle"] = {"status": "valid", "records": report["records"]["count"]}
+        initial, steps = engine_replay._trace_steps(directory / "decisions" / "evaluation.jsonl")
+        engine_replay._validate_steps(initial, steps, audit)
+        record["checks"]["trace"] = {"steps": len([s for s in steps if s["request"].get("method")
+                                                   in engine_replay.STEP_METHODS])}
+        for name, target in (("manifest.json", audit_dir / "manifest.json"),
+                             (lifecycle_events.EVENTS_FILE, audit_dir / lifecycle_events.EVENTS_FILE),
+                             (lifecycle_events.RECEIPT_FILE, audit_dir / lifecycle_events.RECEIPT_FILE),
+                             ("evaluation.json", directory / "evaluation.json")):
+            if target.is_file():
+                record["inputs"][name] = sha256_file(target)
+            elif (target.parent / (target.name + ".gz")).is_file():
+                record["inputs"][name] = sha256_file(target.parent / (target.name + ".gz"))
+        record["ok"] = True
+    except Exception as error:  # revalidation evidence must state its own failure
+        record["error"] = f"{type(error).__name__}: {error}"
+    path = root / "experiments" / "runs" / name if (root / "experiments" / "runs" / name).is_dir() else None
+    return record
+
+
+def revalidate(root: Path, name: str) -> dict:
+    root = Path(root).resolve()
+    metadata = _read_prepared(root, name)
+    document = {"schema": REVALIDATION_SCHEMA, "run": name, "root": str(root),
+                "prepared_plan_sha256": metadata["plan"]["sha256"],
+                "recorder_sha256": metadata.get("expected_recorder_sha256"),
+                "children": [], "ok": False}
+    for child in metadata["expected_children"]:
+        record = revalidate_child(root, child)
+        document["children"].append(record)
+    document["ok"] = all(record["ok"] for record in document["children"]) and bool(document["children"])
+    out = root / "experiments" / "runs" / name / "revalidation.json"
+    out.write_text(json.dumps(document, ensure_ascii=False, indent=2) + chr(10), encoding="utf-8")
+    return document
+
+
+def seal_revalidation(root: Path, name: str) -> dict:
+    root = Path(root).resolve()
+    revalidated = revalidate(root, name)
+    document = {"schema": REVALIDATION_SEAL_SCHEMA, "run": name,
+                "revalidation_sha256": sha256_file(root / "experiments" / "runs" / name / "revalidation.json"),
+                "children": revalidated["children"], "ok": revalidated["ok"]}
+    document["seal_id"] = sha256_bytes(canonical(document))
+    target = root / "experiments" / "runs" / name / "revalidation-seal.json"
+    if target.is_file():
+        existing = json.loads(target.read_bytes())
+        if existing != document:
+            raise ExperimentError("existing revalidation seal does not match the current evidence")
+        return existing
+    target.write_text(json.dumps(document, ensure_ascii=False, indent=2) + chr(10), encoding="utf-8")
+    return document
+
+
+def verify_revalidation(root: Path, name: str) -> dict:
+    root = Path(root).resolve()
+    target = root / "experiments" / "runs" / name / "revalidation-seal.json"
+    if not target.is_file():
+        raise ExperimentError(f"revalidation seal is missing: {target}")
+    existing = json.loads(target.read_bytes())
+    current = seal_revalidation(root, name)
+    if existing != current:
+        raise ExperimentError("revalidation seal does not match the current evidence")
+    return {"schema": REVALIDATION_SEAL_SCHEMA, "run": name, "ok": True, "seal_id": existing["seal_id"]}
+
+
 def seal_check(root: Path, name: str) -> dict:
     """``check`` as used by the seal path (kept for call-site clarity)."""
     return check(root, name)
@@ -760,6 +843,12 @@ def main(argv: list[str] | None = None) -> int:
     seal_parser.add_argument("--run", required=True)
     verify_parser = sub.add_parser("verify", help="read-only verification of an existing seal")
     verify_parser.add_argument("--run", required=True)
+    revalidate_parser = sub.add_parser("revalidate", help="strict offline revalidation of retained runs")
+    revalidate_parser.add_argument("--run", required=True)
+    seal_reval_parser = sub.add_parser("seal-revalidation", help="seal the revalidation evidence")
+    seal_reval_parser.add_argument("--run", required=True)
+    verify_reval_parser = sub.add_parser("verify-revalidation", help="read-only verification of the revalidation seal")
+    verify_reval_parser.add_argument("--run", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
@@ -773,6 +862,12 @@ def main(argv: list[str] | None = None) -> int:
             report = check(args.root, args.run)
         elif args.command == "seal":
             report = seal(args.root, args.run)
+        elif args.command == "revalidate":
+            report = revalidate(args.root, args.run)
+        elif args.command == "seal-revalidation":
+            report = seal_revalidation(args.root, args.run)
+        elif args.command == "verify-revalidation":
+            report = verify_revalidation(args.root, args.run)
         else:
             report = verify_seal(args.root, args.run)
     except ExperimentError as exc:

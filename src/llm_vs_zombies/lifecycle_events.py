@@ -70,7 +70,7 @@ PROBE_SITE_KINDS = {
     "recycle-commit": ("zombie_slot_recycle_commit", None),
 }
 _PROBE_SITE_KEYS = {"id", "va", "window_bytes", "bytes", "continuation_va"}
-_PROBES_CAPABILITY_KEYS = {"mode", "enabled", "record_schema", "probe_set", "session_id",
+_PROBES_CAPABILITY_KEYS = {"mode", "enabled", "record_schema", "event_schemas", "probe_set", "session_id",
                            "build", "sites", "patch_windows_evidence", "probe_counters", "healthy",
                            "pending_candidate", "active", "installed", "live_validated"}
 _PROBE_COUNTER_BASE_KEYS = {"captured", "queued", "delivered", "overflow", "wrong_thread",
@@ -618,7 +618,13 @@ def _probe_contract(manifest: dict, records: list[dict], *, live_prefix: bool = 
         if probe_events:
             problems.append("lifecycle probe records exist while the capability is disabled")
         return problems
-    _exact_keys(block, _PROBES_CAPABILITY_KEYS, "lifecycle_probes", problems)
+    required_keys = {key for key in _PROBES_CAPABILITY_KEYS if key != "event_schemas"}
+    missing_keys = sorted(required_keys - set(block))
+    unexpected_keys = sorted(set(block) - _PROBES_CAPABILITY_KEYS)
+    if missing_keys:
+        problems.append(f"lifecycle_probes is missing required keys: {missing_keys}")
+    if unexpected_keys:
+        problems.append(f"lifecycle_probes has unexpected keys: {unexpected_keys}")
     _require(block.get("record_schema") == PROBE_EVENT_SCHEMA,
              "lifecycle_probes record_schema must be lvz.lifecycle-event.v2", problems)
     # The merged native writer declares v2 through record_schema; the formal
@@ -967,30 +973,42 @@ def _cross_check_receipt_v2(receipt, capability: dict, records: list[dict], even
     total = counters.get("total")
     v1_count = kinds.get(KIND_INITIALIZATION, 0)
     v2_count = len(records) - v1_count
-    if isinstance(initialization, dict) and _is_int(initialization.get("persisted"))             and all(_is_int(value) for value in initialization.values()):
+    if isinstance(initialization, dict) and set(initialization) == {"persisted"}             and _is_int(initialization.get("persisted")):
+        require(initialization["persisted"] == v1_count,
+                "close receipt v2 initialization persisted does not match the v1 records")
+    elif isinstance(initialization, dict) and set(initialization) == _COUNTER_KEYS:
+        for key in ("captured", "delivered", "persisted"):
+            require(_is_int(initialization.get(key)), f"close receipt v2 initialization {key} must be an integer")
+        require(_is_int(initialization.get("captured")) and initialization.get("captured") >= v1_count,
+                "close receipt v2 initialization captured is smaller than the persisted records")
+        require(_is_int(initialization.get("delivered")) and initialization.get("delivered") >= v1_count,
+                "close receipt v2 initialization delivered is smaller than the persisted records")
         require(initialization.get("persisted") == v1_count,
                 "close receipt v2 initialization persisted does not match the v1 records")
         for key in ("overflow", "wrong_thread", "nesting_mismatch", "incomplete_events"):
-            if key in initialization:
-                require(initialization.get(key) == 0,
-                        f"close receipt v2 initialization counter {key} must be zero")
+            require(initialization.get(key) == 0,
+                    f"close receipt v2 initialization counter {key} must be zero")
     else:
-        problems.append("close receipt v2 initialization counters are incomplete")
-    if isinstance(probes, dict) and _is_int(probes.get("persisted"))             and all(_is_int(value) for value in probes.values()):
+        problems.append("close receipt v2 initialization counters are not the recorded compact or full shape")
+    if isinstance(probes, dict) and set(probes) == {"persisted"} and _is_int(probes.get("persisted")):
+        require(probes["persisted"] == v2_count,
+                "close receipt v2 probe persisted does not match the v2 records")
+    elif isinstance(probes, dict) and set(probes) == _PROBE_COUNTER_KEYS:
+        for key in ("captured", "delivered", "persisted"):
+            require(_is_int(probes.get(key)), f"close receipt v2 probe {key} must be an integer")
         require(probes.get("persisted") == v2_count,
                 "close receipt v2 probe persisted does not match the v2 records")
+        require(probes.get("captured") == probes.get("persisted"),
+                "close receipt v2 probe captured/persisted mismatch")
+        require(probes.get("delivered") == probes.get("persisted"),
+                "close receipt v2 probe delivered/persisted mismatch")
+        require(probes.get("queued") == 0, "close receipt v2 still has queued probe records")
         for key in ("overflow", "wrong_thread", "unmatched_commits", "pair_mismatch",
                     "overwritten_pending", "faults", "read_failed", "classify_refused",
                     "inactive_suppressed"):
-            if key in probes:
-                require(probes.get(key) == 0, f"close receipt v2 probe counter {key} must be zero")
-        if "queued" in probes:
-            require(probes.get("queued") == 0, "close receipt v2 still has queued probe records")
-        if "captured" in probes:
-            require(probes.get("captured") == probes.get("persisted"),
-                    "close receipt v2 probe captured/persisted mismatch")
+            require(probes.get(key) == 0, f"close receipt v2 probe counter {key} must be zero")
     else:
-        problems.append("close receipt v2 probe counters are incomplete")
+        problems.append("close receipt v2 probe counters are not the recorded compact or full shape")
     if isinstance(total, dict) and _exact_keys(total, _TOTAL_COUNTER_KEYS,
                                                "close receipt v2.counters.total", problems):
         require(total.get("records") == len(records) and total.get("persisted") == len(records),

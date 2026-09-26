@@ -284,6 +284,39 @@ class ProbeContractTests(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertFalse(any("Traceback" in problem for problem in report["problems"]))
 
+    def test_recorded_writer_shapes_and_receipt_mutations(self):
+        self.write(self.valid_events())
+        manifest = json.loads((self.audit / "manifest.json").read_bytes())
+        manifest["lifecycle_probes"].pop("event_schemas")
+        manifest_bytes = (json.dumps(manifest, separators=(",", ":"), sort_keys=True) + chr(10)).encode("utf-8")
+        (self.audit / "manifest.json").write_bytes(manifest_bytes)
+        receipt_path = self.audit / lifecycle_events.RECEIPT_FILE
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+        receipt["counters"]["initialization"] = {"persisted": 1}
+        receipt["counters"]["probes"] = {"persisted": 4}
+        receipt_path.write_text(json.dumps(receipt, separators=(",", ":"), sort_keys=True) + chr(10),
+                                encoding="utf-8")
+        report = lifecycle_events.validate(self.audit, require_close=True)
+        self.assertEqual(report["status"], "valid", report["problems"])
+        base = json.loads(receipt_path.read_text(encoding="utf-8"))
+        mutations = [
+            ("initialization partial", "initialization", {"persisted": 1, "captured": 1}),
+            ("probes unknown key", "probes", {"persisted": 4, "unknown": 0}),
+            ("full delivered mismatch", "probes",
+             dict(probe_counters(persisted=4), captured=4, delivered=3)),
+        ]
+        for label, section, value in mutations:
+            with self.subTest(case=label):
+                mutated = json.loads(json.dumps(base))
+                mutated["counters"][section] = value
+                receipt_path.write_text(json.dumps(mutated, separators=(",", ":"), sort_keys=True) + chr(10),
+                                        encoding="utf-8")
+                report = lifecycle_events.validate(self.audit, require_close=True)
+                self.assertEqual(report["status"], "failed", report["problems"])
+        receipt_path.write_text(json.dumps(base, separators=(",", ":"), sort_keys=True) + chr(10),
+                                encoding="utf-8")
+
     def test_wrong_phase_value_fails(self):
         self.write([v1_event(1), probe_event("zombie_phase_transition", 2,
                                              phase={"site": "phase-mowdown", "before": 0, "after": 99})])

@@ -997,6 +997,16 @@ def report_for_run(run: str | Path, *, require_closed: bool = True,
             "prerequisites": capture_first_kill["prerequisites"],
             "boundary_gate": report.get("first_kill"),
         }
+        if probes_enabled and lifecycle_report.get("status") == "valid":
+            report["capture_level"] = {
+                "death": "exact_store_phase_or_validated_applyburn_chain",
+                "removal": "exact_store_mdead",
+                "recycle": "exact_store_guard_commit_pair",
+                "reason": "validated lvz.lifecycle-event.v2 facts from the installed store probes; the "
+                          "ApplyBurn chain is only a death with matching locked callsite bytes and frame "
+                          "returns, and the full-window gate requires the frozen plan/endpoint proof",
+                "unimplemented_fact_classes": [],
+            }
     return report
 
 
@@ -1031,6 +1041,8 @@ def markdown_report(report: dict) -> str:
 def write_report(report: dict, *, json_path: str | Path | None = None,
                  markdown_path: str | Path | None = None) -> None:
     if json_path is not None:
+        Path(json_path).parent.mkdir(parents=True, exist_ok=True)
         Path(json_path).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if markdown_path is not None:
+        Path(markdown_path).parent.mkdir(parents=True, exist_ok=True)
         Path(markdown_path).write_text(markdown_report(report), encoding="utf-8")

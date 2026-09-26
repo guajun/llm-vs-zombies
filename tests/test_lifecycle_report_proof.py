@@ -120,14 +120,13 @@ def build_run(base: Path, *, with_receipt: bool = True, truncate: bool = False,
         (audit / lifecycle_events.RECEIPT_FILE).write_text(
             json.dumps(receipt, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8")
 
-    # Insert the probe-close audit event before recording_closed, as the real
-    # cleanup order does.
+    # Real writer order: recording_closed is followed by the declared footers,
+    # with lifecycle_probes_closed last.
     lines = [json.loads(line) for line in (audit / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     closing = lines.pop()
-    closed = {"schema": "lvz.audit.v1", "seq": closing["seq"], "kind": "lifecycle_probes_closed",
-              "version": closing["version"], "payload": health}
-    closing["seq"] += 1
-    lines += [closed, closing]
+    lines.append(closing)
+    lines.append({"schema": "lvz.audit.v1", "seq": closing["seq"] + 1,
+                  "kind": "lifecycle_probes_closed", "version": closing["version"], "payload": health})
     (audit / "events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in lines), encoding="utf-8")
 
     endpoint = endpoint_version or {"epoch": 1, "tick": 1, "revision": 0}
