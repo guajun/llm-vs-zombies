@@ -37,7 +37,7 @@
 | #110 离线死亡判定 | [PR #118](https://github.com/guajun/llm-vs-zombies/pull/118)，merge `389803f10bef8d1b2abdd7b1cee0b9328ac26332` | 2026-09-26 |
 | #111 阶段 D 真机验收 | [PR #117](https://github.com/guajun/llm-vs-zombies/pull/117)，merge `11917a78ed4f13f90f070e05d8330f9e5c40384a` | 2026-09-26 |
 | trajectory-core 离线包 | [PR #2](https://github.com/pvz-agent-lab/trajectory-core/pull/2)，merge `afb770ee36fdacbc06df6ef150c8258179b7dc73` | 2026-09-26 |
-| trajectory-core 目标/封口合同 | [core#3](https://github.com/pvz-agent-lab/trajectory-core/issues/3)；[PR #4](https://github.com/pvz-agent-lab/trajectory-core/pull/4) OPEN，head `e68e092ed5d227327ec6c74d34569131704ae0b5`，本地 190 项与 8 个 CI job 通过，**未合并**；env/rollout 运行时对接未验证 | 2026-09-26 |
+| trajectory-core 目标/封口合同 | [core#3](https://github.com/pvz-agent-lab/trajectory-core/issues/3)；[PR #4](https://github.com/pvz-agent-lab/trajectory-core/pull/4) OPEN，**未合并**（2026-09-26 09:10Z 观察 head `c62f308e…`，此前 `e68e092e…`；head 持续更新，以 PR 页面为准）；本地 190 项与 8 个 CI job 通过；env/rollout 运行时对接未验证 | 2026-09-26 |
 | 迁移总任务与三个验收 issue | [#102](https://github.com/guajun/llm-vs-zombies/issues/102) / [#103](https://github.com/guajun/llm-vs-zombies/issues/103) / [#104](https://github.com/guajun/llm-vs-zombies/issues/104) / [#105](https://github.com/guajun/llm-vs-zombies/issues/105) | 2026-09-24 起 |
 | AvZ 薄 fork 治理 | [pvz-agent-lab/avz#1](https://github.com/pvz-agent-lab/avz/issues/1)（另一任务；本文件只引用）；[avz PR #2](https://github.com/pvz-agent-lab/avz/pull/2) OPEN，按 review 修复中，**未合并** | OPEN |
 
@@ -126,7 +126,7 @@
 |---|---|---|---|---|
 | A0/A1 焦点/光标档真机通过 | #50 | 需要交互式桌面会话才能让 `SetForegroundWindow`/`GetCursorPos` 成功；当前自动化不在交互桌面。可重跑取 `applied=true`，或由 #50 维护者明确收窄为 `wall` 档并接受结论边界 | 否 | 否——不在 #102/#103 已声明关闭条件内；#103 只要求在模式/隔离声明中不把窗口不可见等同于窗口无关（该推断已由 #100 更正） |
 | A2/A3（≥300 s 长挂起、冻结挂起） | #50 | 需要放宽 pause 上界与 `process_snapshot --hold-seconds`；未实现 | 否 | 否——未列入 #102/#103 门槛，属 #50 自身收窄项 |
-| 版本化公共结果合同 | trajectory-core#3 | [PR #4](https://github.com/pvz-agent-lab/trajectory-core/pull/4) OPEN（head `e68e092e…`，本地 190 项与 8 个 CI job 通过），**未合并**；env/rollout 运行时对接尚未验证 | 否（不阻塞 core 提取与各仓独立开发） | **是**——#104 的公共 schema/结果合同待满足；#102 关闭条件要求三项迁移验收有匹配版本证据 |
+| 版本化公共结果合同 | trajectory-core#3 | [PR #4](https://github.com/pvz-agent-lab/trajectory-core/pull/4) OPEN，**未合并**（2026-09-26 观察 head `c62f308e…`、持续更新；本地 190 项与 8 个 CI job 通过）；env/rollout 运行时对接尚未验证 | 否（不阻塞 core 提取与各仓独立开发） | **是**——#104 的公共 schema/结果合同待满足；#102 关闭条件要求三项迁移验收有匹配版本证据 |
 | 正式生产者封口协议（无活动写入者） | trajectory-core#3 | 同 PR #4；core 只验证生产者回执，不伪造运行时事实 | 否 | **是**——#104 的正式封存生产者协议待满足，属 #102 关闭条件 |
 | #100 路线矩阵与门槛替换证据 | #100 / pvz-env#1 / avz#1 | RFC 研究，未选定路线；#102 明确其不是基础迁移前置 | 否 | 否——但若选定某路线并替换窗口验收门槛，#103 要求触发对应补验 |
 | AvZ 补丁盘点与 ADR | avz#1 | [avz PR #2](https://github.com/pvz-agent-lab/avz/pull/2) OPEN，按 review 修复中，**未合并**；本文件只回链，不重复盘点 | 否 | **是（最终切换条件）**——#102 要求四仓责任与版本组合明确；env 固定 AvZ 提交属 #103 验收内容 |
