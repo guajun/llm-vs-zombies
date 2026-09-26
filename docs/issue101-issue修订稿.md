@@ -56,6 +56,12 @@
 
 **动作：(a) 在正文顶部（标题下方）加当前状态指针，并标明「现象/影响/建议修法/验收」为 2026-09-24 历史问题描述；(b) 文末追加「实施状态」段**（旧字段/旧报告按原文保留）：
 
+**(a) 顶部指针（拟议文字）**
+
+> **当前状态（2026-09-26）**：runner 侧已完成（[PR #106](https://github.com/guajun/llm-vs-zombies/pull/106) 改名 `rounds_to_complete`、过渡只读别名、新旧矛盾拒绝、跨轮显式拒绝与负例）；版本化公共结果合同由 [trajectory-core#3](https://github.com/pvz-agent-lab/trajectory-core/issues/3) 承接（[PR #4](https://github.com/pvz-agent-lab/trajectory-core/pull/4) 未合并，2026-09-26 核对；状态以链接为准）。以下「现象 / 影响 / 建议修法 / 验收」是 **2026-09-24 的历史问题描述**，用于溯源，不应重复实施；实施状态见文末「实施状态（2026-09-26 补记）」。
+
+**(b) 文末实施状态段**
+
 > ## 实施状态（2026-09-26 补记）
 >
 > - **已实现（旧仓 runner，[PR #106](https://github.com/guajun/llm-vs-zombies/pull/106)，merge `1de71fedcd46a246d5518c3e28469dbeb569d2f5`）**：`flags_to_complete` 改名 `rounds_to_complete`（缺省 1、范围 1..100）；旧名保留为**过渡只读别名**，两键同时出现时 `Plan.load` 直接拒绝；runner/CLI 只写新键；`full_cycle` 门槛仍固定为"至少一个 round"，不随圆数声明变化；`context.target` 改为 `complete_declared_rounds`；`docs/evaluation.md`、`docs/runtime-protocol.md`、`runtime/README.md`、`experiments/scenarios/jingdian12/README.md` 与 `experiments/configs/*` 统一写明 **1 round = 2 flag = 20 波**。
@@ -196,7 +202,7 @@
 
 > ## 当前状态（2026-09-26，以此为准）
 >
-> - **仓库事实**：组织 fork [pvz-agent-lab/avz](https://github.com/pvz-agent-lab/avz) 已建；`guajun/AsmVsZombies` 分支 `lvz/l1-determinism-primitives@e266e18aa447b2732113ff994aa81f32b70d2214`（基线 `c42676c2…`）。"fork 已建"成立；"主仓采用"未做（旧仓仍 pin `c42676c2…`，未切换、未做等价验证）；"上游 PR 已提"否（相关补丁未创建上游 PR）。
+> - **仓库事实**：组织 fork [pvz-agent-lab/avz](https://github.com/pvz-agent-lab/avz) 已建；`guajun/AsmVsZombies` 分支 `lvz/l1-determinism-primitives@e266e18aa447b2732113ff994aa81f32b70d2214`（基线 `c42676c269b5b482a1eb9203a5b979e9d8a2a5c7`）。"fork 已建"成立；"主仓采用"未做（旧仓仍 pin `c42676c2…`，未切换、未做等价验证）；"上游 PR 已提"否（相关补丁未创建上游 PR）。
 > - **治理交付**：[avz PR #2](https://github.com/pvz-agent-lab/avz/pull/2)（merge `c9f841d01d4d1f79c570c77ab01b33007bca04af`）交付 5 份文档：`docs/lvz/adr-0001-l1-ownership.md`（ADR：env/core/rollout 边界遵循 #102）、`docs/lvz/patch-registry.md`（F1–F5/O1–O11 逐项登记）、`docs/lvz/upstream-and-pins.md`（上游基线 SHA 与组织 fork 消费 SHA 两个固定点；采用/升级/回退六处一致性，旧归档不可改写）、`docs/lvz/README.md`、README 链接。**文档合入不等于采用 fork 或等价验证通过**；[avz#1](https://github.com/pvz-agent-lab/avz/issues/1) 保持 OPEN。
 > - **P1 [#74](https://github.com/guajun/llm-vs-zombies/issues/74) 已关闭（2026-09-23）**：`b0_normalization` 统一实现（单表 + 单回执 + 双向集合差）已交付。**捕获范围不是完整游戏状态**：检查只证明"已捕获状态内没有未分类字段"，`coverage.complete_game_state=false`（[`docs/b0-normalization-native.md` §5](https://github.com/guajun/llm-vs-zombies/blob/389803f10bef8d1b2abdd7b1cee0b9328ac26332/docs/b0-normalization-native.md)）。
 > - **P3 [#82](https://github.com/guajun/llm-vs-zombies/issues/82) 已关闭（2026-09-23）**：独立检出可一键准备并自检；"并行多世界"仍归 #19/#105。
