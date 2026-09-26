@@ -14,10 +14,14 @@
 python tools/issue110_deaths.py --output work/issue110-fc2-review
 ```
 
-输出目录必须不存在；工具拒绝在原 `experiments/runs` 或 `experiments/trees` 内写报告。
+输出目录必须不存在（`exist_ok=False`），工具拒绝在原 `experiments/runs` 或 `experiments/trees` 内写报告，
+因此不会覆盖既有 sealed/final/acceptance 报告；每次复现都写新目录。
 可用 `--root <旧检出根>` 读取另一位置的原始证据；旧 seal 的相对路径按该根解析。
 命令完成四条全窗口分析，输出 `report.json`、`report.md`、`SHA256SUMS.json`。
 缺失输入、身份不符、原生边界不完整以失败退出并保留诊断；不以新游戏运行替代缺失输入。
+分析无法进行时写 `failure.json`；能生成报告但任一轨迹 `status=failed` 时，`delivery_status=failed`，
+`report.md` 以“离线分析失败”开头并逐条列出失败轨迹、原因与证据坐标，进程退出非零。
+报告不含运行时间戳；同一检出、同一封存输入重复运行应产生逐字节一致的 `report.json` / `report.md`。
 退出 0 表示分析交付完成，**不表示首次击杀门槛通过**。
 
 ## 输入身份和保护
@@ -136,9 +140,11 @@ $env:PYTHONPATH='src;tests'
 python -m unittest tests.test_issue110_deaths tests.test_issue99_shovel_fork tests.test_tree_evidence tests.test_evidence_codec tests.test_audit_compare -q
 ```
 
-82 项通过：18 项新增行为夹具及 64 项现有相关回归。覆盖正常死亡后延迟释放、无死亡证据离场、
-同槽代次复用、初态已死亡/已消失、同 tick pre/post 与 revision、立即消失、同边界多个候选、
-缺字段/身份、未知状态、断流/调用跳号、数量相同但身份不同、缺输入与输出不可覆盖。
+84 项通过：20 项新增行为夹具及 64 项现有相关回归（本页渲染修复后的最终语义；原提交流为 82 项）。
+覆盖正常死亡后延迟释放、无死亡证据离场、同槽代次复用、初态已死亡/已消失、同 tick pre/post 与 revision、
+立即消失、同边界多个候选、缺字段/身份、未知状态、断流/调用跳号、数量相同但身份不同、缺输入与输出不可覆盖；
+另覆盖失败轨迹以“离线分析失败”列出原因和坐标而成功轨迹不误报。在含 #111 回归的最新 main 上，
+同一命令因 `tests.test_audit_compare` 比原基线多 1 项而为 85 项。
 
 本机最终派生报告位于 `work/issue110-fc2-final/report.json`、`report.md`；摘要见同目录 `SHA256SUMS.json`。
 报告绑定源 seal/tree_id、逐文件输入 SHA256、规则版本 `lvz.issue110-death-stage.v2`、分析器提交及源码/读取器摘要。
